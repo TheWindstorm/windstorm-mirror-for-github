@@ -463,13 +463,18 @@ def comes_back_by_itself(dry=False):
     if system()[0] == "darwin":
         # Seen on a Mac (contract C9): when the system logs this account in by itself after a restart, the
         # launch agents come back with no one at the keyboard. FileVault on turns that automatic login off.
+        # Two facts only are kept from the automatic-login setting: is it set, and is it this person's own
+        # account. It may name another person's account on a shared Mac; that name is never printed or kept.
         auto = run(["defaults", "read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"])
+        auto_set = auto.returncode == 0 and bool(auto.stdout.strip())
+        auto_mine = auto_set and auto.stdout.strip() == getpass.getuser()
+        del auto
         vault = run(["fdesetup", "status"])
-        if (auto.returncode == 0 and auto.stdout.strip() == getpass.getuser()
-                and "FileVault is Off" in vault.stdout):
+        if auto_mine and "FileVault is Off" in vault.stdout:
             return True, ""
-        return False, (f"On a Mac, {NO_LOGIN_NOTE}: a launch agent runs only in a login session, and this Mac "
-                       "does not log you in by itself after a restart"
+        why = ("automatic login is set for another account, not yours" if auto_set and not auto_mine
+               else "this Mac does not log you in by itself after a restart")
+        return False, (f"On a Mac, {NO_LOGIN_NOTE}: a launch agent runs only in a login session, and {why}"
                        + (" (FileVault is on)" if "FileVault is On" in vault.stdout else "") + ".")
     state = linger_state()
     if state == "yes":

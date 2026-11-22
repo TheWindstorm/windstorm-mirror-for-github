@@ -470,6 +470,8 @@ def files_holding(root, needle):
                     self.assertFalse(back, (auto, vault))
                     self.assertIn(mirror.NO_LOGIN_NOTE, note)
                     self.assertEqual("(FileVault is on)" in note, vault)
+                    self.assertEqual("another account" in note, auto == "someone-else")
+                    self.assertNotIn("someone-else", note)      # another person's account name is never said
                 self.assertFalse([c for c in h.calls if c[0] not in ("defaults", "fdesetup")], "it changed something")
         finally:
             mirror.system = saved
