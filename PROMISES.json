@@ -260,6 +260,20 @@
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M19",
+   "seen": "2026-11-22, in this repository: the G1.7 test had never run (nested in a helper after its return) while the plan check passed on its name. Once that check was fixed, a skip mark and a later empty test of the same name still got through every gate, here and in CI, on the real suite.",
+   "promise": "A proof counts only when the suite's own runner saw it pass: no test hidden by nesting, renaming, an if False, a skip mark, a later one of the same name, or as text; a skip counts as not run here only on a true condition of that machine, and every proof passes on at least one CI job.",
+   "codon": "T1",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_the_gate_refuses_every_way_a_test_can_hide",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

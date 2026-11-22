@@ -1897,7 +1897,7 @@ class Promises(unittest.TestCase):
         self.doc = jload(os.path.join(ROOT, "PROMISES.json"))
         self.rows = self.doc["rows"]
         self.version = v(version())
-        self.tests = set(re.findall(r"def (test_[A-Za-z0-9_]+)\(", fread(os.path.abspath(__file__))))
+        self.tests = set(collected_tests())          # tests unittest runs, not text that looks like one
         self.plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
 
     def test_PROMISES_every_row_is_whole_and_its_codon_is_in_the_plan(self):
@@ -1941,14 +1941,66 @@ class Strand(unittest.TestCase):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
         to_build = set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", plan))
-        # A test counts only when unittest runs it: a method of a TestCase here, not text that looks like one.
-        real = {n for c in list(globals().values()) if isinstance(c, type) and issubclass(c, unittest.TestCase)
-                for n in unittest.defaultTestLoader.getTestCaseNames(c) if re.match(r"test_(?:G|INV)", n)}
+        real = set(collected_tests())
+        codon_tests = {n for n in real if re.match(r"test_(?:G|INV)", n)}
         self.assertEqual(to_build & real, set(), "a test marked 'to build' exists: remove the mark")
         if to_build:
             self.assertEqual(version(), "0.0.0", "a proof may be marked 'to build' only while nothing is released")
         self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
-        self.assertEqual(real - named, set(), "tests with no codon in the plan")
+        self.assertEqual(codon_tests - named, set(), "tests with no codon in the plan")
+
+    def test_the_gate_refuses_every_way_a_test_can_hide(self):
+        """M19: one real test, hidden each way a sister lane found, in a throwaway copy of the suite. The gate
+        (`--gate-only`) must refuse each one, and accept the copy left as it is."""
+        name = "test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login"
+        src = fread(os.path.abspath(__file__))
+        head = f"    def {name}(self):\n"
+        start = src.index(head)
+        end = src.index("\n\n\n", start) + 1
+        body, rest = src[start:end], src[:start] + src[end:]
+        indented = "".join("    " + line if line.strip() else line for line in body.splitlines(True))
+        skip_inside = head + '        raise unittest.SkipTest("no real pinned Gitea for this system")\n'
+        q3 = '"' * 3
+        as_text = "\n_OLD = " + q3 + "\n" + body.replace(q3, "'" * 3) + q3 + "\n\n\nclass G2(unittest.TestCase):"
+        cases = {
+            "left as it is": src,
+            "nested in a helper after its return":
+                rest.replace("    return hits, read\n", "    return hits, read\n\n" + body, 1),
+            "renamed so the runner does not collect it": src.replace(head, head.replace("def test_", "def check_"), 1),
+            "under if False": src[:start] + "    if False:\n" + indented + src[end:],
+            "skip-marked, any reason": src.replace(head, "    @unittest.skip('later')\n" + head, 1),
+            "skip-marked with an honest-sounding reason":
+                src.replace(head, "    @unittest.skip('no real pinned Gitea for this system')\n" + head, 1),
+            "skipped inside with an honest reason": src.replace(head, skip_inside, 1),
+            "shadowed by a later empty one": src[:end] + head + "        pass\n\n" + src[end:],
+            "left as text in a string": rest.replace("\nclass G2(unittest.TestCase):", as_text, 1),
+        }
+        env = {k: val for k, val in os.environ.items() if k != "WSM_TEST_REPORT"}
+        for case, text in cases.items():
+            self.assertTrue(case == "left as it is" or text != src, f"{case}: the case was not planted")
+            with tempfile.TemporaryDirectory(prefix="wsm-gate-") as d:
+                for f in ("scripts", "skills", "docs", ".claude-plugin", "DNA-STRAND-MASTER-PLAN.md", "PROMISES.json",
+                          "README.md", "CHANGELOG.md"):
+                    if os.path.exists(os.path.join(ROOT, f)):
+                        os.symlink(os.path.join(ROOT, f), os.path.join(d, f))
+                os.makedirs(os.path.join(d, "tests"))
+                os.symlink(os.path.join(ROOT, "tests", "fake_github.py"), os.path.join(d, "tests", "fake_github.py"))
+                copy = os.path.join(d, "tests", "test_mirror.py")
+                with open(copy, "w", encoding="utf-8") as f:
+                    f.write(text)
+                r = subprocess.run([sys.executable, "-I", copy, "--gate-only", name], capture_output=True, text=True,
+                                   env=env, stdin=subprocess.DEVNULL, timeout=300)
+                said = r.stdout + r.stderr[-2000:]
+                if case == "left as it is":
+                    self.assertEqual(r.returncode, 0, said)
+                elif case == "skipped inside with an honest reason" and _no_gitea_here():
+                    # So it is here (no real Gitea in this account): "not run here", never a pass. In CI the
+                    # condition never holds, so there it is refused, and the join needs a pass on some job.
+                    self.assertEqual(r.returncode, 0, said)
+                    self.assertIn("Not run here (1)", r.stdout, said)
+                else:
+                    self.assertNotEqual(r.returncode, 0, f"{case}: the gate let it through\n{said}")
+                    self.assertIn("GATE:", r.stdout, f"{case}: refused, but not by the gate\n{said}")
 
     def test_no_codon_is_used_twice_in_the_plan(self):
         import collections
@@ -1967,5 +2019,173 @@ class Package(unittest.TestCase):
             self.assertIn("Nothing here can be installed yet", fread(os.path.join(ROOT, "README.md")))
 
 
+# ------------------------------------------------------------------ the gate: what counts as a proof (M19)
+#
+# A proof named in the plan counts only when this runner saw it pass. The suite itself can hide a test six ways
+# (nested in a helper, renamed, under `if False:`, skipped, shadowed by a later one of the same name, or left as
+# text in a string), so the gate does not trust the file's text, the test's name, or "OK":
+#   - shape_problems() reads the file and refuses a name defined twice, two classes of one name, and a test-like
+#     def anywhere but directly in a TestCase class;
+#   - the runner records each test's outcome; a skip mark (unittest's decorator) is refused whatever its reason;
+#   - a skip raised inside a test counts as "not run here" only when its reason is in HONEST_SKIPS and that
+#     condition holds on this machine right now; in CI the conditions never hold, so every skip there fails;
+#   - `--join` reads every CI job's report and needs each proof to have passed on at least one job.
+# The self-test (Strand.test_the_gate_refuses_every_way_a_test_can_hide) plants each case and must see it refused.
+
+def _no_gitea_here():
+    return not os.environ.get("WSM_REQUIRE_GITEA") and not real_gitea()
+
+
+def _no_lfs_here():
+    return not os.environ.get("WSM_REQUIRE_GITEA") and not mirror.has_git_lfs()
+
+
+HONEST_SKIPS = {"no real pinned Gitea for this system": _no_gitea_here, "no git lfs here": _no_lfs_here}
+
+
+def collected_tests():
+    """{name: class} for every test method unittest collects from this module."""
+    return {n: c for c in list(globals().values()) if isinstance(c, type) and issubclass(c, unittest.TestCase)
+            for n in unittest.defaultTestLoader.getTestCaseNames(c)}
+
+
+def plan_proofs():
+    plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
+    named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
+    return named - set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", plan))
+
+
+def shape_problems(path):
+    import ast
+    tree_ = ast.parse(fread(path))
+    out, classes, direct = [], set(), set()
+    for n in tree_.body:
+        if isinstance(n, ast.ClassDef):
+            if n.name in classes:
+                out.append(f"two classes are named {n.name}")
+            classes.add(n.name)
+            seen = set()
+            for m in n.body:
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    direct.add(id(m))
+                    if m.name in seen:
+                        out.append(f"{n.name}.{m.name} is defined twice: the later one hides the first")
+                    seen.add(m.name)
+    for node in ast.walk(tree_):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+                and id(node) not in direct):
+            out.append(f"{node.name} (line {node.lineno}) is not where the runner can collect it")
+    return out
+
+
+class Recorder(unittest.TextTestResult):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.outcome = {}
+
+    def _set(self, test, what):
+        name = test.id().rsplit(".", 1)[-1]
+        if self.outcome.get(name) != "failed":        # a failure, of the test or of any part of it, stays
+            self.outcome[name] = what
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self._set(test, "passed")
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        method = getattr(test, getattr(test, "_testMethodName", ""), None)
+        marked = getattr(method, "__unittest_skip__", False) or getattr(type(test), "__unittest_skip__", False)
+        self._set(test, "skip-marked: " + reason if marked else "skipped: " + reason)
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self._set(test, "failed")
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self._set(test, "failed")
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            self._set(test, "failed")
+
+    def addExpectedFailure(self, test, err):
+        super().addExpectedFailure(test, err)
+        self._set(test, "failed")
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self._set(test, "failed")
+
+
+def gate(outcome, proofs):
+    """(refused, not_run_here) for the proofs named, from what the runner saw."""
+    refused, not_here = [], []
+    for name in sorted(proofs):
+        o = outcome.get(name)
+        if o == "passed":
+            continue
+        reason = o[len("skipped: "):] if o and o.startswith("skipped: ") else None
+        if reason in HONEST_SKIPS and HONEST_SKIPS[reason]():
+            not_here.append(name)
+            continue
+        if reason in HONEST_SKIPS:
+            o += " (but that is not so on this machine)"
+        refused.append(f"{name}: {o or 'never ran'}")
+    return refused, not_here
+
+
+def join_reports(paths, expect):
+    reports = [jload(p) for p in paths]
+    proofs = plan_proofs()
+    passed = set().union(*(set(r["passed"]) for r in reports)) if reports else set()
+    refused = [x for r in reports for x in r["refused"]]
+    if len(reports) != expect:
+        refused.append(f"{len(reports)} job reports, {expect} expected")
+    refused += [f"{n} passed on none of the {len(reports)} jobs" for n in sorted(proofs - passed)]
+    for x in refused:
+        print("GATE:", x)
+    print(f"{len(proofs & passed)} of {len(proofs)} proofs passed on at least one of {len(reports)} jobs")
+    return 1 if refused else 0
+
+
+def main(argv):
+    verbosity = 2 if "-v" in argv else 1
+    args = [a for a in argv if a != "-v"]
+    if args[:1] == ["--join"]:
+        expect = int(args[args.index("--expect") + 1]) if "--expect" in args else 0
+        files = [a for i, a in enumerate(args[1:], 1) if a != "--expect" and args[i - 1] != "--expect"]
+        return join_reports(files, expect)
+    me = sys.modules[__name__]
+    gate_only = args[1] if args[:1] == ["--gate-only"] and len(args) > 1 else None
+    tests = collected_tests()
+    if gate_only:
+        suite = unittest.TestSuite([tests[gate_only](gate_only)] if gate_only in tests else [])
+    elif args:
+        suite = unittest.defaultTestLoader.loadTestsFromNames(args, me)
+    else:
+        suite = unittest.defaultTestLoader.loadTestsFromModule(me)
+    result = unittest.TextTestRunner(verbosity=verbosity, resultclass=Recorder, stream=sys.stderr).run(suite)
+    if args and not gate_only:
+        print("A part of the suite was run, so the gate was not applied.", file=sys.stderr)
+        return 0 if result.wasSuccessful() else 1
+    problems = shape_problems(os.path.abspath(__file__))
+    refused, not_here = gate(result.outcome, {gate_only} if gate_only else plan_proofs())
+    refused = problems + refused
+    for x in refused:
+        print("GATE:", x)
+    if not_here:
+        print(f"Not run here ({len(not_here)}), each must pass on a CI job: " + ", ".join(not_here))
+    report = os.environ.get("WSM_TEST_REPORT")
+    if report:
+        with open(report, "w", encoding="utf-8") as f:
+            json.dump({"system": "/".join(mirror.system()), "python": sys.version.split()[0],
+                       "passed": sorted(n for n, o in result.outcome.items() if o == "passed"),
+                       "not_run_here": not_here, "refused": refused}, f, indent=1)
+    return 0 if result.wasSuccessful() and not refused else 1
+
+
 if __name__ == "__main__":
-    unittest.main()
+    sys.exit(main(sys.argv[1:]))
