@@ -79,8 +79,12 @@ class Strand(unittest.TestCase):
     def test_every_proof_named_in_the_plan_is_a_real_test_and_every_test_has_a_codon(self):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
+        to_build = set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", plan))
         real = set(re.findall(r"def (test_(?:G|INV)[A-Za-z0-9_]+)\(", fread(os.path.abspath(__file__))))
-        self.assertEqual(named - real, set(), "the plan names tests that do not exist")
+        self.assertEqual(to_build & real, set(), "a test marked 'to build' exists: remove the mark")
+        if to_build:
+            self.assertEqual(version(), "0.0.0", "a proof may be marked 'to build' only while nothing is released")
+        self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
         self.assertEqual(real - named, set(), "tests with no codon in the plan")
 
     def test_no_codon_is_used_twice_in_the_plan(self):
