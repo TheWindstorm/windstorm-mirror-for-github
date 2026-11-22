@@ -37,6 +37,7 @@ class FakeGitHub:
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
         self.lfs_uploads = []                 # LFS batch calls that asked to upload (a batch call to download is a read)
+        self.answers = {}                     # path -> (code, body) answered instead, after the key is checked
         self.contents = {}                    # path in the skill's repository -> bytes, served with no key
         self.release = None                   # what /repos/<o>/<n>/releases/latest answers (no key needed)
         self.release_calls = []               # for each such call: did it carry a key?
@@ -204,6 +205,8 @@ class FakeGitHub:
                     return self.send_json(403, {"message": "the stand-in refuses every writing call"})
                 with fake.lock:
                     fake.rate_remaining -= 1
+                if u.path in fake.answers:                # a set answer for one path, e.g. a key still waiting
+                    return self.send_json(*fake.answers[u.path])
                 q = urllib.parse.parse_qs(u.query)
                 page, per = int(q.get("page", ["1"])[0]), min(int(q.get("per_page", ["30"])[0]), fake.page_cap)
                 if fake.fail_page == (u.path, page):

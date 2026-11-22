@@ -541,23 +541,66 @@ def read_key_from_stdin():
 
 def check_key(key, owner):
     """(kind, message): kind is 'user' or 'org' when the key reaches that owner's repositories, else None."""
-    code, _, body = gh_get(key, "/user")
+    code, headers, body = gh_get(key, "/user")
+    scopes = headers.get("X-OAuth-Scopes", headers.get("x-oauth-scopes"))
     if code == 401:
-        return None, "GitHub refused this key (401). Make a new one; nothing was kept."
+        return None, "GitHub refused this key (401). Make a new one; nothing was kept.", scopes
     if code != 200:
-        return None, f"GitHub did not answer as expected ({code}); nothing was kept."
+        return None, f"GitHub did not answer as expected ({code}); nothing was kept.", scopes
     if (body or {}).get("login", "").lower() == owner.lower():
         kind, listing = "user", "/user/repos?affiliation=owner&per_page=1"
     else:
         code, _, _ = gh_get(key, f"/orgs/{urllib.parse.quote(owner)}")
         if code != 200:
             return None, (f"This key cannot see '{owner}' (GitHub answered {code}). A key belongs to one owner: "
-                          "make one for this owner. Nothing was kept.")
+                          "make one for this owner. Nothing was kept."), scopes
         kind, listing = "org", f"/orgs/{urllib.parse.quote(owner)}/repos?per_page=1"
     code, _, _ = gh_get(key, listing)
     if code != 200:
-        return None, f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). Nothing was kept."
-    return kind, ""
+        return None, (f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). If {owner} "
+                      "must approve keys, it may still be waiting. Nothing was kept."), scopes
+    return kind, "", scopes
+
+
+KEY_PAGE = "https://github.com/settings/personal-access-tokens/new"
+CAN_WRITE = "this key can write to GitHub; the skill never uses that, make a read-only one"
+
+
+def can_write(scopes):
+    """G2.3: a classic key's X-OAuth-Scopes, read for what it allows. A fine-grained key sends no such header."""
+    if scopes is None:
+        return False
+    return any(x in ("repo", "public_repo", "workflow", "delete_repo") or x.startswith(("write:", "admin:"))
+               for x in (y.strip() for y in scopes.split(",")))
+
+
+def cmd_key_plan(args):
+    """G2.1: before anything else, the keys the person will make, each with its page and settings."""
+    p = paths()
+    owners = [args.account] + list(args.organisations or [])
+    for o in owners:
+        if not OWNER_RE.match(o):
+            say(f"'{o}' is not a GitHub account or organisation name.")
+            return 2
+    s = load_json(p["settings"], {})
+    s["planned_owners"] = {o: ("user" if i == 0 else "org") for i, o in enumerate(owners)}
+    os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
+    say(f"The keys to make: {len(owners)}, one for each owner. Each is fine-grained and read-only, on all that "
+        "owner's repositories. You make each one yourself, logged in to GitHub in your own browser; this skill "
+        "never logs in for you.")
+    for i, o in enumerate(owners, 1):
+        org = i > 1
+        say(f"{i}. For {o} ({'an organisation' if org else 'your own account'}): open {KEY_PAGE}")
+        say(f"   Name: windstorm-mirror-{o.lower()}. Expiration: your choice (status warns 14 days before it ends).")
+        say(f"   Resource owner: {o}. Repository access: All repositories.")
+        say("   Repository permissions: Contents: Read-only. Metadata: Read-only (it comes with Contents). "
+            "Nothing else.")
+        if org:
+            say(f"   {o} may have to approve the key. Until an owner of {o} does, it waits as pending, and its "
+                "copies cannot refresh.")
+        say(f"   Then: key set {o}   (paste the key when it asks; it is not shown)")
+    return 0
 
 
 def cmd_key_set(args):
@@ -570,11 +613,13 @@ def cmd_key_set(args):
     if not key or any(c.isspace() for c in key) or len(key) > 255:
         say("No key was read from standard input (or it was not one line). Nothing was kept.")
         return 2
-    kind, why = check_key(key, owner)
+    kind, why, scopes = check_key(key, owner)
     if not kind:
         say(why.replace(key, "<the key>"))
         return 1
     write_private(key_path(p, owner), key + "\n")
+    if can_write(scopes):
+        say(f"Note: {CAN_WRITE}.")
     s = load_json(p["settings"], {})
     s.setdefault("owners", {})[owner] = {"kind": kind}
     write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
@@ -632,6 +677,7 @@ def list_owner(owner, kind, key, floor=0, info=None):
         if info is not None and page == 1:
             info["expires"] = headers.get("github-authentication-token-expiration") or headers.get(
                 "Github-Authentication-Token-Expiration") or ""
+            info["scopes"] = headers.get("X-OAuth-Scopes", headers.get("x-oauth-scopes"))
         if code == 401:
             return None, f"GitHub refused the key for {owner} (401)", calls
         if code != 200 or not isinstance(body, list):
@@ -1069,7 +1115,10 @@ def sync(p, args):
         info = {}
         repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), info)
         if repos is not None:
-            st.setdefault("keys", {})[owner.lower()] = {"expires": info.get("expires", ""), "seen": now_utc()}
+            st.setdefault("keys", {})[owner.lower()] = {"expires": info.get("expires", ""), "seen": now_utc(),
+                                                        "can_write": can_write(info.get("scopes"))}
+        else:
+            st.setdefault("keys", {}).setdefault(owner.lower(), {}).update(problem=why, problem_at=now_utc())
         calls += n
         if repos is None:
             problems.append(f"{owner}: {why}; nothing was changed for {owner}")
@@ -1459,6 +1508,12 @@ def cmd_status(args):
             behind += 1
             problems.append(f"{name}: {why}")
     for owner, k in sorted((st.get("keys") or {}).items()):
+        if k.get("problem"):
+            hint = ("make a new one, then `key set " + owner + "`" if "(401)" in k["problem"] else
+                    f"if {owner} must approve keys, it may still be waiting; or make a new one, then `key set {owner}`")
+            problems.append(f"the key for {owner}: {k['problem']} ({k.get('problem_at')}); its copies cannot refresh: {hint}")
+        if k.get("can_write"):
+            problems.append(f"the key for {owner}: {CAN_WRITE}")
         exp = k.get("expires") or ""
         # The expiry header has not been seen on a real key yet (contract C3). Only a date GitHub sent and that
         # reads cleanly is shown or warned about; nothing is worked out, and nothing absent is called "no expiry".
@@ -2074,6 +2129,10 @@ def main(argv=None):
     kset = ks.add_parser("set", help="keep one owner's read-only key, read from standard input")
     kset.add_argument("owner", help="your GitHub account, or one organisation")
     kset.set_defaults(fn=cmd_key_set)
+    kplan = ks.add_parser("plan", help="before anything else: the read-only keys to make, with their pages")
+    kplan.add_argument("account", help="your own GitHub account")
+    kplan.add_argument("organisations", nargs="*", help="each organisation whose projects are copied too")
+    kplan.set_defaults(fn=cmd_key_plan)
     c = sub.add_parser("config", help="choose what is copied: include or exclude patterns of owner/name")
     c.add_argument("what", choices=["include", "exclude"])
     c.add_argument("patterns", nargs="*")

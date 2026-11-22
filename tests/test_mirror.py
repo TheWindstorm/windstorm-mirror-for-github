@@ -853,6 +853,91 @@ class G3(unittest.TestCase):
             self.assertIn("Large files NOT copied (git lfs is not installed here): someone/big", out)
 
 
+class G2Keys(unittest.TestCase):
+    def test_G2_1_the_person_is_told_first_which_read_only_keys_to_make(self):
+        with Home() as h:
+            saved = mirror.gh_get
+            mirror.gh_get = lambda *a, **k: (_ for _ in ()).throw(AssertionError("key plan asked GitHub"))
+            try:
+                rc, out = quiet(mirror.main, ["key", "plan", "someone", "acme", "beta-org"])
+            finally:
+                mirror.gh_get = saved
+            self.assertEqual(rc, 0, out)
+            self.assertIn("The keys to make: 3, one for each owner. Each is fine-grained and read-only", out)
+            self.assertIn("this skill never logs in for you", out)
+            self.assertEqual(out.count(f"open {mirror.KEY_PAGE}"), 3)
+            for o in ("someone", "acme", "beta-org"):
+                self.assertIn(f"Resource owner: {o}. Repository access: All repositories.", out)
+                self.assertIn(f"Then: key set {o}", out)
+            self.assertEqual(out.count("Contents: Read-only. Metadata: Read-only"), 3)
+            self.assertIn("acme may have to approve the key", out)
+            self.assertNotIn("someone may have to approve", out)
+            s = mirror.load_json(mirror.paths()["settings"], {})
+            self.assertEqual(s["planned_owners"], {"someone": "user", "acme": "org", "beta-org": "org"})
+            self.assertEqual(h.calls, [])
+            self.assertEqual(quiet(mirror.main, ["key", "plan", "not a name"])[0], 2)
+
+    def test_G2_3_a_key_that_can_write_is_named_for_what_it_is(self):
+        self.assertTrue(mirror.can_write("repo, read:org"))
+        self.assertTrue(mirror.can_write("public_repo"))
+        self.assertTrue(mirror.can_write("read:org, write:packages"))
+        self.assertFalse(mirror.can_write("read:org, read:user"))
+        self.assertFalse(mirror.can_write(None))          # a fine-grained key: no scopes header at all
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.scopes = ["repo", "read:org"]           # a classic key that can write
+            rc, out = w.key_set()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Note: {mirror.CAN_WRITE}.", out)
+            self.assertEqual(w.first_sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            self.assertIn(f"problem: the key for someone: {mirror.CAN_WRITE}", out)
+            self.assertEqual(w.gh.writes(), [])
+            w.gh.scopes = None                           # a new, fine-grained key
+            self.assertNotIn("can write", w.key_set()[1])
+            self.assertEqual(w.sync()[0], 0)
+            self.assertNotIn("can write", status()[1])
+
+    def test_G2_4_each_keys_expiry_is_watched_and_a_refused_key_is_never_current(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.add_repo("acme", "tools", owner_type="Organization")
+            w.gh.commit("acme/tools", {"a": b"1"})
+            w.gh.expires = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() + 90 * 86400))
+            self.assertEqual(w.key_set("someone")[0], 0)
+            self.assertEqual(w.key_set("acme")[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"key for acme: expires {w.gh.expires}", out)
+            self.assertIn(f"key for someone: expires {w.gh.expires}", out)
+            # acme's key now waits for the organisation's approval (GitHub answers 403 there).
+            w.gh.answers["/orgs/acme/repos"] = (403, {"message": "pending approval"})
+            self.assertEqual(w.sync()[0], 1)
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            self.assertIn("problem: the key for acme: the listing of acme failed at page 1 (GitHub answered 403)", out)
+            self.assertIn("if acme must approve keys, it may still be waiting", out)
+            self.assertIn("problem: acme/tools: cannot refresh", out)
+            self.assertIn("copies: 2 on GitHub, 2 copied, 1 behind", out)
+            # Then the key is refused outright: every copy of that owner cannot refresh, and status names the key.
+            w.gh.answers.clear()
+            w.gh.key = "ghkey-" + "e5" * 10
+            self.assertEqual(w.sync()[0], 1)
+            rc, out = status()
+            self.assertIn("problem: the key for someone: GitHub refused the key for someone (401)", out)
+            self.assertIn("make a new one, then `key set someone`", out)
+            self.assertIn("copies: 2 on GitHub, 2 copied, 2 behind", out)
+            # A new key, one step; the problem goes with the next sync that works.
+            w.key_set("someone", key=w.gh.key)
+            w.key_set("acme", key=w.gh.key)
+            self.assertEqual(w.sync()[0], 0)
+            self.assertNotIn("problem: the key", status()[1])
+
+
 class G2Sync(unittest.TestCase):
     def test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it(self):
         with World(self) as w:
@@ -1834,7 +1919,8 @@ class Invariants(unittest.TestCase):
         # computer. The plist's DOCTYPE names Apple's DTD and is never fetched.
         allowed = {"http://127.0.0.1", "https://api.github.com", "https://github.com", "https://dl.gitea.com/gitea",
                    "https://github.com/TheWindstorm/windstorm-mirror-for-github", "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
-                   "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
+                   "http://127.0.0.1:9",                  # the dead proxy that shuts every other host off (G7.2)
+                   "https://github.com/settings/personal-access-tokens/new"}   # printed for the person, never fetched
         found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
         self.assertEqual(found - allowed, set(), "an address outside the allowed ones")
         self.assertEqual(len(re.findall(r"urlopen\(|build_opener\(", fread(SCRIPT))), 5,
