@@ -36,6 +36,7 @@ class FakeGitHub:
         self.rate_remaining = 5000
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
+        self.lfs_uploads = []                 # LFS batch calls that asked to upload (a batch call to download is a read)
         self.release = None                   # what /repos/<o>/<n>/releases/latest answers (no key needed)
         self.release_calls = []               # for each such call: did it carry a key?
         self.page_cap = 100                   # GitHub's own cap; tests lower it to see paging with few repositories
@@ -234,6 +235,8 @@ class FakeGitHub:
                     return
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 if req.get("operation") != "download":
+                    with fake.lock:
+                        fake.lfs_uploads.append(u.path)
                     return self.send_json(403, {"message": "the stand-in refuses uploads"})
                 objs = []
                 for o in req.get("objects", []):
@@ -299,4 +302,5 @@ class FakeGitHub:
     def writes(self):
         """Every request that could have changed something on 'GitHub'."""
         return [(m, p) for m, p in self.log
-                if "receive-pack" in p or (m != "GET" and not p.endswith("/git-upload-pack"))]
+                if "receive-pack" in p or (m != "GET" and not p.endswith(("/git-upload-pack", "/info/lfs/objects/batch")))
+                ] + [("LFS upload", p) for p in self.lfs_uploads]

@@ -4,6 +4,7 @@ import atexit
 import contextlib
 import hashlib
 import signal
+import tarfile
 import http.server
 import inspect
 import io
@@ -106,6 +107,7 @@ class Home:
         self.calls = []
         self.linger, self.enable_ok, self.service_ok = linger, enable_linger_ok, service_ok
         self.timer_next = "Sun 2026-11-22 19:15:00 UTC"     # what the system says of the sync timer's next run
+        self.forge_follows = False      # when True, stopping and starting the service stops and starts the forge
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -118,6 +120,18 @@ class Home:
             self.calls.append(cmd)
             if cmd[:2] == ["loginctl", "show-user"]:
                 return subprocess.CompletedProcess(cmd, 0, f"Linger={self.linger}\n", "")
+            if self.forge_follows:
+                label = f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"
+                if cmd in (["systemctl", "--user", "stop", mirror.SERVICE], ["launchctl", "bootout", label]):
+                    for pr in self.procs:
+                        if pr.poll() is None:
+                            pr.terminate()
+                            pr.wait(30)
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                if cmd == ["systemctl", "--user", "start", mirror.SERVICE] or (
+                        cmd[:2] == ["launchctl", "bootstrap"] and cmd[-1] == mirror.paths()["plist"]):
+                    self.start_forge()
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
             if cmd[:3] == ["systemctl", "--user", "show"]:
                 if self.timer_next is None:
                     return subprocess.CompletedProcess(cmd, 0, "ActiveState=inactive\nNextElapseUSecRealtime=\n", "")
@@ -511,6 +525,7 @@ class World:
             rc, out = self.home.setup()
             self.tc.assertEqual(rc, 0, out)
             self.port, _ = self.home.start_forge()
+            self.home.forge_follows = True
         except BaseException:
             self.home.__exit__(None, None, None)
             raise
@@ -1304,6 +1319,166 @@ class G6(unittest.TestCase):
             out = quiet(mirror.main, ["status", "--check-release"])[1]
             self.assertIn(f"that release pins Gitea 28.9.2 (this forge runs {mirror.GITEA_VERSION});", out)
             self.assertNotIn("SECURITY", out)
+
+
+def bare_home(root, name, with_commit=False):
+    path = os.path.join(root, name + ".git")
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", path], check=True)
+    if with_commit:
+        work = tempfile.mkdtemp(dir=root)
+        subprocess.run(["git", "init", "-q", "-b", "main", work], check=True)
+        subprocess.run(["git", "-C", work, "-c", "user.email=a@example.invalid", "-c", "user.name=a", "commit", "-q",
+                        "--allow-empty", "-m", "already here"], check=True)
+        subprocess.run(["git", "-C", work, "push", "-q", path, "main"], check=True)
+    return path
+
+
+def lsremote(path):
+    out = subprocess.run(["git", "ls-remote", path], capture_output=True, text=True).stdout
+    return {r: s for s, r in (l.split("\t") for l in out.splitlines()) if r.startswith(("refs/heads/", "refs/tags/"))}
+
+
+class G7(unittest.TestCase):
+    def world_with_copies(self, w, lfs=False):
+        w.gh.add_repo("someone", "alpha")
+        w.gh.commit("someone/alpha", {"a": b"1"})
+        w.gh.git("someone/alpha", "tag", "v1")
+        w.gh.add_repo("someone", "beta")
+        if lfs and mirror.has_git_lfs():
+            w.gh.commit("someone/beta", {".gitattributes": b"*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                                         "big.bin": w.gh.lfs_file(b"L" * 300_000)})
+        else:
+            w.gh.commit("someone/beta", {"b": b"1"})
+        w.key_set()
+        self.assertEqual(w.first_sync()[0], 0)
+
+    def test_G7_1_each_sync_writes_down_the_refs_github_last_showed(self):
+        with World(self) as w:
+            self.world_with_copies(w)
+            st = mirror.load_json(w.p["state"], {})
+            for rec in st["repos"].values():
+                self.assertEqual(rec["seen_refs"], w.gh_refs(rec["full_name"]))
+                self.assertTrue(rec["seen_at"])
+            # When the push into the forge fails, what GitHub showed is still written down.
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            new = w.gh_refs("someone/alpha")
+            put_settings(w.p, git_timeout_s=1)
+            saved = mirror.push_specs
+            mirror.push_specs = lambda cache: ["refs/heads/main:refs/heads/main", "+refs/heads/nope:refs/heads/nope"]
+            try:
+                self.assertEqual(w.sync()[0], 1)
+            finally:
+                mirror.push_specs = saved
+            st = mirror.load_json(w.p["state"], {})
+            alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
+            self.assertEqual(alpha["seen_refs"], new)
+            self.assertTrue(alpha["problem"])
+
+    def test_G7_2_restore_check_proves_every_copy_from_the_forge_alone(self):
+        with World(self) as w:
+            self.world_with_copies(w, lfs=True)
+            w.gh.stop()                                # GitHub is out of reach
+            before = set(os.listdir(w.p["data"]))
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s); nothing outside this computer was asked", out)
+            self.assertEqual(set(os.listdir(w.p["data"])), before, "the scratch folder was left behind")
+            # A copy that no longer holds what GitHub last showed is named, ref by ref.
+            cache = os.path.join(w.p["cache"], str(w.gh.repos["someone/alpha"]["id"]) + ".git")
+            w.forge_push(cache, "someone--alpha", ":refs/tags/v1")
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 1)
+            self.assertRegex(out, r"someone/alpha: refs/tags/v1 is missing in the copy, [0-9a-f]{12} when GitHub was last seen")
+            self.assertIn("restore check: 2 copies, 1 whole, 1 difference(s)", out)
+            # A copy whose objects are gone from the forge cannot pass.
+            forge_repo = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--beta.git")
+            for d, _, fs in os.walk(os.path.join(forge_repo, "objects")):
+                for f in fs:
+                    os.remove(os.path.join(d, f))
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 1)
+            self.assertIn("someone/beta: ", out)
+            self.assertIn("2 copies, 0 whole", out)
+            self.assertEqual(w.gh.writes(), [])
+
+    def test_G7_3_a_copy_is_restored_to_a_new_empty_home(self):
+        with World(self) as w:
+            self.world_with_copies(w, lfs=True)
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "alpha")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"restored someone/alpha: 1 branch(es) and 1 tag(s) to {home}", out)
+            self.assertEqual(lsremote(home), w.gh_refs("someone/alpha"))
+            # A home that is not empty is refused, and nothing is pushed there.
+            full = bare_home(root, "full", with_commit=True)
+            before = lsremote(full)
+            rc, out = quiet(mirror.main, ["restore", "--to", full, "someone/alpha"])
+            self.assertEqual(rc, 1)
+            self.assertIn("The new home is not empty, so nothing was pushed.", out)
+            self.assertEqual(lsremote(full), before)
+            # GitHub is never a home this skill pushes to (INV1): it says how the person can do it.
+            n = len(w.gh.log)
+            for url in (f"{mirror.github_git()}/someone/new.git", "https://github.com/someone/new.git",
+                        "git@github.com:someone/new.git"):
+                rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+                self.assertEqual(rc, 2, url)
+                self.assertIn("This skill never writes to GitHub", out)
+                self.assertIn("git push --mirror", out)
+            self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
+            self.assertEqual(w.gh.writes(), [])
+            if mirror.has_git_lfs():
+                lhome = bare_home(root, "beta")
+                rc, out = quiet(mirror.main, ["restore", "--to", lhome, "someone/beta"])
+                self.assertEqual(rc, 0, out)
+                self.assertTrue([f for d, _, fs in os.walk(os.path.join(lhome, "lfs", "objects")) for f in fs],
+                                "the large file did not reach the new home")
+
+    def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):
+        with World(self) as w:
+            self.world_with_copies(w, lfs=True)
+            folder = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(folder)
+            rc, out = quiet(mirror.main, ["backup", folder])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("readable by you only", out)
+            self.assertIn("It holds the forge's own secrets", out)
+            files = os.listdir(folder)
+            self.assertEqual(len(files), 1)
+            backup = os.path.join(folder, files[0])
+            self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), 0o600)
+            # the forge is back after the backup
+            self.assertEqual(http_get(f"http://127.0.0.1:{w.port}/api/healthz")[0], 200)
+            # No key of the skill is in the backup.
+            with tarfile.open(backup) as tf:
+                names = tf.getnames()
+                blob = b"".join(tf.extractfile(m).read() for m in tf.getmembers() if m.isfile() and m.name != "gitea-dump.tar.gz")
+            self.assertIn("gitea-dump.tar.gz", names)
+            self.assertNotIn(w.gh.key.encode(), blob)
+            self.assertNotIn(fread(w.p["mirror_key"]).strip().encode(), blob)
+            self.assertFalse([n for n in names if "key" in n.lower()], names)
+            want = {n: w.gh_refs(f"someone/{n}") for n in ("alpha", "beta")}
+            w.gh.stop()                                # the new computer: GitHub out of reach, only the file
+            with Home(linger="yes") as h2:
+                h2.place_gitea()
+                rc, out = h2.setup("--from", backup)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("2 copies are back", out)
+                self.assertIn("make new keys and run `key set` for each owner: someone", out)
+                port, _ = h2.start_forge()
+                rc, out = quiet(mirror.main, ["restore", "--check"])
+                self.assertEqual(rc, 0, out)
+                self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s)", out)
+                p2 = mirror.paths()
+                self.assertNotEqual(p2["data"], w.p["data"])
+                home = bare_home(folder, "alpha-again")
+                self.assertEqual(quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])[0], 0)
+                self.assertEqual(lsremote(home), want["alpha"])
+                # Setup --from on a computer that already has a forge changes nothing.
+                rc, out = h2.setup("--from", backup)
+                self.assertEqual(rc, 2)
+                self.assertIn("already has a forge", out)
 
 
 class Harness(unittest.TestCase):

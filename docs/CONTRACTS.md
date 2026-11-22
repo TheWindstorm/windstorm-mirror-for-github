@@ -109,7 +109,11 @@ Seen:
   - a clone of a repository came back with both its commits, and `git fsck` found 0 errors.
 - Replaying `gitea-db.sql` on top of the copied database fails ("index ... already exists"). With SQLite, the
   database file in `data/` is the restore and the SQL is not replayed.
-- Not seen yet: large files in a dump, and a restore into a forge whose binary is newer.
+- Seen on 2026-11-22, in a Linux test account on Gitea 28.4.0: a dump holds the large files (under `data/lfs`).
+  Restored into a second home with other paths and another port, the copies came back with their large
+  files, and `git lfs fsck` passed. Gitea's hooks name the old paths, so the restore runs
+  `gitea admin regenerate hooks`.
+- Not seen yet: a restore into a forge whose binary is newer.
 
 ## C9 The boot service
 
