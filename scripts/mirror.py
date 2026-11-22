@@ -7,6 +7,7 @@ The plan this is built from: DNA-STRAND-MASTER-PLAN.md. Run with `python3 -I mir
 """
 import argparse
 import base64
+import calendar
 import fnmatch
 import getpass
 import urllib.parse
@@ -349,6 +350,84 @@ def plist_text(p):
 """
 
 
+SYNC_UNIT = "windstorm-mirror-sync"
+SYNC_LABEL = "com.thewindstorm.mirror.sync"
+
+
+def sync_unit_text(p):
+    return f"""[Unit]
+Description=Windstorm Mirror for GitHub: one sync of the copies
+
+[Service]
+Type=oneshot
+{env_line()}ExecStart={sys.executable} -I {p['script']} sync --from-timer
+Nice=10
+"""
+
+
+def sync_timer_text(minutes):
+    return f"""[Unit]
+Description=Windstorm Mirror for GitHub: a sync every {minutes} minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={minutes}min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def sync_plist_text(p, minutes):
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{SYNC_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>{sys.executable}</string><string>-I</string><string>{p['script']}</string><string>sync</string><string>--from-timer</string></array>
+{env_plist()}  <key>StartInterval</key><integer>{minutes * 60}</integer>
+  <key>StandardOutPath</key><string>{p['forge']}/log/sync.log</string>
+  <key>StandardErrorPath</key><string>{p['forge']}/log/sync.log</string>
+</dict>
+</plist>
+"""
+
+
+def install_timer(p, minutes):
+    if system()[0] == "darwin":
+        path = os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+        write_file(path, sync_plist_text(p, minutes))
+        uid = str(os.getuid())
+        run(["launchctl", "bootout", f"gui/{uid}/{SYNC_LABEL}"])
+        out = run(["launchctl", "bootstrap", f"gui/{uid}", path])
+        return out.returncode == 0
+    base = os.path.dirname(p["unit"])
+    write_file(os.path.join(base, SYNC_UNIT + ".service"), sync_unit_text(p))
+    write_file(os.path.join(base, SYNC_UNIT + ".timer"), sync_timer_text(minutes))
+    run(["systemctl", "--user", "daemon-reload"])
+    return run(["systemctl", "--user", "enable", "--now", SYNC_UNIT + ".timer"]).returncode == 0
+
+
+def next_sync():
+    """(when, problem): the timer's next run as the system reads it. M12: 'on' with no next run is a problem."""
+    if system()[0] == "darwin":
+        out = run(["launchctl", "print", f"gui/{os.getuid()}/{SYNC_LABEL}"])
+        if out.returncode != 0:
+            return "", "the sync timer is not loaded"
+        m = re.search(r"run interval = (\d+) seconds", out.stdout)
+        return (f"every {int(m.group(1)) // 60} min (launchd keeps no next-run time)" if m else "loaded"), ""
+    out = run(["systemctl", "--user", "show", SYNC_UNIT + ".timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime"])
+    vals = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+    if vals.get("ActiveState") != "active":
+        return "", "the sync timer is not running"
+    nxt = vals.get("NextElapseUSecRealtime", "").strip()
+    if not nxt or nxt in ("n/a", "0"):
+        return "", "the sync timer is on but has no next run (after a restart, check it with: systemctl --user list-timers)"
+    return nxt, ""
+
+
 def linger_state():
     """'yes', 'no' or 'unknown' for this account's systemd lingering."""
     out = run(["loginctl", "show-user", getpass.getuser(), "-p", "Linger"])
@@ -472,6 +551,13 @@ def cmd_key_set(args):
 # ---------------------------------------------------------------- G3 find every project, and copy it
 
 GITHUB_GIT = "https://github.com"
+DEFAULTS = {"interval_min": 15, "full_pass_hours": 24, "git_timeout_s": 600, "api_floor": 500, "disk_floor_mb": 2048}
+
+
+def setting(s, name):
+    v = s.get(name, DEFAULTS[name])
+    low = 1 if name in ("interval_min", "git_timeout_s", "full_pass_hours") else 0
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= low else DEFAULTS[name]
 NOT_COPIED = "Not copied in 0.1: GitHub's pull-request refs, releases, issues and wikis."
 FETCH_SPEC = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
 GIT_TIMEOUT = 600
@@ -492,7 +578,7 @@ def next_link(headers):
     return None
 
 
-def list_owner(owner, kind, key):
+def list_owner(owner, kind, key, floor=0):
     """Every repository of one owner, page by page to the last page. (repos, None), or (None, why) when any page
     failed: half a list is never acted on as if it were whole."""
     url = ("/user/repos?affiliation=owner&per_page=100" if kind == "user"
@@ -506,6 +592,10 @@ def list_owner(owner, kind, key):
             return None, f"GitHub refused the key for {owner} (401)", calls
         if code != 200 or not isinstance(body, list):
             return None, f"the listing of {owner} failed at page {page} (GitHub answered {code})", calls
+        left = headers.get("X-RateLimit-Remaining") or headers.get("x-ratelimit-remaining")
+        if left is not None and str(left).isdigit() and int(left) < floor and next_link(headers):
+            return None, (f"GitHub's remaining API allowance ({left}) is below the floor ({floor}), so the listing "
+                          f"of {owner} stopped at page {page}"), calls
         repos.extend(r for r in body if r.get("owner", {}).get("login", "").lower() == owner.lower())
         url = next_link(headers)
     return repos, None, calls
@@ -536,7 +626,8 @@ class Forge:
 
     def __init__(self, p, st):
         self.base = f"http://127.0.0.1:{st['port']}"
-        self.key = open(p["mirror_key"], encoding="utf-8").read().strip()
+        with open(p["mirror_key"], encoding="utf-8") as f:
+            self.key = f.read().strip()
         self.user = st.get("mirror_user", MIRROR_USER)
 
     def call(self, method, path, body=None):
@@ -657,7 +748,20 @@ def gid_of(forge_repo):
     return m.group(1) if m else f"forge{forge_repo['id']}"
 
 
-def copy_one(p, forge, key, rec, gh, report):
+def twice(step):
+    """Run one git step with its time limit; on a failure or a timeout, once more. None when the last try timed out."""
+    out = None
+    for _ in (1, 2):
+        try:
+            out = step()
+        except subprocess.TimeoutExpired:
+            out = None
+        if out is not None and out.returncode == 0:
+            return out
+    return out
+
+
+def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT):
     """Fetch one repository from GitHub (key in memory only) into its cache, then push it into the forge."""
     gid = str(gh["id"])
     full = gh["full_name"]
@@ -669,17 +773,19 @@ def copy_one(p, forge, key, rec, gh, report):
     git(cache, "config", "remote.github.url", f"{github_git()}/{full}.git")
     for i, spec in enumerate(FETCH_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.github.fetch", spec)
-    try:
-        out = git(cache, "fetch", "--prune", "--quiet", "github", env=github_env(key))
-    except subprocess.TimeoutExpired:
-        return "the fetch from GitHub took too long"
+    fetched_from = now_utc()
+    out = twice(lambda: git(cache, "fetch", "--prune", "--quiet", "github", env=github_env(key), timeout=limit))
+    if out is None:
+        return f"the fetch from GitHub took longer than {limit} s, and so did the retry"
     if out.returncode != 0:
         return "the fetch from GitHub failed: " + last_line(out.stderr).replace(key, "<the key>")
     lfs = None
     if not refs_of(cache):
         pass                                   # an empty repository has no large files to fetch or push
     elif has_git_lfs():
-        out = git(cache, "lfs", "fetch", "--all", "github", env=github_env(key))
+        out = twice(lambda: git(cache, "lfs", "fetch", "--all", "github", env=github_env(key), timeout=limit))
+        if out is None:
+            return f"the large files took longer than {limit} s to fetch, and so did the retry"
         if out.returncode != 0:
             return "the large files could not be fetched: " + last_line(out.stderr).replace(key, "<the key>")
         lfs = True
@@ -692,17 +798,23 @@ def copy_one(p, forge, key, rec, gh, report):
         return "the copy's name could not be confirmed before the push"
     url = f"{forge.base}/{forge.user}/{check['name']}.git"
     git(cache, "config", "remote.forge.url", url)
-    out = git(cache, "push", "--quiet", "--prune", "forge", *FETCH_SPEC, env=forge.git_env())
+    if lfs:
+        out = twice(lambda: git(cache, "lfs", "push", "--all", "forge", env=forge.git_env(), timeout=limit))
+        if out is None:
+            return f"the large files took longer than {limit} s to push, and so did the retry"
+        if out.returncode != 0:
+            return "the large files could not be pushed into the forge: " + last_line(out.stderr)
+    out = twice(lambda: git(cache, "push", "--quiet", "--atomic", "--prune", "forge", *FETCH_SPEC,
+                            env=forge.git_env(), timeout=limit))
+    if out is None:
+        return f"the push into the forge took longer than {limit} s, and so did the retry"
     if out.returncode != 0 and "No refs in common and none specified" not in out.stderr:
         empty = not refs_of(cache)
         if not empty:
             return "the push into the forge failed: " + last_line(out.stderr)
-    if lfs:
-        out = git(cache, "lfs", "push", "--all", "forge", env=forge.git_env())
-        if out.returncode != 0:
-            return "the large files could not be pushed into the forge: " + last_line(out.stderr)
     rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
-               last_good=now_utc(), pushed_at=gh.get("pushed_at"), problem="", lfs_missing=(lfs is False))
+               last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
+               lfs_missing=(lfs is False))
     return ""
 
 
@@ -718,17 +830,100 @@ def cmd_config(args):
     return 0
 
 
+def take_lock(p):
+    """(True, note) when this sync may run; (False, why) when another one is running."""
+    path = os.path.join(p["data"], "sync.lock")
+    os.makedirs(p["data"], mode=0o700, exist_ok=True)
+    note = ""
+    for _ in (1, 2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
+            return True, note
+        except FileExistsError:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    pid = int(f.read().strip() or 0)
+            except (OSError, ValueError):
+                pid = 0
+            if pid and pid_alive(pid):
+                return False, f"another sync is running (process {pid}); this one did not start"
+            note = f"a lock left by a sync that is gone (process {pid or 'unknown'}) was taken over"
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+    return False, "the lock could not be taken"
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def drop_lock(p):
+    path = os.path.join(p["data"], "sync.lock")
+    try:
+        with open(path, encoding="utf-8") as f:
+            mine = f.read().strip() == str(os.getpid())
+        if mine:
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def cmd_sync(args):
     p = paths()
+    ok, note = take_lock(p)
+    if not ok:
+        say(note)
+        return 3
+    try:
+        if note:
+            say(note)
+        return sync(p, args)
+    finally:
+        drop_lock(p)
+
+
+def save_state(p, st):
+    write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+
+
+def epoch_of(stamp):
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def sync(p, args):
     st = load_json(p["state"], {})
     s = load_json(p["settings"], {})
     owners = s.get("owners") or {}
+    if getattr(args, "from_timer", False) and not st.get("go"):
+        say("waiting for the person's go: the first copy starts with a sync they ask for")
+        return 0
     if not st.get("port") or not os.path.exists(p["mirror_key"]):
         say("Run setup first.")
         return 2
     if not owners:
         say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
         return 2
+    floor_mb = setting(s, "disk_floor_mb")
+    free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
+    if free_mb < floor_mb:
+        why = f"only {free_mb} MB free on this disk, below the floor of {floor_mb} MB"
+        st["last_sync"] = {"at": now_utc(), "calls": 0, "copied": 0, "problems": 1, "stopped": why}
+        save_state(p, st)
+        say(f"The sync did not start: {why}. Every copy is as it was.")
+        return 1
     state = st.setdefault("repos", {})
     found, problems, report, calls = {}, [], [], 0
     complete = set()
@@ -737,8 +932,9 @@ def cmd_sync(args):
         if not os.path.exists(kp):
             problems.append(f"{owner}: no key is kept for it")
             continue
-        key = open(kp, encoding="utf-8").read().strip()
-        repos, why, n = list_owner(owner, meta.get("kind", "user"), key)
+        with open(kp, encoding="utf-8") as f:
+            key = f.read().strip()
+        repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"))
         calls += n
         if repos is None:
             problems.append(f"{owner}: {why}; nothing was changed for {owner}")
@@ -767,41 +963,57 @@ def cmd_sync(args):
         say("The copy is as private as this computer. Anyone who can read this account's files can read every "
             "project in it. Disk encryption, and who uses this computer, are yours.")
         st["announced"] = now_utc()
-        write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+        save_state(p, st)
         say("When the person says go, run: sync")
         return 0
+    st["go"] = st.get("go") or now_utc()
     forge = Forge(p, st)
-    done, started = 0, time.time()
+    done, unchanged, started = 0, 0, time.time()
+    full_due = time.time() - epoch_of(st.get("last_full_pass")) >= setting(s, "full_pass_hours") * 3600
+    limit = setting(s, "git_timeout_s")
     order = sorted(picked.items(), key=lambda x: x[1][2]["full_name"].lower())
     for i, (gid, (owner, key, r)) in enumerate(order):
         if i == 3 and len(order) > 3 and not st.get("first_copy_done"):
             per = (time.time() - started) / 3
             say(f"first copy: 3 of {len(order)} done; about {max(1, round(per * (len(order) - 3) / 60))} min left at this pace")
         rec = state.setdefault(gid, {})
-        rec.update(owner=owner, full_name=r["full_name"], gone_since="")
+        if (not full_due and rec.get("forge_id") and not rec.get("problem") and rec.get("last_good")
+                and not rec.get("copying_since")
+                and rec.get("full_name") == r["full_name"] and r.get("pushed_at")
+                and rec.get("pushed_at") == r["pushed_at"] and r["pushed_at"] < rec.get("fetched_from", "")):
+            unchanged += 1
+            continue
+        rec.update(owner=owner, full_name=r["full_name"], gone_since="", copying_since=now_utc())
+        save_state(p, st)
         try:
-            why = copy_one(p, forge, key, rec, r, report)
+            why = copy_one(p, forge, key, rec, r, report, limit)
         except HardStop as e:
             rec["problem"] = "cannot refresh: the sync stopped"
+            rec.pop("copying_since", None)
             st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": done, "problems": 1, "stopped": str(e)}
-            write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+            save_state(p, st)
             say(f"STOPPED: {e}")
             return 1
-        except RuntimeError as e:
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             why = str(e)
+        rec.pop("copying_since", None)
         if why:
             rec["problem"] = "cannot refresh: " + why
             problems.append(f"{r['full_name']}: {why}")
         else:
             done += 1
+        save_state(p, st)
     for gid, rec in state.items():
         if gid not in found and rec.get("owner", "").lower() in complete and not rec.get("gone_since"):
             rec["gone_since"] = now_utc()
             report.append(f"{rec.get('full_name')}: gone from GitHub (or no longer visible to its key); its copy is kept")
-    st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": done, "problems": len(problems)}
+    st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": done, "unchanged": unchanged,
+                       "problems": len(problems), "full_pass": full_due}
+    if full_due and not problems:
+        st["last_full_pass"] = now_utc()
     if not problems:
         st["first_copy_done"] = st.get("first_copy_done") or now_utc()
-    write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+    save_state(p, st)
     for line in report + [f"problem: {x}" for x in problems]:
         say(line)
     for x in skipped:
@@ -809,7 +1021,8 @@ def cmd_sync(args):
     lfs_missing = [rec["full_name"] for rec in state.values() if rec.get("lfs_missing")]
     if lfs_missing:
         say("Large files NOT copied (git lfs is not installed here): " + ", ".join(sorted(lfs_missing)))
-    say(f"sync: {len(found)} on GitHub, {done} copied now, {len(problems)} problem(s), {calls} GitHub API call(s)")
+    say(f"sync: {len(found)} on GitHub, {done} copied now, {unchanged} unchanged, {len(problems)} problem(s), "
+        f"{calls} GitHub API call(s)" + (", a full pass" if full_due else ""))
     say(NOT_COPIED)
     return 0 if not problems else 1
 
@@ -887,13 +1100,29 @@ def cmd_setup(args):
         shutil.copyfile(here, p["script"] + ".tmp")
         os.replace(p["script"] + ".tmp", p["script"])
     st.update(version=VERSION, gitea=GITEA_VERSION)
-    write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+    save_state(p, st)
     ok, why = install_service(p)
+    if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
+        ok, why = False, "the sync timer could not be switched on"
     say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only)."
         if ok else f"The forge's service did not start: {why}")
     back, note = comes_back_by_itself()
     say("After a restart it starts by itself." if back else note)
     return 0 if ok else 1
+
+
+def cmd_status(args):
+    """The beginning of G6: for now, when the next sync runs, and the last one."""
+    p = paths()
+    st = load_json(p["state"], {})
+    when, problem = next_sync()
+    say(f"problem: {problem}" if problem else f"next sync: {when}")
+    last = st.get("last_sync") or {}
+    if last:
+        say(f"last sync: {last.get('at')}, {last.get('copied', 0)} copied, {last.get('unchanged', 0)} unchanged, "
+            f"{last.get('problems', 0)} problem(s), {last.get('calls', 0)} GitHub API call(s)"
+            + (f"; stopped: {last['stopped']}" if last.get("stopped") else ""))
+    return 1 if problem else 0
 
 
 def cmd_run_forge(args):
@@ -930,6 +1159,9 @@ def main(argv=None):
     c.set_defaults(fn=cmd_config)
     y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
+    y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
+    st_ = sub.add_parser("status", help="what is copied, what is behind, and when the next sync runs")
+    st_.set_defaults(fn=cmd_status)
     y.set_defaults(fn=cmd_sync)
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
