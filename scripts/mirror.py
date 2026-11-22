@@ -7,6 +7,7 @@ The plan this is built from: DNA-STRAND-MASTER-PLAN.md. Run with `python3 -I mir
 """
 import argparse
 import getpass
+import urllib.parse
 import hashlib
 import json
 import os
@@ -69,6 +70,8 @@ def paths():
         "state": os.path.join(data, "state.json"),
         "password": os.path.join(conf, "forge-password"),
         "mirror_key": os.path.join(conf, "forge-mirror-key"),
+        "keys": os.path.join(conf, "keys"),
+        "settings": os.path.join(conf, "settings.json"),
         "unit": os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
                              "systemd", "user", SERVICE + ".service"),
         "plist": os.path.join(home, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist"),
@@ -378,6 +381,90 @@ def install_service(p):
     return out.returncode == 0, last_line(out.stderr)
 
 
+# ---------------------------------------------------------------- G2 the GitHub keys
+
+GITHUB_API = "https://api.github.com"
+OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+
+
+def github_api():
+    return os.environ.get("WSM_GITHUB_API") or GITHUB_API
+
+
+def gh_get(key, path):
+    """One read from GitHub's REST API with one owner's key. Returns (status, headers, body). Never writes."""
+    url = path if path.startswith("http") else github_api() + path
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT,
+                                               "Accept": "application/vnd.github+json",
+                                               "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, dict(r.headers), json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read() or b"null")
+        except ValueError:
+            body = None
+        return e.code, dict(e.headers), body
+    except (urllib.error.URLError, OSError) as e:
+        return 0, {}, {"message": str(e)}
+
+
+def key_path(p, owner):
+    return os.path.join(p["keys"], owner.lower() + ".key")
+
+
+def read_key_from_stdin():
+    """A key comes in on standard input, never on a command line. At a terminal it is typed without echo."""
+    if sys.stdin.isatty():
+        return getpass.getpass("Paste the key (it is not shown): ").strip()
+    return sys.stdin.readline().strip()
+
+
+def check_key(key, owner):
+    """(kind, message): kind is 'user' or 'org' when the key reaches that owner's repositories, else None."""
+    code, _, body = gh_get(key, "/user")
+    if code == 401:
+        return None, "GitHub refused this key (401). Make a new one; nothing was kept."
+    if code != 200:
+        return None, f"GitHub did not answer as expected ({code}); nothing was kept."
+    if (body or {}).get("login", "").lower() == owner.lower():
+        kind, listing = "user", "/user/repos?affiliation=owner&per_page=1"
+    else:
+        code, _, _ = gh_get(key, f"/orgs/{urllib.parse.quote(owner)}")
+        if code != 200:
+            return None, (f"This key cannot see '{owner}' (GitHub answered {code}). A key belongs to one owner: "
+                          "make one for this owner. Nothing was kept.")
+        kind, listing = "org", f"/orgs/{urllib.parse.quote(owner)}/repos?per_page=1"
+    code, _, _ = gh_get(key, listing)
+    if code != 200:
+        return None, f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). Nothing was kept."
+    return kind, ""
+
+
+def cmd_key_set(args):
+    p = paths()
+    owner = args.owner
+    if not OWNER_RE.match(owner):
+        say(f"'{owner}' is not a GitHub account or organisation name.")
+        return 2
+    key = read_key_from_stdin()
+    if not key or any(c.isspace() for c in key) or len(key) > 255:
+        say("No key was read from standard input (or it was not one line). Nothing was kept.")
+        return 2
+    kind, why = check_key(key, owner)
+    if not kind:
+        say(why.replace(key, "<the key>"))
+        return 1
+    write_private(key_path(p, owner), key + "\n")
+    s = load_json(p["settings"], {})
+    s.setdefault("owners", {})[owner] = {"kind": kind}
+    write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
+    say(f"The key for {owner} ({'your account' if kind == 'user' else 'organisation'}) is kept in "
+        f"{key_path(p, owner)}, readable by you only. It is used for {owner}'s repositories and nothing else.")
+    return 0
+
+
 # ---------------------------------------------------------------- commands
 
 def setup_plan(p, st):
@@ -482,6 +569,11 @@ def main(argv=None):
     s = sub.add_parser("setup", help="install the forge as your own service")
     s.add_argument("--dry-run", action="store_true", help="say what setup would do and change nothing")
     s.set_defaults(fn=cmd_setup)
+    k = sub.add_parser("key", help="the GitHub keys, one per owner")
+    ks = k.add_subparsers(dest="key_cmd", required=True)
+    kset = ks.add_parser("set", help="keep one owner's read-only key, read from standard input")
+    kset.add_argument("owner", help="your GitHub account, or one organisation")
+    kset.set_defaults(fn=cmd_key_set)
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)

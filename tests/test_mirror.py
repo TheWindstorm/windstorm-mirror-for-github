@@ -22,7 +22,9 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "mirror.py")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
 import mirror  # noqa: E402
+from fake_github import FakeGitHub  # noqa: E402
 
 
 def fread(path):
@@ -368,6 +370,83 @@ class G1(unittest.TestCase):
             rc, out = h.setup()
             self.assertIn("After a restart it starts by itself.", out)
             self.assertNotIn(mirror.NO_LOGIN_NOTE, out)
+
+
+# ------------------------------------------------------------------ G2 the GitHub keys
+
+def files_holding(root, needle):
+    hits, read = [], 0
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            path = os.path.join(d, f)
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                continue
+            read += 1
+            if needle.encode() in data:
+                hits.append(path)
+    return hits, read
+
+
+class G2(unittest.TestCase):
+    def setUp(self):
+        self.gh_root = tempfile.mkdtemp(prefix="wsm-gh-")
+        self.gh = FakeGitHub(self.gh_root, key="ghkey-0123456789abcdef")
+        self.gh.add_repo("someone", "alpha")
+        self.gh.add_repo("acme", "tools", owner_type="Organization")
+        os.environ["WSM_GITHUB_API"] = self.gh.start()
+
+    def tearDown(self):
+        self.gh.stop()
+        os.environ.pop("WSM_GITHUB_API", None)
+        shutil.rmtree(self.gh_root, ignore_errors=True)
+
+    def key_set(self, owner, key):
+        out, saved = io.StringIO(), sys.stdin
+        sys.stdin = io.StringIO(key + "\n")
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = mirror.main(["key", "set", owner])
+        finally:
+            sys.stdin = saved
+        return rc, out.getvalue()
+
+    def test_G2_2_each_key_is_kept_in_its_own_file_and_nowhere_else(self):
+        key = self.gh.key
+        with Home() as h:
+            p = mirror.paths()
+            rc, out = self.key_set("someone", key)
+            self.assertEqual(rc, 0, out)
+            rc, out2 = self.key_set("acme", key)              # the stand-in lets one key see both; GitHub would not
+            self.assertEqual(rc, 0, out2)
+            for owner, kind in (("someone", "user"), ("acme", "org")):
+                f = mirror.key_path(p, owner)
+                self.assertEqual(fread(f).strip(), key)
+                self.assertEqual(stat.S_IMODE(os.stat(f).st_mode), 0o600)
+                self.assertEqual(mirror.load_json(p["settings"], {})["owners"][owner]["kind"], kind)
+            self.assertEqual(stat.S_IMODE(os.stat(p["keys"]).st_mode), 0o700)
+            hits, read = files_holding(h.tmp, key)
+            self.assertGreater(read, 0, "the scan read no files")
+            self.assertEqual(sorted(hits), sorted([mirror.key_path(p, "someone"), mirror.key_path(p, "acme")]),
+                             "the key was written somewhere else")
+            self.assertNotIn(key, out + out2)
+            # A key is never taken from the command line.
+            with self.assertRaises(SystemExit):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    mirror.main(["key", "set", "someone", key])
+            # A key GitHub refuses, or one that cannot see the owner, is not kept.
+            rc, out = self.key_set("other", key)
+            self.assertEqual(rc, 1)
+            self.assertIn("cannot see 'other'", out)
+            self.assertFalse(os.path.exists(mirror.key_path(p, "other")))
+            rc, out = self.key_set("someone", "not-the-key")
+            self.assertEqual(rc, 1)
+            self.assertIn("refused", out)
+            self.assertNotIn("not-the-key", out)
+            self.assertEqual(fread(mirror.key_path(p, "someone")).strip(), key, "a refused key replaced a good one")
+            self.assertEqual(self.gh.writes(), [], "something was written to GitHub")
 
 
 class Promises(unittest.TestCase):
