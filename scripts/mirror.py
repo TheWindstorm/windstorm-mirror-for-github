@@ -551,6 +551,7 @@ def cmd_key_set(args):
 # ---------------------------------------------------------------- G3 find every project, and copy it
 
 GITHUB_GIT = "https://github.com"
+KEPT_DAYS = 90
 DEFAULTS = {"interval_min": 15, "full_pass_hours": 24, "git_timeout_s": 600, "api_floor": 500, "disk_floor_mb": 2048}
 
 
@@ -560,6 +561,9 @@ def setting(s, name):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= low else DEFAULTS[name]
 NOT_COPIED = "Not copied in 0.1: GitHub's pull-request refs, releases, issues and wikis."
 FETCH_SPEC = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
+# What the copy holds now, read back from the forge before each push: the copy's branches and tags, and the kept refs.
+FORGE_SPEC = ["+refs/heads/*:refs/forge/heads/*", "+refs/tags/*:refs/forge/tags/*", "+refs/heads/kept/*:refs/kept/*"]
+NO_PUSH = "no-push://the-skill-never-writes-to-github"
 GIT_TIMEOUT = 600
 
 
@@ -761,7 +765,81 @@ def twice(step):
     return out
 
 
-def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT):
+def refs_under(cache, *prefixes):
+    out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", *prefixes)
+    return {r: s for s, r in (line.split(" ", 1) for line in out.stdout.splitlines() if line.strip())}
+
+
+def keep_before_moving(cache, report, full):
+    """G5.1: before a branch or tag of the copy moves backwards, is rewritten or is deleted, keep its old commit
+    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). Returns the new kept refs, or None on a failure."""
+    now = refs_under(cache, "refs/heads", "refs/tags")
+    held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    made = []
+    for ref, old in sorted(held.items()):
+        name = ref[len("refs/forge/"):]                       # heads/<b> or tags/<t>
+        if name.startswith("heads/kept/"):
+            continue
+        new = now.get("refs/" + name)
+        if new == old:
+            continue
+        if new and name.startswith("heads/") and git(cache, "merge-base", "--is-ancestor", old, new).returncode == 0:
+            continue                                           # moved forward: nothing is lost
+        short = name[len("heads/"):] if name.startswith("heads/") else name
+        dest, n = f"refs/kept/{day}/{short}", 1
+        while True:
+            have = git(cache, "rev-parse", "--verify", "-q", dest).stdout.strip()
+            if not have or have == old:
+                break
+            n += 1
+            dest = f"refs/kept/{day}/{short}-{n}"
+        if git(cache, "update-ref", dest, old).returncode != 0:
+            return None
+        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
+        report.append(f"{full}: {short} was {what} on GitHub; its old commit is kept as kept/{dest[len('refs/kept/'):]}")
+        made.append(dest)
+    return made
+
+
+def drop_old_kept(cache, days):
+    """G5.2: kept refs older than the kept period are dropped. With the period left at its default, a kept ref
+    that is the only ref reaching its commit stays."""
+    chosen = isinstance(days, (int, float)) and not isinstance(days, bool) and days >= 0
+    limit = time.time() - (days if chosen else KEPT_DAYS) * 86400
+    dropped = []
+    for ref, sha in sorted(refs_under(cache, "refs/kept").items()):
+        m = re.match(r"refs/kept/(\d{4}-\d{2}-\d{2})/", ref)
+        if not m or calendar.timegm(time.strptime(m.group(1), "%Y-%m-%d")) + 86400 > limit:
+            continue
+        if not chosen:
+            others = git(cache, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads", "refs/tags",
+                         "refs/kept").stdout.split()
+            if not [r for r in others if r != ref]:
+                continue                                       # the only way to its commit: it stays
+        if git(cache, "update-ref", "-d", ref, sha).returncode == 0:
+            dropped.append(ref)
+    return dropped
+
+
+def push_specs(cache):
+    """What one atomic push sends: every branch and tag as GitHub has it, every kept ref, and a delete for each
+    branch, tag or kept ref the copy holds that is gone here (each one already kept, or dropped by G5.2)."""
+    now = refs_under(cache, "refs/heads", "refs/tags")
+    kept = refs_under(cache, "refs/kept")
+    held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
+    specs = [f"+{r}:{r}" for r in sorted(now)] + [f"+{r}:refs/heads/kept/{r[len('refs/kept/'):]}" for r in sorted(kept)]
+    for ref in sorted(held):
+        there = "refs/" + ref[len("refs/forge/"):]
+        if there.startswith("refs/heads/kept/"):
+            if "refs/kept/" + there[len("refs/heads/kept/"):] not in kept:
+                specs.append(":" + there)
+        elif there not in now:
+            specs.append(":" + there)
+    return specs
+
+
+def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     """Fetch one repository from GitHub (key in memory only) into its cache, then push it into the forge."""
     gid = str(gh["id"])
     full = gh["full_name"]
@@ -771,6 +849,7 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT):
         if git(None, "init", "-q", "--bare", cache).returncode != 0:
             return "the local cache could not be made"
     git(cache, "config", "remote.github.url", f"{github_git()}/{full}.git")
+    git(cache, "config", "remote.github.pushurl", NO_PUSH)       # G5.3: a push to GitHub cannot even start
     for i, spec in enumerate(FETCH_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.github.fetch", spec)
     fetched_from = now_utc()
@@ -798,20 +877,32 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT):
         return "the copy's name could not be confirmed before the push"
     url = f"{forge.base}/{forge.user}/{check['name']}.git"
     git(cache, "config", "remote.forge.url", url)
+    for i, spec in enumerate(FORGE_SPEC):
+        git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.forge.fetch", spec)
+    out = twice(lambda: git(cache, "fetch", "--quiet", "--prune", "forge", env=forge.git_env(), timeout=limit))
+    if out is None or out.returncode != 0:
+        return "what the copy holds now could not be read from the forge" + (
+            "" if out is None else ": " + last_line(out.stderr))
+    kept = keep_before_moving(cache, report, full)
+    if kept is None:
+        return "an old commit could not be kept, so the copy was not moved"
+    dropped = drop_old_kept(cache, kept_days)
     if lfs:
         out = twice(lambda: git(cache, "lfs", "push", "--all", "forge", env=forge.git_env(), timeout=limit))
         if out is None:
             return f"the large files took longer than {limit} s to push, and so did the retry"
         if out.returncode != 0:
             return "the large files could not be pushed into the forge: " + last_line(out.stderr)
-    out = twice(lambda: git(cache, "push", "--quiet", "--atomic", "--prune", "forge", *FETCH_SPEC,
-                            env=forge.git_env(), timeout=limit))
-    if out is None:
-        return f"the push into the forge took longer than {limit} s, and so did the retry"
-    if out.returncode != 0 and "No refs in common and none specified" not in out.stderr:
-        empty = not refs_of(cache)
-        if not empty:
+    specs = push_specs(cache)
+    if specs:
+        out = twice(lambda: git(cache, "push", "--quiet", "--atomic", "forge", *specs, env=forge.git_env(),
+                                timeout=limit))
+        if out is None:
+            return f"the push into the forge took longer than {limit} s, and so did the retry"
+        if out.returncode != 0:
             return "the push into the forge failed: " + last_line(out.stderr)
+    if dropped:
+        report.append(f"{full}: {len(dropped)} kept ref(s) older than the kept period were dropped")
     rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
                last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
                lfs_missing=(lfs is False))
@@ -986,7 +1077,7 @@ def sync(p, args):
         rec.update(owner=owner, full_name=r["full_name"], gone_since="", copying_since=now_utc())
         save_state(p, st)
         try:
-            why = copy_one(p, forge, key, rec, r, report, limit)
+            why = copy_one(p, forge, key, rec, r, report, limit, s.get("kept_days"))
         except HardStop as e:
             rec["problem"] = "cannot refresh: the sync stopped"
             rec.pop("copying_since", None)
