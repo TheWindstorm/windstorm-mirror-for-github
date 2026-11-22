@@ -112,8 +112,8 @@ class Home:
         self.calls = []
         self.linger, self.enable_ok, self.service_ok = linger, enable_linger_ok, service_ok
         self.timer_next = "Sun 2026-11-22 19:15:00 UTC"     # what the system says of the sync timer's next run
-        self.forge_follows = False
-        self.auto_login, self.filevault = None, False      # a Mac's automatic login after a restart, and FileVault      # when True, stopping and starting the service stops and starts the forge
+        self.forge_follows = False      # when True, stopping and starting the service stops and starts the forge
+        self.auto_login, self.filevault = None, False      # a Mac's automatic login after a restart, and FileVault
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -403,7 +403,8 @@ class G1(unittest.TestCase):
             self.assertIn("nothing is changed", out)
             self.assertIn("download Gitea", out)
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
-            self.assertFalse([c for c in h.calls if c[:2] != ["loginctl", "show-user"]], "the dry run ran a command that changes something")
+            reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"])   # read-only checks
+            self.assertFalse([c for c in h.calls if c[:2] not in reads], "the dry run ran a command that changes something")
             p = h.place_gitea()
             self.assertEqual(h.setup()[0], 0)
             first = (fread(p["app_ini"]), fread(p["password"]), fread(p["mirror_key"]), mirror.forge_users(p))
@@ -418,8 +419,7 @@ class G1(unittest.TestCase):
             with Home() as h:
                 h.place_gitea()
                 rc, out = h.setup()
-                self.assertIn(mirror.NO_LOGIN_NOTE, out)
-                self.assertIn("FileVault", out)
+                self.assertIn(mirror.NO_LOGIN_NOTE, out)       # each Mac case, FileVault's too: the G1.7 test
             return
         with Home(linger="no", enable_linger_ok=False) as h:      # the system refuses: an administrator's step
             h.place_gitea()
