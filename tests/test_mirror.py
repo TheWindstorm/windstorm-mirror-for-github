@@ -1481,6 +1481,79 @@ class G7(unittest.TestCase):
                 self.assertIn("already has a forge", out)
 
 
+class G8(unittest.TestCase):
+    def test_G8_1_the_forge_answers_on_this_computer_only(self):
+        addrs = mirror.own_addresses()
+        others = [a for a in addrs if not (a == "::1" or a.startswith("127."))]
+        # Something that listens on every address is caught, address by address.
+        wide = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        wide.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        wide.bind(("0.0.0.0", 0))
+        wide.listen(8)
+        try:
+            v4 = [a for a in others if ":" not in a]
+            if v4:                                     # an address on a bridge that is down answers nothing at all
+                caught = mirror.answers_on(addrs, wide.getsockname()[1])
+                self.assertTrue(caught, "a listener on every address was not caught on any of them")
+                self.assertTrue(set(caught) <= set(v4))
+        finally:
+            wide.close()
+        narrow = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        narrow.bind(("127.0.0.1", 0))
+        narrow.listen(8)
+        try:
+            self.assertEqual(mirror.answers_on(addrs, narrow.getsockname()[1]), [])
+        finally:
+            narrow.close()
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es)", out)
+            saved = mirror.answers_on
+            mirror.answers_on = lambda a, p: ["192.0.2.7"]
+            try:
+                rc, out = status()
+            finally:
+                mirror.answers_on = saved
+            self.assertEqual(rc, 1)
+            self.assertIn("problem: the forge answers on 192.0.2.7, not only on 127.0.0.1", out)
+
+    def test_G8_2_exposing_the_forge_is_left_to_the_person(self):
+        src = fread(SCRIPT)
+        self.assertNotIn("0.0.0.0", src)
+        for tool in ("ngrok", "cloudflared", "tailscale", "frpc", "localtunnel", '"-R"', "serveo"):
+            self.assertNotIn(tool, src.lower(), tool)
+        self.assertEqual(re.findall(r"HTTP_ADDR = (\S+)", mirror.app_ini(mirror.paths(), 3000)), ["127.0.0.1"])
+        with Home() as h:
+            p = mirror.paths()
+            before = tree(h.tmp)
+            rc, out = quiet(mirror.main, ["expose"])
+            self.assertEqual(rc, 0)
+            self.assertIn("this skill will not change that", out)
+            self.assertIn("Anyone who can reach it can try to sign in", out)
+            self.assertIn("Nothing was changed.", out)
+            self.assertEqual(tree(h.tmp), before)
+            self.assertEqual(h.calls, [])
+
+    def test_G8_3_the_person_is_told_the_copy_is_as_private_as_this_computer(self):
+        sentence = ("The copy is as private as this computer. Anyone who can read this account's files can read every "
+                    "project in it. Disk encryption, and who uses this computer, are yours.")
+        self.assertEqual(mirror.PRIVATE_AS_THIS_COMPUTER, sentence)
+        self.assertIn(sentence, fread(os.path.join(ROOT, "README.md")))
+        with World(self) as w:
+            self.assertIn(sentence, quiet(mirror.main, ["setup"])[1])
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            rc, out = w.sync("--announce")
+            self.assertIn(sentence, out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "something was copied before the person was told")
+
+
 class Harness(unittest.TestCase):
     def test_a_suite_stopped_part_way_leaves_no_forge_running(self):
         if not real_gitea():

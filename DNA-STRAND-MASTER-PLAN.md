@@ -194,9 +194,9 @@ reaches several owners, and a classic key that can read private repositories can
 
 | Codon | Claim | Proof |
 |---|---|---|
-| G8.1 | No setting the skill writes opens the forge to the network, and the skill runs no tunnel. `status` tries the forge's port on each of this computer's own network addresses, and reports a failure if it answers on any but 127.0.0.1. | `test_G8_1_the_forge_answers_on_this_computer_only` *(to build)* |
-| G8.2 | Making the forge reachable from other computers is the person's own choice. The skill does not do it, and it says what that would mean. | `test_G8_2_exposing_the_forge_is_left_to_the_person` *(to build)* |
-| G8.3 | Before the first copy, `setup` says, and the README says: "The copy is as private as this computer. Anyone who can read this account's files can read every project in it. Disk encryption, and who uses this computer, are yours." | `test_G8_3_the_person_is_told_the_copy_is_as_private_as_this_computer` *(to build)* |
+| G8.1 | No setting the skill writes opens the forge to the network, and the skill runs no tunnel. `status` tries the forge's port on each of this computer's own network addresses, and reports a failure if it answers on any but 127.0.0.1. | `test_G8_1_the_forge_answers_on_this_computer_only` |
+| G8.2 | Making the forge reachable from other computers is the person's own choice. The skill does not do it, and it says what that would mean. | `test_G8_2_exposing_the_forge_is_left_to_the_person` |
+| G8.3 | Before the first copy, `setup` says, and the README says: "The copy is as private as this computer. Anyone who can read this account's files can read every project in it. Disk encryption, and who uses this computer, are yours." | `test_G8_3_the_person_is_told_the_copy_is_as_private_as_this_computer` |
 
 ### G9 Upgrade, self-update, uninstall
 

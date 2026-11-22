@@ -15,9 +15,13 @@ Nothing here can be installed yet. This skill is built in the open, in this orde
 3. Tests on real machines that have none of our set-up, before any release. The first proof is a restore drill:
    every project recovered from the mirror alone.
 
-## One rule already
+## Two rules already
 
-The mirror is for you. By default it is not reachable from the internet.
+The mirror is for you. It listens on this computer only, and the skill never opens it to the network or runs a
+tunnel. Making it reachable from other computers is your own choice, and `mirror.py expose` says what that
+would mean without changing anything.
+
+The copy is as private as this computer. Anyone who can read this account's files can read every project in it. Disk encryption, and who uses this computer, are yours.
 
 ## Family
 
