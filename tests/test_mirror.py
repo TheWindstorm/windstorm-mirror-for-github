@@ -1786,6 +1786,34 @@ class G10(unittest.TestCase):
         self.assertIn("sudo loginctl enable-linger", fread(SCRIPT))
 
 
+class Invariants(unittest.TestCase):
+    def test_INV6_standard_library_only_and_no_other_network(self):
+        import ast
+        tree_ = ast.parse(fread(SCRIPT))
+        mods = {a.name.split(".")[0] for n in ast.walk(tree_) if isinstance(n, ast.Import) for a in n.names}
+        mods |= {n.module.split(".")[0] for n in ast.walk(tree_) if isinstance(n, ast.ImportFrom) and n.module}
+        if hasattr(sys, "stdlib_module_names"):
+            self.assertEqual(mods - set(sys.stdlib_module_names), set(), "a module outside the standard library")
+        # Every address it can reach: GitHub (its API and git), Gitea's download site, its own forge on this
+        # computer. The plist's DOCTYPE names Apple's DTD and is never fetched.
+        allowed = {"http://127.0.0.1", "https://api.github.com", "https://github.com", "https://dl.gitea.com/gitea",
+                   "https://github.com/TheWindstorm/windstorm-mirror-for-github", "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
+                   "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
+        found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
+        self.assertEqual(found - allowed, set(), "an address outside the allowed ones")
+        self.assertEqual(len(re.findall(r"urlopen\(|build_opener\(", fread(SCRIPT))), 5,
+                         "a new way to reach the network: name it here and in the plan")
+        # What it runs: git, the forge's binary, the system's service manager, the system's own address list,
+        # and itself (to check a self-update before it is swapped in).
+        progs = set()
+        for n in ast.walk(tree_):
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "run" and n.args and isinstance(n.args[0], ast.List):
+                first = n.args[0].elts[0] if n.args[0].elts else None
+                progs.add(first.value if isinstance(first, ast.Constant) else ast.unparse(first))
+        self.assertEqual(progs - {"git", "systemctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
+                                  "running_bin(p)", "binary"}, set(), progs)
+
+
 class Harness(unittest.TestCase):
     def test_a_suite_stopped_part_way_leaves_no_forge_running(self):
         if not real_gitea():

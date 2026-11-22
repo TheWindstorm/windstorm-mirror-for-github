@@ -268,7 +268,7 @@ These hold across every gene. A change that breaks one is a plan change first.
 | INV3 A key is kept in one file of its own, only the person can read it, and it is never printed, logged, put on a command line or given to Gitea for GitHub. | G2.2, G3.4, G6.4 |
 | INV4 It never deletes a copy, and never drops the only ref to a commit before the set period. | G3.6, G5.2, G9.3 |
 | INV5 It never shows a copy as current that it has not seen current. | G6.1, G6.2 |
-| INV6 Python standard library only; it calls `git`, the pinned Gitea binary, GitHub's API and its own forge, and nothing else. | `test_INV6_standard_library_only_and_no_other_network` *(to build)* |
+| INV6 Python standard library only. Over the network it reaches only GitHub (its API, with or without a key, and git), Gitea's download site for the pinned binary, and any host those two send it on to for that same request; its own forge on 127.0.0.1; and an address the person names for `restore --to`, through git. The programs it runs are `git`, the pinned Gitea binary, the service manager (`systemctl` and `loginctl`, or `launchctl`), the system's address list (`ip` or `ifconfig`), and Python itself to check a self-update. | `test_INV6_standard_library_only_and_no_other_network` |
 | INV7 Nothing it does costs money. It uses no paid service and no paid store, and it never touches billing. | by review: no code path names one |
 
 The link between this plan and the tests is itself tested: every proof named here is a real test, and every codon
