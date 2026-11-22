@@ -52,6 +52,9 @@ show.
   - a fine-grained key's headers;
   - the expiry header on a key that has an expiry;
   - the answer for a key still waiting for approval.
+- What leans on this and is not seen yet: G6.5's line for each key's expiry and its 14-day warning read the
+  `github-authentication-token-expiration` header, which no key read so far has carried; G2.1's page and
+  settings; G2.3's "a fine-grained key sends no scopes header"; G2.4's pending state.
 
 ## C4 The allowance
 
@@ -120,8 +123,13 @@ Seen:
 - Seen in part, on 2026-11-22, in a Linux test account with no administrator rights and lingering already on:
   `setup` wrote the systemd user unit, and `systemctl --user enable --now` started it. The forge answered on
   127.0.0.1, and the sync timer was enabled beside it.
-- Not seen yet: either one across a restart; lingering switched on by a person who is not an administrator;
-  launchd on macOS, on Intel and Apple Silicon, with FileVault on and off.
+- Seen on 2026-11-22, on a Mac on Intel (macOS 13.7) with FileVault off and the system logging its account in
+  by itself: two launch agents in that account, one with `RunAtLoad` and `KeepAlive` and one with a 300-second
+  `StartInterval`, came back after a restart. The first ran 45 s after the boot; the second ran 316 s after it,
+  then on its interval. `launchctl print` showed `run interval = 300 seconds`, the text `status` reads. Before
+  the restart, agents loaded over a remote login ran while no one was at the console.
+- Not seen yet: the systemd user unit across a restart; lingering switched on by a person who is not an
+  administrator; a Mac restart with no automatic login (FileVault on turns it off); Apple Silicon.
 
 ## C10 Gitea's settings take effect
 

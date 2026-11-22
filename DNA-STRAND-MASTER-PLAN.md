@@ -123,6 +123,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.4 | Setup makes two Gitea accounts: the person's (an administrator), and a `mirror` account that owns the copies. It writes the person's first password to a file only they can read, and says where. It never prints the password. | `test_G1_4_setup_makes_the_two_accounts_and_never_prints_a_password` |
 | G1.5 | `setup --dry-run` says everything setup would do and changes nothing. Running `setup` twice does not make a second forge, account or service. | `test_G1_5_setup_dry_run_changes_nothing_and_setup_twice_is_one_setup` |
 | G1.6 | Where the forge and the timer start only once the person logs in, `setup` and `status` say so in plain words: "after a restart, the copy stands still until you log in". That covers a Linux account without lingering, and every Mac (a launchd agent runs only in a login session; with FileVault on, nothing runs before someone logs in). On Linux, `setup` first tries `loginctl enable-linger` for the person's own account. When the system refuses, it names that as a step for the computer's administrator, with the one command they run. | `test_G1_6_when_it_will_not_come_back_by_itself_it_says_so` |
+| G1.7 | On a Mac, the forge comes back by itself after a restart only when the system logs the person in by itself (automatic login set to them, FileVault off). Otherwise setup says the copy stands still until they log in, and why. | `test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login` |
 
 ### G2 The GitHub keys: one read-only key per owner, each in its own file, each watched
 
@@ -178,7 +179,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G6.2 | A copy that cannot refresh is never shown as current, for any reason. There is no "known stale" pardon. | `test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current` |
 | G6.3 | `status` scans every repository config in the forge, and the skill's own files, for anything shaped like a key. A scan that read no files is a failure, not a pass. | `test_G6_3_the_key_scan_counts_what_it_read_and_zero_is_a_failure` |
 | G6.4 | The skill never prints or logs a key, a password or a config file whole. It reads settings by name. | `test_G6_4_no_secret_reaches_the_output_or_the_log` |
-| G6.5 | `status` shows the forge's version, the key's expiry, free disk space, the last good sync, and the next. | `test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync` |
+| G6.5 | `status` shows the forge's version, the key's expiry, free disk space, the last good sync, and the next. The expiry leans on a header not seen yet (C3): when GitHub's answer carries no expiry the skill can read, `status` says "expiry not known", never "no expiry" and never a date it worked out, and no warning fires on a guess. | `test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync` |
 | G6.6 | Once a day, `status` asks GitHub for this skill's latest release, one call with no key. It says when that release pins a newer Gitea than the one running, and whether the release names it as a security fix. It changes nothing by itself: `self-update`, then `upgrade-forge`, is the person's choice. | `test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge` |
 
 ### G7 Restore
