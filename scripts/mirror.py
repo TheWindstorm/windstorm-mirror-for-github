@@ -573,6 +573,8 @@ def setting(s, name):
     v = s.get(name, DEFAULTS[name])
     low = 1 if name in ("interval_min", "git_timeout_s", "full_pass_hours") else 0
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= low else DEFAULTS[name]
+PRIVATE_AS_THIS_COMPUTER = ("The copy is as private as this computer. Anyone who can read this account's files can "
+                            "read every project in it. Disk encryption, and who uses this computer, are yours.")
 NOT_COPIED = "Not copied in 0.1: GitHub's pull-request refs, releases, issues and wikis."
 FETCH_SPEC = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
 # What the copy holds now, read back from the forge before each push: the copy's branches and tags, and the kept refs.
@@ -1072,8 +1074,7 @@ def sync(p, args):
         say(f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
             f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).")
         say(NOT_COPIED)
-        say("The copy is as private as this computer. Anyone who can read this account's files can read every "
-            "project in it. Disk encryption, and who uses this computer, are yours.")
+        say(PRIVATE_AS_THIS_COMPUTER)
         st["announced"] = now_utc()
         save_state(p, st)
         say("When the person says go, run: sync")
@@ -1223,6 +1224,7 @@ def cmd_setup(args):
         if ok else f"The forge's service did not start: {why}")
     back, note = comes_back_by_itself()
     say("After a restart it starts by itself." if back else note)
+    say(PRIVATE_AS_THIS_COMPUTER)
     return 0 if ok else 1
 
 
@@ -1323,6 +1325,61 @@ def release_check(st, force=False):
     return lines or [f"newer release: none (latest {rc.get('tag') or 'none'})"]
 
 
+def own_addresses():
+    """Every address of this computer's own network interfaces, as the system lists them (no other host is asked)."""
+    found = set()
+    for cmd in (["ip", "-o", "addr", "show"], ["ifconfig", "-a"]):
+        try:
+            out = run(cmd, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode == 0:
+            found |= set(re.findall(r"\binet6?\s+(?:addr:)?([0-9a-fA-F:.]+[0-9a-fA-F])", out.stdout))
+            break
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            found.add(info[4][0])
+    except OSError:
+        pass
+    return sorted(a.split("%")[0] for a in found if a)
+
+
+def answers_on(addresses, port):
+    """The addresses, other than this computer's loopback, on which something answers at this port."""
+    open_on = []
+    for a in addresses:
+        if a == "::1" or a.startswith("127."):
+            continue
+        fam = socket.AF_INET6 if ":" in a else socket.AF_INET
+        if fam == socket.AF_INET6 and a.lower().startswith("fe80"):
+            continue                               # link-local needs a scope to be tried
+        try:
+            with socket.socket(fam, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((a, int(port))) == 0:
+                    open_on.append(a)
+        except OSError:
+            pass
+    return open_on
+
+
+EXPOSE_TEXT = """The forge listens on 127.0.0.1 only: no other computer can reach it, and this skill will not change that.
+
+Opening it to other computers is your own choice and your own step. What it would mean:
+- Anyone who can reach it can try to sign in. Its accounts and every copy are then guarded by passwords and keys
+  alone, and a forge open to the internet is found and tried within hours.
+- Gitea's updates become urgent: a security fix matters the day it is out (`status` says when one is pinned).
+- The usual roads are a private network of your own devices (a VPN), or a reverse proxy with TLS in front of
+  it. Both are outside this skill, and `status` reports the forge as reachable from outside each time it runs.
+Nothing was changed."""
+
+
+def cmd_expose(args):
+    """G8.2: the skill does not open the forge; it says what opening it would mean."""
+    say(EXPOSE_TEXT)
+    return 0
+
+
 def cmd_status(args):
     """G6: one line per problem, then the count of copies, then the forge, the keys, the disk and the syncs."""
     p = paths()
@@ -1376,6 +1433,10 @@ def cmd_status(args):
     floor_mb = setting(s, "disk_floor_mb")
     if free_mb < floor_mb:
         problems.append(f"only {free_mb} MB free on this disk, below the floor of {floor_mb} MB: syncs do not start")
+    addrs = own_addresses()
+    outside = answers_on(addrs, st["port"])
+    for a in outside:
+        problems.append(f"the forge answers on {a}, not only on 127.0.0.1: other computers may reach it")
     when, tproblem = next_sync()
     if tproblem:
         problems.append(tproblem)
@@ -1394,6 +1455,9 @@ def cmd_status(args):
     say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "
         f"(pinned {GITEA_VERSION})")
     say(f"disk: {free_mb} MB free (floor {floor_mb} MB)")
+    others = [a for a in addrs if not (a == "::1" or a.startswith("127."))]
+    say(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es) of this computer)"
+        if not outside else f"network: the forge answers on {', '.join(outside)} too")
     last = st.get("last_sync") or {}
     say(f"last good sync: {st.get('last_good_sync') or 'none yet'}")
     if last:
@@ -1774,6 +1838,8 @@ def main(argv=None):
     rs.add_argument("--to", metavar="URL", help="a new, empty home for one copy (never GitHub)")
     rs.add_argument("repository", nargs="?", help="owner/name of the copy to put in the new home")
     rs.set_defaults(fn=cmd_restore)
+    e = sub.add_parser("expose", help="what opening the forge to other computers would mean (changes nothing)")
+    e.set_defaults(fn=cmd_expose)
     b = sub.add_parser("backup", help="the forge's own backup plus the skill's settings, readable by you only")
     b.add_argument("folder")
     b.set_defaults(fn=cmd_backup)
