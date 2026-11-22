@@ -1710,6 +1710,82 @@ class G9(unittest.TestCase):
             self.assertFalse(os.path.exists(p["data"]))
 
 
+SKILL = os.path.join(ROOT, "skills", "mirror", "SKILL.md")
+
+
+def skill_front():
+    text = fread(SKILL)
+    head, sep, body = text[4:].partition("\n---\n")
+    assert text.startswith("---\n") and sep, "no front matter"
+    front = {}
+    for line in head.splitlines():
+        m = re.fullmatch(r"([a-z-]+): (.*)", line)
+        assert m and "\t" not in line, f"not a plain 'key: value' line: {line[:60]}"
+        k, v = m.groups()
+        if v.startswith("'"):
+            assert v.endswith("'") and "'" not in v[1:-1].replace("''", ""), "a quote inside a single-quoted value"
+            v = v[1:-1].replace("''", "'")
+        elif v.startswith('"'):
+            v = json.loads(v)
+        else:
+            assert not re.search(r": |#|^[\[{&*!|>%@`]", v), f"a plain value YAML could read otherwise: {k}"
+        front[k] = v
+    return text, front, body
+
+
+def section(body, title):
+    m = re.search(rf"^## {re.escape(title)}\n(.*?)(?=^## |\Z)", body, re.M | re.S)
+    assert m, title
+    return m.group(1)
+
+
+class G10(unittest.TestCase):
+    def test_G10_1_skill_md_fits_the_agent_skills_format(self):
+        text, front, body = skill_front()
+        self.assertEqual(front["name"], "mirror")
+        self.assertEqual(os.path.basename(os.path.dirname(SKILL)), front["name"])
+        self.assertRegex(front["name"], r"^[a-z0-9-]{1,64}$")
+        self.assertLessEqual(len(front["description"]), 1024)
+        self.assertIn("Use when", front["description"])
+        self.assertEqual(front.get("license"), "Apache-2.0")
+        self.assertLess(len(text.splitlines()), 500)
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(SKILL), "..", "..", "scripts", "mirror.py")),
+                        "the script is not two levels above the skill")
+
+    def test_G10_2_skill_md_gives_the_steps_in_the_fixed_order(self):
+        _, _, body = skill_front()
+        order = section(body, "The order")
+        steps = re.findall(r"^(\d+)\. (.+?)(?=^\d+\. |\Z)", order, re.M | re.S)
+        self.assertEqual([int(n) for n, _ in steps], list(range(1, 9)))
+        want = ["`M setup --dry-run`", "the keys to make", "`M setup`", "`key set`", "`M sync --announce`",
+                "`M sync`", "`M status`", "`M restore --check`"]
+        for (n, text), w in zip(steps, want):
+            self.assertTrue(text.startswith(w) or text.startswith("**Person**: " + w.strip("`")) or w in text.split(".")[0],
+                            f"step {n} is not {w}: {text[:60]}")
+        # Every command the skill tells the agent to run is one the script has.
+        for cmd in sorted(set(re.findall(r"`M ([a-z-]+)", body))):
+            with self.assertRaises(SystemExit) as e:
+                quiet(mirror.main, [cmd, "--help"])
+            self.assertEqual(e.exception.code, 0, cmd)
+
+    def test_G10_3_every_step_that_is_the_persons_is_named_with_what_to_say(self):
+        _, _, body = skill_front()
+        steps = section(body, "The person's steps")
+        for name in ("Logging in to GitHub.", "Making each key.", "An organisation's approval.",
+                     "The go for the first copy.", "The administrator's command."):
+            m = re.search(rf"\*\*{re.escape(name)}\*\*(.*?)(?=\n\n|\Z)", steps, re.S)
+            self.assertTrue(m, name)
+            self.assertRegex(m.group(1), r'[Ss]ay[^"]*: "[^"]+"', f"{name} does not say what the agent tells the person")
+        self.assertIn("You never log in for them", steps)
+        self.assertRegex(steps, r"Agree, Accept or\s+Continue, never press it")
+        order = section(body, "The order")
+        marked = [n for n, text in re.findall(r"^(\d+)\. (.+?)(?=^\d+\. |\Z)", order, re.M | re.S) if "**Person**" in text]
+        self.assertEqual(marked, ["2", "3", "4", "5"], "the person's steps in the order are not the ones named")
+        # What the skill says about lingering matches what setup itself prints (G1.6).
+        self.assertIn("sudo loginctl enable-linger", steps)
+        self.assertIn("sudo loginctl enable-linger", fread(SCRIPT))
+
+
 class Harness(unittest.TestCase):
     def test_a_suite_stopped_part_way_leaves_no_forge_running(self):
         if not real_gitea():
