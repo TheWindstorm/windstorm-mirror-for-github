@@ -1,6 +1,6 @@
 # DNA Strand Master Plan: Windstorm Mirror for GitHub
 
-Plan version 1.1 (2026-11-22), reviewed. Builds nothing yet: the plan is reviewed before any code. The first
+Plan version 1.2 (2026-11-22), reviewed; contracts being seen. Builds nothing yet: the plan is reviewed before any code. The first
 release will be 0.1.0. What is promised for it is in the genes below and in `PROMISES.json`.
 
 This is the plan the skill is built from. Each gene is one thing the skill does. Each codon is one claim small
@@ -143,12 +143,12 @@ reaches several owners, and a classic key that can read private repositories can
 | Codon | Claim | Proof |
 |---|---|---|
 | G3.1 | Each sync asks GitHub, with each owner's own key, for every repository the person owns, plus those of the organisations named in the settings, page by page to the last page. A page that fails stops the listing: the skill never acts on half a list as if it were whole. | `test_G3_1_every_repository_is_found_page_by_page_to_the_end` *(to build)* |
-| G3.2 | A repository is known by GitHub's numeric id, not by its name. When it is renamed on GitHub, the copy is renamed too. When a new repository takes an old copy's name, the old copy is moved aside under a new name, never overwritten. | `test_G3_2_a_rename_or_a_reused_name_never_writes_one_project_over_another` *(to build)* |
+| G3.2 | A repository is known by GitHub's numeric id, not by its name. When it is renamed on GitHub, the copy is renamed too. When a new repository takes an old copy's name, the old copy is moved aside under a new name, never overwritten. Before every push, the skill reads the copy's current name by Gitea's id and checks it, and git never follows a redirect (`http.followRedirects false`), because Gitea sends a push to an old name on to the renamed repository (C7). | `test_G3_2_a_rename_or_a_reused_name_never_writes_one_project_over_another` *(to build)* |
 | G3.3 | A copy is made as a private repository of the `mirror` account, with Actions off. Branches and tags are copied. GitHub's pull-request refs, releases, issues and wikis are not copied in 0.1, and `status` says so. | `test_G3_3_branches_and_tags_are_copied_and_what_is_not_is_said` *(to build)* |
 | G3.4 | The fetch from GitHub carries the key as a header set in the environment of that one git process. The key is never in a URL, a git config, a command line or the process list. | `test_G3_4_the_key_travels_only_in_the_fetchs_own_environment` *(to build)* |
 | G3.5 | Settings can leave repositories out by name or pattern, or name the only ones to copy (`include`). The default is all of them, and `status` lists what was left out and why. Archived, empty, forked and private repositories are copied unless left out. An `include` that matches nothing stops the sync: it never widens to everything. | `test_G3_5_what_is_left_out_is_chosen_and_listed` *(to build)* |
 | G3.6 | A repository deleted on GitHub, or no longer visible to the key, keeps its copy. `status` shows it as "gone from GitHub since <date>". The skill never deletes a copy. | `test_G3_6_a_repository_gone_from_github_keeps_its_copy` *(to build)* |
-| G3.7 | Before the first copy, the skill says what it is about to do: how many repositories, their total size as GitHub reports it, and a rough time measured from the first one. It waits for the person's go before starting the rest. The first copy runs in the background; `status` shows its progress and what is left. | `test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts` *(to build)* |
+| G3.7 | Before the first copy, the skill says what it is about to do: how many repositories, their total size as GitHub reports it (which can read 0, C1), and a rough time measured from the first ones. It waits for the person's go before starting the rest. The first copy runs in the background; `status` shows its progress and what is left. | `test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts` *(to build)* |
 | G3.8 | Large files (Git LFS) are copied with the repository when `git lfs` is installed, using the same in-memory key. A repository that uses large files on a computer without `git lfs` is copied without them, and `status` names it. | `test_G3_8_large_files_are_copied_or_named_as_missing` *(to build)* |
 
 ### G4 Stay current
@@ -188,7 +188,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G7.1 | Each sync writes down the refs it last saw on GitHub for every repository. | `test_G7_1_each_sync_writes_down_the_refs_github_last_showed` *(to build)* |
 | G7.2 | `restore --check` needs no network beyond this computer. It clones every copy from the forge into a scratch folder, checks every branch and tag against the last refs seen on GitHub, runs `git fsck`, prints one line per difference, then a total, and removes the scratch folder. | `test_G7_2_restore_check_proves_every_copy_from_the_forge_alone` *(to build)* |
 | G7.3 | `restore --to <url> <repository>` pushes one copy, every branch and tag, to a new, empty home the person names. It refuses a home that is not empty. | `test_G7_3_a_copy_is_restored_to_a_new_empty_home` *(to build)* |
-| G7.4 | `backup <folder>` writes the forge's own backup (Gitea's dump) plus the skill's settings without its keys. A new computer with only that file and the skill gets back every copy (`setup --from <file>`). | `test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup` *(to build)* |
+| G7.4 | `backup <folder>` writes the forge's own backup (Gitea's dump) plus the skill's settings without its keys. The file holds the forge's own secrets, so it is readable by the person only, and the skill says so (C8). A new computer with only that file and the skill gets back every copy (`setup --from <file>`). | `test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup` *(to build)* |
 
 ### G8 Never reachable from outside
 
@@ -233,17 +233,17 @@ written in `docs/CONTRACTS.md` with what was seen, on what and when, before the 
 
 | Contract | What must hold | Leaned on by | Seen |
 |---|---|---|---|
-| C1 | GitHub's repository listings (`/user/repos`, owner affiliation; `/orgs/<org>/repos`) give `id`, `name`, `full_name`, `private`, `archived`, `fork`, `size`, `pushed_at` and `default_branch`. Paging works through the `Link` header, at most 100 to a page. | G3.1, G3.2, G3.7 | not yet |
-| C2 | `pushed_at` changes after a push, a force-push, a branch deletion and a tag push. | G4.6 | not yet |
-| C3 | A fine-grained key has one owner. What GitHub's answer shows about a key: scopes for a classic key, the expiry header, anything about a fine-grained key's rights, and the answer while an organisation's approval is pending. | G2.1 to G2.4 | GitHub's docs only (2026-11-22). A real key needs a login: the person's step. |
-| C4 | The allowance headers on REST answers, and whether git fetches over HTTPS count against the allowance. | G4.4, G4.6 | not yet |
+| C1 | GitHub's repository listings (`/user/repos`, owner affiliation; `/orgs/<org>/repos`) give `id`, `name`, `full_name`, `private`, `archived`, `fork`, `size`, `pushed_at` and `default_branch`. Paging works through the `Link` header, at most 100 to a page. | G3.1, G3.2, G3.7 | in part, 2026-11-22: the fields and `Link` paging on an organisation's listing. `size` read 0 after pushes. Not yet: the 100 cap, `/user/repos` |
+| C2 | `pushed_at` changes after a push, a force-push, a branch deletion and a tag push. | G4.6 | 2026-11-22: it moved within 8 s on all four |
+| C3 | A fine-grained key has one owner. What GitHub's answer shows about a key: scopes for a classic key, the expiry header, anything about a fine-grained key's rights, and the answer while an organisation's approval is pending. | G2.1 to G2.4 | in part, 2026-11-22: a classic key's scope headers. A fine-grained key from GitHub's docs only; a real one needs a login, the person's step |
+| C4 | The allowance headers on REST answers, and whether git fetches over HTTPS count against the allowance. | G4.4, G4.6 | 2026-11-22: the headers; with no key, git fetches spent no REST calls. Not yet with a key |
 | C5 | `git fetch` with the key in that process's environment (`GIT_CONFIG_COUNT`, an extra header scoped to github.com), and `git lfs fetch` with the same key. | G3.4, G3.8 | 2026-11-22, a Linux test account, a private repository made for the proof |
-| C6 | In stock Gitea 28.4.0: a repository created through the API, then branches, tags, large files and `kept/...` branches pushed to it. | G3.3, G3.8, G5.1 | 2026-11-22, as an administrator. Not yet as the `mirror` account. |
-| C7 | A rename through Gitea's API, and what Gitea answers for the old name. | G3.2 | not yet |
-| C8 | `gitea dump` on 28.4.0, and a restore from it on another computer. | G7.4, G9.1 | not yet |
+| C6 | In stock Gitea 28.4.0: a repository created through the API, then branches, tags, large files and `kept/...` branches pushed to it. | G3.3, G3.8, G5.1 | 2026-11-22, as an administrator, and as the `mirror` account (its key needs `write:repository` and `write:user`) |
+| C7 | A rename through Gitea's API, and what Gitea answers for the old name. | G3.2 | 2026-11-22: the id is kept, the old name answers 301, and **a push to the old URL lands on the renamed repository** |
+| C8 | `gitea dump` on 28.4.0, and a restore from it on another computer. | G7.4, G9.1 | 2026-11-22: a dump restored on another Linux computer, with every user and repository under its old id, and fsck clean. Not yet with large files |
 | C9 | The boot service: a systemd user unit with and without lingering, and `loginctl enable-linger` run by a person who is not an administrator; a launchd agent on macOS on Intel and Apple Silicon, with FileVault on and off. | G1.2, G1.6, G4.1 | not yet |
 | C10 | Gitea's settings take effect: it listens on 127.0.0.1 only, sign-up is closed, signing in is needed to view anything, and Actions are off (for the whole forge and per repository). Probed from another computer. | G1.3, G8.1 | in part, 2026-11-22: the settings were set; not probed from another computer |
-| C11 | GitHub's answer for this skill's latest release, read with no key. | G6.6 | not yet |
+| C11 | GitHub's answer for this skill's latest release, read with no key. | G6.6 | 2026-11-22, with no key, 60 an hour |
 
 ## Promises
 
