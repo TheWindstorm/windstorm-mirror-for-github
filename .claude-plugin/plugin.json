@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "windstorm-mirror-for-github",
+  "version": "0.0.0",
+  "description": "Windstorm Mirror for GitHub: a second, always-current copy of all your GitHub projects on a computer you own. Not released: nothing here can be installed yet.",
+  "author": {
+    "name": "The Windstorm",
+    "url": "https://github.com/TheWindstorm"
+  },
+  "homepage": "https://github.com/TheWindstorm/windstorm-mirror-for-github",
+  "repository": "https://github.com/TheWindstorm/windstorm-mirror-for-github",
+  "license": "Apache-2.0",
+  "keywords": ["mirror", "backup", "git", "gitea", "restore", "self-hosted"]
+}
