@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Tests for Windstorm Mirror for GitHub. Standard library only: python3 tests/test_mirror.py -v"""
+import atexit
 import contextlib
 import hashlib
+import signal
 import http.server
 import io
 import json
@@ -48,6 +50,32 @@ def v(s):
 
 # ------------------------------------------------------------------ helpers for the forge genes
 
+STARTED = []           # every forge process a test started, stopped whatever way the suite ends
+TEMPS = []
+
+
+def _stop_everything(*_):
+    for pr in STARTED:
+        if pr.poll() is None:
+            pr.terminate()
+            try:
+                pr.wait(10)
+            except subprocess.TimeoutExpired:
+                pr.kill()
+    for d in TEMPS:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _on_signal(sig, frame):
+    _stop_everything()
+    os._exit(128 + sig)
+
+
+atexit.register(_stop_everything)
+for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(_sig, _on_signal)
+
+
 def real_gitea():
     """The real pinned Gitea for this system, downloaded once into WSM_TEST_CACHE and checked against the pin.
     Without WSM_TEST_CACHE the tests that need it are skipped. CI sets WSM_REQUIRE_GITEA=1 as well, so there a
@@ -73,6 +101,7 @@ class Home:
 
     def __init__(self, linger="no", enable_linger_ok=False, service_ok=True):
         self.tmp = tempfile.mkdtemp(prefix="wsm-")
+        TEMPS.append(self.tmp)
         self.calls = []
         self.linger, self.enable_ok, self.service_ok = linger, enable_linger_ok, service_ok
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
@@ -139,6 +168,7 @@ class Home:
         pr = subprocess.Popen([sys.executable, "-I", p["script"], "run-forge"], env=dict(os.environ),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.procs.append(pr)
+        STARTED.append(pr)
         port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
         for _ in range(120):
             try:
@@ -447,6 +477,375 @@ class G2(unittest.TestCase):
             self.assertNotIn("not-the-key", out)
             self.assertEqual(fread(mirror.key_path(p, "someone")).strip(), key, "a refused key replaced a good one")
             self.assertEqual(self.gh.writes(), [], "something was written to GitHub")
+
+
+# ------------------------------------------------------------------ G3 find and copy (with G2.5)
+
+def quiet(fn, *args):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = fn(*args)
+    return rc, out.getvalue()
+
+
+class World:
+    """A stand-in GitHub, and a real forge of the person's own, set up and running, with the person's key kept."""
+
+    def __init__(self, tc):
+        self.tc = tc
+
+    def __enter__(self):
+        self.home = Home(linger="yes").__enter__()
+        try:
+            self.home.place_gitea()
+            rc, out = self.home.setup()
+            self.tc.assertEqual(rc, 0, out)
+            self.port, _ = self.home.start_forge()
+        except BaseException:
+            self.home.__exit__(None, None, None)
+            raise
+        self.gh_root = tempfile.mkdtemp(prefix="wsm-gh-")
+        TEMPS.append(self.gh_root)
+        self.gh = FakeGitHub(self.gh_root, key="ghkey-" + "a1" * 10)
+        base = self.gh.start()
+        os.environ["WSM_GITHUB_API"] = base
+        os.environ["WSM_GITHUB_GIT"] = base
+        self.p = mirror.paths()
+        return self
+
+    def __exit__(self, *a):
+        self.gh.stop()
+        os.environ.pop("WSM_GITHUB_API", None)
+        os.environ.pop("WSM_GITHUB_GIT", None)
+        shutil.rmtree(self.gh_root, ignore_errors=True)
+        self.home.__exit__(*a)
+
+    def key_set(self, owner="someone", key=None):
+        saved = sys.stdin
+        sys.stdin = io.StringIO((key or self.gh.key) + "\n")
+        try:
+            return quiet(mirror.main, ["key", "set", owner])
+        finally:
+            sys.stdin = saved
+
+    def sync(self, *args):
+        return quiet(mirror.main, ["sync", *args])
+
+    def first_sync(self):
+        self.tc.assertEqual(self.sync("--announce")[0], 0)
+        return self.sync()
+
+    def forge_get(self, path):
+        key = fread(self.p["mirror_key"]).strip()
+        code, _, body = http_get(f"http://127.0.0.1:{self.port}/api/v1{path}", key)
+        return code, (json.loads(body) if body.strip().startswith(("{", "[")) else body)
+
+    def forge_refs(self, name):
+        key = fread(self.p["mirror_key"]).strip()
+        hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+        env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"http.http://127.0.0.1:{self.port}/.extraheader",
+                   GIT_CONFIG_VALUE_0=hdr, GIT_TERMINAL_PROMPT="0")
+        out = subprocess.run(["git", "ls-remote", f"http://127.0.0.1:{self.port}/mirror/{name}.git"],
+                             env=env, capture_output=True, text=True)
+        return {r: s for s, r in (line.split("\t") for line in out.stdout.splitlines()) if not r.endswith("^{}") and r != "HEAD"}
+
+    def gh_refs(self, full):
+        return {r: s for s, r in (line.split(" ") for line in self.gh.git(full, "for-each-ref", "--format=%(objectname) %(refname)").splitlines())}
+
+
+class G3(unittest.TestCase):
+    def test_G3_1_every_repository_is_found_page_by_page_to_the_end(self):
+        with World(self) as w:
+            w.gh.page_cap = 2
+            for i in range(5):
+                w.gh.add_repo("someone", f"r{i}")
+                w.gh.commit(f"someone/r{i}", {"f": b"x"})
+            self.assertEqual(w.key_set()[0], 0)
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("sync: 5 on GitHub, 5 copied now, 0 problem(s), 3 GitHub API call(s)", out)
+            # A page that fails stops that owner's listing: nothing is changed or marked gone for it.
+            w.gh.add_repo("someone", "r5")
+            w.gh.fail_page = ("/user/repos", 2)
+            rc, out = w.sync()
+            self.assertEqual(rc, 1)
+            self.assertIn("the listing of someone failed at page 2", out)
+            self.assertIn("nothing was changed for someone", out)
+            self.assertNotIn("gone from GitHub", out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual(len(st["repos"]), 5)
+            self.assertTrue(all(r["problem"].startswith("cannot refresh") for r in st["repos"].values()))
+            self.assertEqual(w.forge_get("/repos/mirror/someone--r5")[0], 404, "a repository from half a list was copied")
+
+    def test_G3_2_a_rename_or_a_reused_name_never_writes_one_project_over_another(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"alpha's own history"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            fid = w.forge_get("/repos/mirror/someone--alpha")[1]["id"]
+            alpha_refs = w.forge_refs("someone--alpha")
+            # Renamed on GitHub: the same copy follows, under its new name.
+            w.gh.rename("someone/alpha", "beta")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("renamed on GitHub", out)
+            code, beta = w.forge_get("/repos/mirror/someone--beta")
+            self.assertEqual((code, beta["id"]), (200, fid))
+            self.assertEqual(w.forge_refs("someone--beta"), alpha_refs)
+            # A new repository takes the old name on GitHub: it gets a copy of its own, and nothing is overwritten.
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"b": b"a different project"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            code, new = w.forge_get("/repos/mirror/someone--alpha")
+            self.assertEqual(code, 200)
+            self.assertNotEqual(new["id"], fid)
+            self.assertEqual(w.forge_refs("someone--beta"), alpha_refs, "the renamed project's copy was overwritten")
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+            # A copy left under a name another project now needs is moved aside, never overwritten.
+            w.gh.delete("someone/beta")
+            w.gh.rename("someone/alpha", "beta")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("moved aside to someone--beta--was-", out)
+            moved = [r for r in w.forge_get("/user/repos")[1] if r["name"].startswith("someone--beta--was-")]
+            self.assertEqual(len(moved), 1)
+            self.assertEqual(w.forge_refs(moved[0]["name"]), alpha_refs, "the old copy did not survive being moved aside")
+            # The script never lets git follow a redirect, and reads the name by id before each push.
+            src = fread(SCRIPT)
+            self.assertIn('"http.followRedirects=false"', src)
+            self.assertIn("forge.by_id(rec[\"forge_id\"])", src)
+
+    def test_G3_3_branches_and_tags_are_copied_and_what_is_not_is_said(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.commit("someone/alpha", {"b": b"2"}, branch="side")
+            w.gh.git("someone/alpha", "tag", "v1", "main")
+            w.gh.git("someone/alpha", "update-ref", "refs/pull/1/head", "side")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            want = {r: s for r, s in w.gh_refs("someone/alpha").items() if not r.startswith("refs/pull/")}
+            self.assertEqual(w.forge_refs("someone--alpha"), want)
+            self.assertIn(mirror.NOT_COPIED, out)
+            code, repo = w.forge_get("/repos/mirror/someone--alpha")
+            self.assertTrue(repo["private"])
+            self.assertFalse(repo["has_actions"])
+            self.assertEqual(w.gh.writes(), [])
+        # M17: a copy that comes back not private is deleted at once and the sync stops.
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            saved = mirror.Forge.call
+
+            def no_private(self_, method, path, body=None):
+                if method == "POST" and path == "/user/repos":
+                    body = {k: v for k, v in body.items() if k != "private"}
+                return saved(self_, method, path, body)
+            mirror.Forge.call = no_private
+            try:
+                w.sync("--announce")
+                rc, out = w.sync()
+            finally:
+                mirror.Forge.call = saved
+            self.assertEqual(rc, 1)
+            self.assertIn("STOPPED:", out)
+            self.assertIn("it was deleted at once (deleted)", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "a copy that came out public was kept, or the sync went on")
+
+    def test_G3_4_the_key_travels_only_in_the_fetchs_own_environment(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            key = w.gh.key
+            seen = []
+            inner = mirror.run
+
+            def spy(cmd, **kw):
+                seen.append((list(cmd), dict(kw.get("env") or {})))
+                return inner(cmd, **kw)
+            mirror.run = spy
+            try:
+                rc, out = w.first_sync()
+            finally:
+                mirror.run = inner
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(seen)
+            for cmd, env in seen:
+                self.assertFalse(any(key in a for a in cmd), f"the key was on a command line: {cmd[:4]}")
+                holds = any(key in v or __import__("base64").b64encode(f"x-access-token:{key}".encode()).decode() in v
+                            for v in env.values())
+                if holds:
+                    self.assertIn("fetch", cmd, f"the key was given to a process that does not fetch: {cmd[:6]}")
+            hits, read = files_holding(w.home.tmp, key)
+            self.assertGreater(read, 0)
+            self.assertEqual(hits, [mirror.key_path(w.p, "someone")], "the key was written somewhere else")
+            b64 = __import__("base64").b64encode(f"x-access-token:{key}".encode()).decode()
+            self.assertEqual(files_holding(w.home.tmp, b64)[0], [], "the key's header was written somewhere")
+            self.assertNotIn(key, out)
+
+    def test_G3_5_what_is_left_out_is_chosen_and_listed(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.add_repo("someone", "old", archived=True)
+            w.gh.add_repo("someone", "forked", fork=True)
+            w.gh.add_repo("someone", "empty")
+            w.gh.add_repo("someone", "secret-notes")
+            for n in ("alpha", "old", "forked", "secret-notes"):
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(quiet(mirror.main, ["config", "exclude", "someone/secret-*"])[0], 0)
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("left out: someone/secret-notes (left out by 'someone/secret-*')", out)
+            names = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
+            self.assertEqual(names, ["someone--alpha", "someone--empty", "someone--forked", "someone--old"])
+            # An include that matches nothing stops the sync; it never widens to everything.
+            quiet(mirror.main, ["config", "include", "someone/nothing-like-this"])
+            w.gh.add_repo("someone", "later")
+            rc, out = w.sync()
+            self.assertEqual(rc, 2)
+            self.assertIn("matches no repository", out)
+            self.assertEqual(w.forge_get("/repos/mirror/someone--later")[0], 404)
+            quiet(mirror.main, ["config", "include", "someone/alpha"])
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("left out: someone/later (not in include)", out)
+
+    def test_G3_6_a_repository_gone_from_github_keeps_its_copy(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            before = w.forge_refs("someone--alpha")
+            w.gh.delete("someone/alpha")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("someone/alpha: gone from GitHub (or no longer visible to its key); its copy is kept", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), before)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(next(iter(st["repos"].values()))["gone_since"])
+            self.assertEqual(fread(SCRIPT).count('"DELETE"'), 1, "the script can delete a copy outside the M17 stop")
+
+    def test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts(self):
+        with World(self) as w:
+            for i in range(5):
+                w.gh.add_repo("someone", f"r{i}")
+                w.gh.commit(f"someone/r{i}", {"a": b"1"})
+            w.gh.repos["someone/r0"]["size"] = 2048
+            w.key_set()
+            rc, out = w.sync()
+            self.assertEqual(rc, 2)
+            self.assertIn("run: sync --announce", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [])
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0)
+            self.assertIn("The first copy: 5 repositories from 1 owner(s), 2.0 MB as GitHub reports it", out)
+            self.assertIn("as private as this computer", out)
+            self.assertIn("When the person says go, run: sync", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "the announcement copied something")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertRegex(out, r"first copy: 3 of 5 done; about \d+ min left at this pace")
+            rc, out = w.sync()
+            self.assertNotIn("first copy:", out)
+
+    def test_G3_8_large_files_are_copied_or_named_as_missing(self):
+        if not mirror.has_git_lfs():
+            if os.environ.get("WSM_REQUIRE_GITEA"):
+                raise AssertionError("git lfs is needed for this test in CI")
+            raise unittest.SkipTest("no git lfs here")
+        data = os.urandom(200_000)
+        with World(self) as w:
+            w.gh.add_repo("someone", "big")
+            w.gh.commit("someone/big", {".gitattributes": b"*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                                         "blob.bin": w.gh.lfs_file(data)})
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            key = fread(w.p["mirror_key"]).strip()
+            req = urllib.request.Request(f"http://127.0.0.1:{w.port}/api/v1/repos/mirror/someone--big/media/blob.bin",
+                                         headers={"Authorization": f"token {key}"})
+            self.assertEqual(urllib.request.urlopen(req, timeout=10).read(), data)
+        with World(self) as w:
+            w.gh.add_repo("someone", "big")
+            w.gh.commit("someone/big", {".gitattributes": b"*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                                         "blob.bin": w.gh.lfs_file(data)})
+            w.key_set()
+            saved = mirror.has_git_lfs
+            mirror.has_git_lfs = lambda: False
+            try:
+                rc, out = w.first_sync()
+            finally:
+                mirror.has_git_lfs = saved
+            self.assertEqual(rc, 0, out)
+            self.assertIn("Large files NOT copied (git lfs is not installed here): someone/big", out)
+
+
+class G2Sync(unittest.TestCase):
+    def test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it(self):
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.gh.key = "ghkey-" + "b2" * 10            # the old key is changed on GitHub
+            rc, out = w.sync()
+            self.assertEqual(rc, 1)
+            self.assertIn("GitHub refused the key for someone (401)", out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(all("cannot refresh" in r["problem"] for r in st["repos"].values()))
+            self.assertEqual(w.key_set(key=w.gh.key)[0], 0)      # one step
+            w.gh.commit("someone/alpha", {"b": b"2"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("sync: 2 on GitHub, 2 copied now, 0 problem(s)", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+
+
+class Harness(unittest.TestCase):
+    def test_a_suite_stopped_part_way_leaves_no_forge_running(self):
+        if not real_gitea():
+            if os.environ.get("WSM_REQUIRE_GITEA"):
+                raise AssertionError("the real pinned Gitea is required here")
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        marker = tempfile.mkdtemp(prefix="wsm-stop-")
+        child = f"""
+import os, sys, time
+sys.path.insert(0, {os.path.join(ROOT, "tests")!r})
+import test_mirror as t
+h = t.Home(linger="yes").__enter__()
+h.place_gitea(); h.setup(); port, pr = h.start_forge()
+open(os.path.join({marker!r}, "ready"), "w").write(f"{{pr.pid}} {{h.tmp}}")
+time.sleep(600)
+"""
+        pr = subprocess.Popen([sys.executable, "-I", "-c", child], env=dict(os.environ), stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+        try:
+            ready = os.path.join(marker, "ready")
+            for _ in range(240):
+                if os.path.exists(ready) and fread(ready).strip():
+                    break
+                time.sleep(0.5)
+            gpid, tmp = fread(ready).split()
+            pr.send_signal(signal.SIGTERM)
+            pr.wait(30)
+            time.sleep(1)
+            self.assertFalse(os.path.exists(f"/proc/{gpid}") if os.path.exists("/proc") else
+                             subprocess.run(["kill", "-0", gpid], capture_output=True).returncode == 0,
+                             "the forge kept running after the suite was stopped")
+            self.assertFalse(os.path.exists(tmp), "the suite's temporary home was left behind")
+        finally:
+            if pr.poll() is None:
+                pr.kill()
+            shutil.rmtree(marker, ignore_errors=True)
 
 
 class Promises(unittest.TestCase):
