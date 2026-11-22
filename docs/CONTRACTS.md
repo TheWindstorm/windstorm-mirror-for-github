@@ -10,7 +10,7 @@ has the `repo` scope. That login was used only for these checks; the skill itsel
 fine-grained keys. Key values were never printed, and only headers and the proof repository's own fields were
 read. The Gitea checks ran in a Linux test account with no administrator rights and no Docker, using Gitea
 28.4.0 from its official binary, checksum checked, listening on 127.0.0.1.
-**When.** 2026-11-22, 17:46Z to 18:16Z.
+**When.** 2026-11-22, 17:46Z to 18:20Z. C7 and C8 used a second Linux test account, and for the restore a second Linux computer, Ubuntu on x86-64, also with no administrator rights. Their data was made up, and GitHub was not involved.
 
 ## C1 Repository listings
 
@@ -78,15 +78,38 @@ Seen, in the Linux test account:
   - Branches and tags were pushed to it with the forge key in the process's environment.
   - `git lfs push --all` copied the large file, and Gitea served all 400,000 bytes.
   - A pushed `kept/2026-11-22/side` was accepted and listed as a branch.
-- Not seen yet: the same as a non-administrator `mirror` account.
+- Seen as a non-administrator `mirror` account:
+  - With a key scoped `write:repository` alone, creating a repository answered 403. With `write:repository` and
+    `write:user` it answered 201.
+  - Pushing, and switching Actions off for its own repository, both worked.
 
 ## C7 Renames in Gitea
 
-Not seen yet.
+Seen:
+- `PATCH /api/v1/repos/mirror/alpha` with a new name `beta` kept the repository's id (2).
+- `GET` on the old name answered `301` to `/api/v1/repos/mirror/beta`.
+- `git ls-remote` of the old URL answered.
+- **A `git push` to the old URL followed the redirect and landed on the renamed repository.**
+- A new repository created under the old name (id 3) took that name, and the redirect ended.
+
+Consequence for G3.2: the skill reads a copy's current name by Gitea's id (`/api/v1/repositories/<id>`) before
+every push, checks the name in the answer, and pushes with git's `http.followRedirects` set to `false`.
 
 ## C8 `gitea dump` and a restore on another computer
 
-Not seen yet.
+Seen:
+- With the forge stopped, `gitea dump --type tar.gz` wrote 111,203 bytes holding `app.ini`, `custom`, `data` (with
+  the SQLite database file itself), `gitea-db.sql`, `log` and `repos`.
+- `app.ini` holds the forge's own secrets, so the backup file is as secret as the forge. G7.4 keeps it readable
+  by the person only, and says so.
+- On another computer, with the same binary (checksum checked):
+  - the dump was unpacked, `data/` copied as it was, `repos/` copied into `data/gitea-repositories/`, and the
+    paths and port in `app.ini` rewritten;
+  - Gitea started with every user and every repository, each under its old id;
+  - a clone of a repository came back with both its commits, and `git fsck` found 0 errors.
+- Replaying `gitea-db.sql` on top of the copied database fails ("index ... already exists"). With SQLite, the
+  database file in `data/` is the restore and the SQL is not replayed.
+- Not seen yet: large files in a dump, and a restore into a forge whose binary is newer.
 
 ## C9 The boot service
 
