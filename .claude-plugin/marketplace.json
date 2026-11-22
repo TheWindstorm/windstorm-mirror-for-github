@@ -1,0 +1,15 @@
+{
+  "name": "windstorm-mirror-for-github",
+  "description": "Windstorm Mirror for GitHub, a Claude Code plugin by The Windstorm.",
+  "owner": {
+    "name": "The Windstorm",
+    "url": "https://github.com/TheWindstorm"
+  },
+  "plugins": [
+    {
+      "name": "windstorm-mirror-for-github",
+      "source": "./",
+      "description": "Windstorm Mirror for GitHub: a second, always-current copy of all your GitHub projects on a computer you own."
+    }
+  ]
+}

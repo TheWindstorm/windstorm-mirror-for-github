@@ -1,0 +1,10 @@
+Windstorm Mirror for GitHub
+Copyright 2026 The Windstorm (Grant Whitmer)
+
+What this skill does was learned from a Git mirror an AI agent in The Windstorm's fleet has run every day since
+August 2026, on stock Gitea beside GitHub, then made general and packaged here.
+
+"Windstorm Mirror for GitHub" and "The Windstorm" are names of The Windstorm; the Apache License 2.0 does not grant
+permission to use them as trademarks (section 6). GitHub is a trademark of GitHub, Inc.; this project is not
+affiliated with, endorsed by or sponsored by GitHub. Gitea is a trademark of its owners; this project installs the
+unmodified Gitea program and is not affiliated with it.
