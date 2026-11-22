@@ -437,25 +437,6 @@ class G1(unittest.TestCase):
             self.assertNotIn(mirror.NO_LOGIN_NOTE, out)
 
 
-# ------------------------------------------------------------------ G2 the GitHub keys
-
-def files_holding(root, needle):
-    hits, read = [], 0
-    for d, _, fs in os.walk(root):
-        for f in fs:
-            path = os.path.join(d, f)
-            try:
-                with open(path, "rb") as fh:
-                    data = fh.read()
-            except OSError:
-                continue
-            read += 1
-            if needle.encode() in data:
-                hits.append(path)
-    return hits, read
-
-
-
     def test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login(self):
         saved = mirror.system
         mirror.system = lambda: ("darwin", "arm64")
@@ -475,6 +456,24 @@ def files_holding(root, needle):
                 self.assertFalse([c for c in h.calls if c[0] not in ("defaults", "fdesetup")], "it changed something")
         finally:
             mirror.system = saved
+
+
+# ------------------------------------------------------------------ G2 the GitHub keys
+
+def files_holding(root, needle):
+    hits, read = [], 0
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            path = os.path.join(d, f)
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                continue
+            read += 1
+            if needle.encode() in data:
+                hits.append(path)
+    return hits, read
 
 
 class G2(unittest.TestCase):
@@ -1942,7 +1941,9 @@ class Strand(unittest.TestCase):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
         to_build = set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", plan))
-        real = set(re.findall(r"def (test_(?:G|INV)[A-Za-z0-9_]+)\(", fread(os.path.abspath(__file__))))
+        # A test counts only when unittest runs it: a method of a TestCase here, not text that looks like one.
+        real = {n for c in list(globals().values()) if isinstance(c, type) and issubclass(c, unittest.TestCase)
+                for n in unittest.defaultTestLoader.getTestCaseNames(c) if re.match(r"test_(?:G|INV)", n)}
         self.assertEqual(to_build & real, set(), "a test marked 'to build' exists: remove the mark")
         if to_build:
             self.assertEqual(version(), "0.0.0", "a proof may be marked 'to build' only while nothing is released")
