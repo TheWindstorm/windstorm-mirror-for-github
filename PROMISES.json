@@ -218,6 +218,34 @@
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M16",
+   "seen": "2026-11-22, the first real setup of this skill, in a Linux test account with no administrator rights: Gitea's download site answered 403 Forbidden to Python's default User-Agent, so setup stopped before anything was installed (an AI agent running a long-lived mirror had seen the same kind of block on another site before).",
+   "promise": "The download names the skill in its User-Agent, and a refused download says what was refused and that nothing was run.",
+   "codon": "G1.1",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_1_the_forge_is_the_pinned_version_and_its_checksum_is_checked_first",
+   "proven": "2026-11-22, a Linux test account with no administrator rights: with the named User-Agent, setup downloaded Gitea 28.4.0 and its checksum matched the pin.",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
+   "id": "M17",
+   "seen": "2026-11-22, the first real setup of this skill, in a Linux test account with no administrator rights, stock Gitea 28.4.0: a repository created through the API with no 'private' field came out public, although the forge's setting DEFAULT_PRIVATE was 'private' (that setting only fills in the web form).",
+   "promise": "Every copy is created with private set to true, and the answer is checked: a copy that came out public is made private, or setup stops and says so.",
+   "codon": "G3.3",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G3_3_branches_and_tags_are_copied_and_what_is_not_is_said",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []
