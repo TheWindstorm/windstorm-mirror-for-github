@@ -36,6 +36,8 @@ class FakeGitHub:
         self.rate_remaining = 5000
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
+        self.release = None                   # what /repos/<o>/<n>/releases/latest answers (no key needed)
+        self.release_calls = []               # for each such call: did it carry a key?
         self.page_cap = 100                   # GitHub's own cap; tests lower it to see paging with few repositories
         self.log = []                         # (method, path) of every request
         self.login = "someone"                # the account the key belongs to
@@ -179,6 +181,10 @@ class FakeGitHub:
                     return self.lfs_api(method, u)
                 if ".git/" in u.path or u.path.endswith(".git"):
                     return self.git(method, u)
+                if method == "GET" and u.path.endswith("/releases/latest"):
+                    with fake.lock:
+                        fake.release_calls.append(bool(self.headers.get("Authorization")))
+                    return self.send_json(200, fake.release) if fake.release else self.send_json(404, {"message": "Not Found"})
                 if not self.authed():
                     return self.send_json(401, {"message": "Bad credentials"})
                 if method != "GET":

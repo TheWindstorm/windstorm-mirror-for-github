@@ -1107,10 +1107,11 @@ class G5(unittest.TestCase):
     def test_G5_3_nothing_is_ever_written_to_github(self):
         src = fread(SCRIPT)
         self.assertNotRegex(src, r'"push"[^\n]*"github"', "the script has a push to GitHub")
-        get = inspect.getsource(mirror.gh_get)
-        self.assertNotIn("method=", get)
-        self.assertNotIn("data=", get)
-        self.assertEqual(src.count("github_api()"), 2, "a call to GitHub's API goes around gh_get")
+        for fn in (mirror.gh_get, mirror.release_check):       # the only two callers of GitHub's API
+            get = inspect.getsource(fn)
+            self.assertNotIn("method=", get)
+            self.assertNotIn("data=", get)
+        self.assertEqual(src.count("github_api()"), 3, "a call to GitHub's API goes around gh_get and release_check")
         with World(self) as w:
             for n in ("alpha", "beta"):
                 w.gh.add_repo("someone", n)
@@ -1129,6 +1130,180 @@ class G5(unittest.TestCase):
                 out = subprocess.run(["git", "--git-dir", cache, "push", "github", "HEAD"], capture_output=True, text=True)
                 self.assertNotEqual(out.returncode, 0)
             self.assertEqual(w.gh.writes(), [])
+
+
+def status():
+    return quiet(mirror.main, ["status"])
+
+
+class G6(unittest.TestCase):
+    def test_G6_1_status_says_how_many_are_current_and_names_the_rest(self):
+        with World(self) as w:
+            for n in ("a", "b", "c"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"f": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("copies: 3 on GitHub, 3 copied, 0 behind, 0 unreadable", out)
+            self.assertNotIn("problem:", out)
+            # b cannot be fetched any more; c's copy is changed behind the skill's back; a's last refresh is old.
+            shutil.rmtree(os.path.join(w.gh_root, "someone", "b.git"))
+            w.gh.touch("someone/b")
+            self.assertEqual(w.sync()[0], 1)
+            cache = os.path.join(w.p["cache"], str(w.gh.repos["someone/c"]["id"]) + ".git")
+            w.forge_push(cache, "someone--c", "refs/heads/main:refs/heads/extra")
+            st = mirror.load_json(w.p["state"], {})
+            a = next(r for r in st["repos"].values() if r["full_name"] == "someone/a")
+            a["last_good"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+            mirror.save_state(w.p, st)
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            lines = out.splitlines()
+            at = next(i for i, x in enumerate(lines) if x.startswith("copies:"))
+            self.assertEqual(lines[at], "copies: 3 on GitHub, 3 copied, 3 behind, 0 unreadable")
+            problems = [x for x in lines[:at] if x.startswith("problem:")]
+            self.assertTrue(any("someone/a: last good refresh" in x and "older than twice the sync interval" in x for x in problems))
+            self.assertTrue(any(x.startswith("problem: someone/b: cannot refresh: the fetch from GitHub failed") for x in problems))
+            self.assertIn("problem: someone/c: the copy's branches and tags differ from what GitHub last showed", problems)
+
+    def test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current(self):
+        fresh = mirror.now_utc()
+        good = {"last_good": fresh, "refs": {"refs/heads/main": "1" * 40}}
+        held = {"refs/heads/main": "1" * 40, "refs/heads/kept/2026-01-01/x": "2" * 40}
+        self.assertEqual(mirror.copy_state(good, held, 1800), (True, ""))
+        for why, rec, refs in [
+                ("a problem", dict(good, problem="cannot refresh: anything"), held),
+                ("stopped part-way", dict(good, copying_since=fresh), held),
+                ("never copied", {"refs": good["refs"]}, held),
+                ("old", dict(good, last_good="2020-01-01T00:00:00Z"), held),
+                ("refs differ", good, {"refs/heads/main": "3" * 40}),
+                ("refs unreadable", good, None),
+                ("a pardon asked for", dict(good, problem="cannot refresh: x", known_stale=True, pardon=True), held)]:
+            self.assertFalse(mirror.copy_state(rec, refs, 1800)[0], why)
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            put_settings(w.p, known_stale=["someone/alpha"], pardon=True)
+            w.gh.key = "ghkey-" + "c3" * 10              # the key stops working: the copy cannot refresh
+            self.assertEqual(w.sync()[0], 1)
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            self.assertIn("copies: 1 on GitHub, 1 copied, 1 behind, 0 unreadable", out)
+            for pr in w.home.procs:                    # the forge stops: no copy can be read, none is current
+                pr.terminate()
+                pr.wait(20)
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            self.assertIn("problem: the forge does not answer", out)
+            self.assertIn("copies: 1 on GitHub, 1 copied, 0 behind, 1 unreadable", out)
+
+    def test_G6_3_the_key_scan_counts_what_it_read_and_zero_is_a_failure(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            m = re.search(r"key scan: (\d+) file\(s\) read, no key found", out)
+            self.assertTrue(m and int(m.group(1)) >= 3, out)
+            forge_cfg = [f for f in tree(w.p["data"]) if "gitea-repositories" in f and f.endswith(".git/config")]
+            self.assertTrue(forge_cfg, "the forge's repository configs are not where the scan looks")
+            # A key that got into a repository config of the forge is found and named, never shown.
+            path = os.path.join(w.p["data"], forge_cfg[0])
+            with open(path, "a") as f:
+                f.write(f"[http]\n\textraheader = Authorization: Bearer {w.gh.key}\n")
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            self.assertIn(f"problem: something shaped like a key, or a key itself, is in {path}", out)
+            self.assertNotIn(w.gh.key, out)
+            # Something shaped like a GitHub key, in a file of the skill, is found too.
+            with open(path, "w") as f:
+                f.write("[core]\n\tbare = true\n")
+            mirror.write_file(os.path.join(w.p["data"], "note.txt"), "ghp_" + "Z9" * 18 + "\n")
+            rc, out = status()
+            self.assertIn("note.txt", out)
+            os.remove(os.path.join(w.p["data"], "note.txt"))
+            # A scan that read nothing proves nothing: it is a failure.
+            saved = mirror.key_scan
+            mirror.key_scan = lambda p, st: (0, [])
+            try:
+                rc, out = status()
+            finally:
+                mirror.key_scan = saved
+            self.assertEqual(rc, 1)
+            self.assertIn("problem: the key scan read no files, so it proves nothing", out)
+
+    def test_G6_4_no_secret_reaches_the_output_or_the_log(self):
+        mirror.secret("a-secret-for-the-test-only")
+        self.assertEqual(quiet(mirror.say, "it is a-secret-for-the-test-only here")[1].strip(), "it is <a key> here")
+        src = fread(SCRIPT)
+        self.assertEqual(len(re.findall(r"\bprint\(", src)), 1, "something prints around say()")
+        self.assertNotRegex(src, r"say\([^)]*open\(", "a file is printed whole")
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            outs = [w.key_set()[1], w.first_sync()[1], w.sync()[1], status()[1],
+                    quiet(mirror.main, ["setup"])[1], w.key_set(key="ghkey-" + "d4" * 10)[1]]
+            secrets_ = [w.gh.key, fread(w.p["mirror_key"]).strip(), fread(w.p["password"]).strip(), "ghkey-" + "d4" * 10]
+            logs = [fread(os.path.join(d, f)) for d, _, fs in os.walk(os.path.join(w.p["forge"], "log")) for f in fs]
+            for text in outs + logs:
+                for sec in secrets_:
+                    self.assertNotIn(sec, text)
+
+    def test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            soon = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() + 60 * 86400))
+            w.gh.expires = soon
+            self.assertEqual(w.first_sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"forge: Gitea {mirror.GITEA_VERSION} on http://127.0.0.1:{w.port}/", out)
+            self.assertIn(f"key for someone: expires {soon}", out)
+            self.assertRegex(out, r"disk: \d+ MB free \(floor 2048 MB\)")
+            self.assertRegex(out, r"last good sync: 20\d\d-")
+            self.assertIn("next sync: " + ("every 15 min" if mirror.system()[0] == "darwin" else w.home.timer_next), out)
+            near = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() + 5 * 86400 + 600))
+            w.gh.expires = near
+            self.assertEqual(w.sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 1)
+            self.assertIn(f"problem: the key for someone expires {near}, in 5 day(s): make a new one, then `key set someone`", out)
+            w.gh.expires = None
+            self.assertEqual(w.sync()[0], 0)
+            self.assertIn("key for someone: GitHub's answer shows no expiry", status()[1])
+
+    def test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            binary = mirror.sha256_of(w.p["bin"])
+            rc, out = status()
+            self.assertIn("newer release: not known (GitHub gave 404", out)
+            self.assertEqual(rc, 0, "a release GitHub does not show is a problem")
+            w.gh.release = {"tag_name": "v0.3.0", "published_at": "2026-12-01T00:00:00Z",
+                            "body": "Pins Gitea 28.9.1 (security fix)\nOther notes."}
+            rc, out = status()
+            self.assertNotIn("v0.3.0", out, "asked again within the day")
+            rc, out = quiet(mirror.main, ["status", "--check-release"])
+            self.assertIn(f"newer release of this skill: v0.3.0 (this is {mirror.VERSION}); `self-update` is your choice", out)
+            self.assertIn(f"that release pins Gitea 28.9.1 (this forge runs {mirror.GITEA_VERSION}), and names it a SECURITY FIX", out)
+            self.assertIn("Nothing was changed.", out)
+            self.assertEqual(w.gh.release_calls, [False, False], "the release was asked for more than once a day, or with a key")
+            self.assertEqual(mirror.sha256_of(w.p["bin"]), binary)
+            w.gh.release["body"] = "Pins Gitea 28.9.2"
+            out = quiet(mirror.main, ["status", "--check-release"])[1]
+            self.assertIn(f"that release pins Gitea 28.9.2 (this forge runs {mirror.GITEA_VERSION});", out)
+            self.assertNotIn("SECURITY", out)
 
 
 class Harness(unittest.TestCase):

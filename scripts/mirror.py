@@ -83,7 +83,19 @@ def paths():
     }
 
 
+SECRETS = set()          # every key and password this process has read; say() never prints one (G6.4)
+
+
+def secret(value):
+    if value and len(value) >= 8:
+        SECRETS.add(value)
+    return value
+
+
 def say(msg=""):
+    msg = str(msg)
+    for s in SECRETS:
+        msg = msg.replace(s, "<a key>")
     print(msg, flush=True)
 
 
@@ -531,7 +543,7 @@ def cmd_key_set(args):
     if not OWNER_RE.match(owner):
         say(f"'{owner}' is not a GitHub account or organisation name.")
         return 2
-    key = read_key_from_stdin()
+    key = secret(read_key_from_stdin())
     if not key or any(c.isspace() for c in key) or len(key) > 255:
         say("No key was read from standard input (or it was not one line). Nothing was kept.")
         return 2
@@ -582,7 +594,7 @@ def next_link(headers):
     return None
 
 
-def list_owner(owner, kind, key, floor=0):
+def list_owner(owner, kind, key, floor=0, info=None):
     """Every repository of one owner, page by page to the last page. (repos, None), or (None, why) when any page
     failed: half a list is never acted on as if it were whole."""
     url = ("/user/repos?affiliation=owner&per_page=100" if kind == "user"
@@ -592,6 +604,9 @@ def list_owner(owner, kind, key, floor=0):
         page += 1
         code, headers, body = gh_get(key, url)
         calls += 1
+        if info is not None and page == 1:
+            info["expires"] = headers.get("github-authentication-token-expiration") or headers.get(
+                "Github-Authentication-Token-Expiration") or ""
         if code == 401:
             return None, f"GitHub refused the key for {owner} (401)", calls
         if code != 200 or not isinstance(body, list):
@@ -631,7 +646,7 @@ class Forge:
     def __init__(self, p, st):
         self.base = f"http://127.0.0.1:{st['port']}"
         with open(p["mirror_key"], encoding="utf-8") as f:
-            self.key = f.read().strip()
+            self.key = secret(f.read().strip())
         self.user = st.get("mirror_user", MIRROR_USER)
 
     def call(self, method, path, body=None):
@@ -1024,8 +1039,11 @@ def sync(p, args):
             problems.append(f"{owner}: no key is kept for it")
             continue
         with open(kp, encoding="utf-8") as f:
-            key = f.read().strip()
-        repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"))
+            key = secret(f.read().strip())
+        info = {}
+        repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), info)
+        if repos is not None:
+            st.setdefault("keys", {})[owner.lower()] = {"expires": info.get("expires", ""), "seen": now_utc()}
         calls += n
         if repos is None:
             problems.append(f"{owner}: {why}; nothing was changed for {owner}")
@@ -1104,6 +1122,7 @@ def sync(p, args):
         st["last_full_pass"] = now_utc()
     if not problems:
         st["first_copy_done"] = st.get("first_copy_done") or now_utc()
+        st["last_good_sync"] = now_utc()
     save_state(p, st)
     for line in report + [f"problem: {x}" for x in problems]:
         say(line)
@@ -1202,18 +1221,185 @@ def cmd_setup(args):
     return 0 if ok else 1
 
 
+SKILL_REPO = "TheWindstorm/windstorm-mirror-for-github"
+KEY_SHAPE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})")
+
+
+def copy_state(rec, forge_refs, max_age):
+    """(current, why): G6.1 and G6.2. A copy is current only when its last good refresh is recent, nothing
+    stopped it, and the forge holds exactly the branches and tags GitHub last showed. There is no pardon."""
+    if rec.get("copying_since"):
+        return False, f"a copy was stopped part-way at {rec['copying_since']}; the next sync does it again"
+    if rec.get("problem"):
+        return False, rec["problem"]
+    if not rec.get("last_good"):
+        return False, "never copied yet"
+    if time.time() - epoch_of(rec["last_good"]) > max_age:
+        return False, f"last good refresh {rec['last_good']}, older than twice the sync interval"
+    held = {r: s for r, s in (forge_refs or {}).items() if not r.startswith("refs/heads/kept/")}
+    if held != (rec.get("refs") or {}):
+        return False, "the copy's branches and tags differ from what GitHub last showed"
+    return True, ""
+
+
+def forge_refs_of(forge, name):
+    out = git(None, "ls-remote", f"{forge.base}/{forge.user}/{name}.git", env=forge.git_env(), timeout=60)
+    if out.returncode != 0:
+        return None
+    return {r: s for s, r in (line.split("\t", 1) for line in out.stdout.splitlines() if "\t" in line)
+            if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
+
+
+def key_scan(p, st):
+    """G6.3: every repository config in the forge and the skill's own files, for anything shaped like a key or
+    equal to one the skill holds. Returns (files read, [paths where one was found]). The key files are skipped."""
+    known = set(SECRETS)
+    for path in [p["mirror_key"]] + [os.path.join(p["keys"], f) for f in (os.listdir(p["keys"]) if os.path.isdir(p["keys"]) else [])]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                known.add(secret(f.read().strip()))
+        except OSError:
+            pass
+    known.discard("")
+    skip = {os.path.realpath(p["mirror_key"]), os.path.realpath(p["password"])}
+    if os.path.isdir(p["keys"]):
+        skip |= {os.path.realpath(os.path.join(p["keys"], f)) for f in os.listdir(p["keys"])}
+    files = []
+    for root in (p["conf"], p["data"]):
+        for d, dirs, names in os.walk(root):
+            rel = os.path.relpath(d, p["data"])
+            dirs[:] = [x for x in dirs if x not in ("objects", "lfs", "refs", "hooks", "logs", "info", "queues",
+                                                    "indexers", "sessions", "avatars", "repo-avatars", "attachments",
+                                                    "packages", "tmp", "bin")]
+            for n in names:
+                f = os.path.join(d, n)
+                if os.path.realpath(f) in skip or n.endswith((".pack", ".idx", ".rev", ".db", ".db-journal")):
+                    continue
+                if d.endswith(".git") and n not in ("config", "description", "FETCH_HEAD", "packed-refs"):
+                    continue
+                files.append(f)
+    found = []
+    for f in files:
+        try:
+            with open(f, "rb") as fh:
+                text = fh.read(2_000_000).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if KEY_SHAPE.search(text) or any(k in text for k in known):
+            found.append(f)
+    return len(files), found
+
+
+def release_check(st, force=False):
+    """G6.6: once a day, one call with no key for this skill's latest release. Returns lines to show."""
+    rc = st.get("release_check") or {}
+    if force or time.time() - epoch_of(rc.get("at")) >= 86400:
+        req = urllib.request.Request(f"{github_api()}/repos/{SKILL_REPO}/releases/latest",
+                                     headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                body = json.loads(r.read() or b"null") or {}
+            m = re.search(r"Pins Gitea (\d+\.\d+\.\d+)([^\n]*)", body.get("body") or "")
+            rc = {"at": now_utc(), "tag": body.get("tag_name", ""), "gitea": m.group(1) if m else "",
+                  "security": bool(m and "security fix" in m.group(2).lower())}
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            rc = {"at": now_utc(), "error": getattr(e, "code", None) or "no answer"}
+        st["release_check"] = rc
+    if rc.get("error"):
+        return [f"newer release: not known (GitHub gave {rc['error']}; it is asked again tomorrow)"]
+    lines = []
+    vt = lambda v: tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+    if rc.get("tag") and vt(rc["tag"]) > vt(VERSION):
+        lines.append(f"newer release of this skill: {rc['tag']} (this is {VERSION}); `self-update` is your choice")
+    if rc.get("gitea") and vt(rc["gitea"]) > vt(GITEA_VERSION):
+        lines.append(f"that release pins Gitea {rc['gitea']} (this forge runs {GITEA_VERSION})"
+                     + (", and names it a SECURITY FIX" if rc.get("security") else "")
+                     + "; `self-update` then `upgrade-forge` is your choice. Nothing was changed.")
+    return lines or [f"newer release: none (latest {rc.get('tag') or 'none'})"]
+
+
 def cmd_status(args):
-    """The beginning of G6: for now, when the next sync runs, and the last one."""
+    """G6: one line per problem, then the count of copies, then the forge, the keys, the disk and the syncs."""
     p = paths()
     st = load_json(p["state"], {})
-    when, problem = next_sync()
-    say(f"problem: {problem}" if problem else f"next sync: {when}")
+    s = load_json(p["settings"], {})
+    if not st.get("port") or not os.path.exists(p["mirror_key"]):
+        say("Run setup first.")
+        return 2
+    forge = Forge(p, st)
+    problems, notes = [], []
+    code, ver = forge.call("GET", "/version")
+    up = code == 200
+    if not up:
+        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}")
+    elif (ver or {}).get("version") != GITEA_VERSION:
+        problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, not the pinned {GITEA_VERSION}")
+    max_age = 2 * setting(s, "interval_min") * 60
+    on_gh = copied = behind = unreadable = 0
+    for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
+        name = rec.get("full_name") or gid
+        if rec.get("gone_since"):
+            notes.append(f"note: {name} is gone from GitHub since {rec['gone_since']}; its copy is kept")
+            continue
+        on_gh += 1
+        if rec.get("last_good"):
+            copied += 1
+        cur = forge.by_id(rec["forge_id"]) if up and rec.get("forge_id") else None
+        refs = forge_refs_of(forge, cur["name"]) if cur else None
+        if rec.get("last_good") and refs is None:
+            unreadable += 1
+            problems.append(f"{name}: its copy could not be read from the forge")
+            continue
+        ok, why = copy_state(rec, refs, max_age)
+        if not ok:
+            behind += 1
+            problems.append(f"{name}: {why}")
+    for owner, k in sorted((st.get("keys") or {}).items()):
+        exp = k.get("expires") or ""
+        if exp:
+            try:
+                left = (calendar.timegm(time.strptime(exp.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")) - time.time()) / 86400
+            except ValueError:
+                left = None
+            if left is not None and left < 14:
+                problems.append(f"the key for {owner} expires {exp}" + (" (it has expired)" if left < 0 else
+                                f", in {int(left)} day(s): make a new one, then `key set {owner}`"))
+            notes.append(f"key for {owner}: expires {exp}")
+        else:
+            notes.append(f"key for {owner}: GitHub's answer shows no expiry")
+    free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
+    floor_mb = setting(s, "disk_floor_mb")
+    if free_mb < floor_mb:
+        problems.append(f"only {free_mb} MB free on this disk, below the floor of {floor_mb} MB: syncs do not start")
+    when, tproblem = next_sync()
+    if tproblem:
+        problems.append(tproblem)
+    n, found = key_scan(p, st)
+    if n == 0:
+        problems.append("the key scan read no files, so it proves nothing")
+    for f in found:
+        problems.append(f"something shaped like a key, or a key itself, is in {f}")
+    rel = release_check(st, force=getattr(args, "check_release", False))
+    save_state(p, st)
+    for x in problems:
+        say(f"problem: {x}")
+    say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable")
+    for x in notes:
+        say(x)
+    say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "
+        f"(pinned {GITEA_VERSION})")
+    say(f"disk: {free_mb} MB free (floor {floor_mb} MB)")
     last = st.get("last_sync") or {}
+    say(f"last good sync: {st.get('last_good_sync') or 'none yet'}")
     if last:
         say(f"last sync: {last.get('at')}, {last.get('copied', 0)} copied, {last.get('unchanged', 0)} unchanged, "
             f"{last.get('problems', 0)} problem(s), {last.get('calls', 0)} GitHub API call(s)"
             + (f"; stopped: {last['stopped']}" if last.get("stopped") else ""))
-    return 1 if problem else 0
+    say(f"next sync: {when}" if not tproblem else "next sync: none (see the problem above)")
+    say(f"key scan: {n} file(s) read, " + (f"{len(found)} with a key in them" if found else "no key found"))
+    for x in rel:
+        say(x)
+    return 1 if problems else 0
 
 
 def cmd_run_forge(args):
@@ -1252,6 +1438,7 @@ def main(argv=None):
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
     y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
     st_ = sub.add_parser("status", help="what is copied, what is behind, and when the next sync runs")
+    st_.add_argument("--check-release", action="store_true", help="ask GitHub for the latest release now")
     st_.set_defaults(fn=cmd_status)
     y.set_defaults(fn=cmd_sync)
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
