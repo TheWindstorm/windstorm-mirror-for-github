@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Plan: invariant INV6 now names everything the script reaches and runs: GitHub (its API and git), Gitea's download site, any host those two send a request on to, its own forge on 127.0.0.1, the address the person names for `restore --to`, and the programs `git`, the Gitea binary, the service manager, the address list and Python itself. The sentence was narrower than what the code has always done; nothing new is reached. A test now holds the script to that list: standard library only, a fixed set of addresses and ways to reach the network, and a fixed set of programs.
+
 - G10, the skill: `skills/mirror/SKILL.md` gives an agent one fixed order (`setup --dry-run` shown to the person, the keys to make, `setup`, `key set` run by the person, the first copy announced and the person's go, `sync`, `status`, `restore --check`), names every step that is the person's with what to say, and says what never to do.
 
 - G9, upgrades and uninstall: the forge always runs the Gitea its state names, so a new release of the skill never changes the forge by itself, and `setup` will not move it. `upgrade-forge` moves only to the version this release pins, never back: a backup first, the new binary checksum-checked, the forge stopped, migrated, started and checked; on any failure the old binary and the database as it was come back. `self-update` installs the latest release's `mirror.py` only when its checksum matches the one in the release notes, checks that it runs, and replaces the file whole in one rename, never while a sync runs. `uninstall` removes the service, the timer, the binary, the settings and every key, and leaves the folder of copies, which `uninstall --delete-copies` deletes only after the person types how many copies it holds.
