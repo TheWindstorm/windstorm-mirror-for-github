@@ -10,7 +10,7 @@ has the `repo` scope. That login was used only for these checks; the skill itsel
 fine-grained keys. Key values were never printed, and only headers and the proof repository's own fields were
 read. The Gitea checks ran in a Linux test account with no administrator rights and no Docker, using Gitea
 28.4.0 from its official binary, checksum checked, listening on 127.0.0.1.
-**When.** 2026-11-22, 17:46Z to 18:20Z. C7 and C8 used a second Linux test account, and for the restore a second Linux computer, Ubuntu on x86-64, also with no administrator rights. Their data was made up, and GitHub was not involved.
+**When.** 2026-11-22, 17:46Z to 18:20Z, and C9 at 19:12Z. C7 and C8 used a second Linux test account, and for the restore a second Linux computer, Ubuntu on x86-64, also with no administrator rights. Their data was made up, and GitHub was not involved.
 
 ## C1 Repository listings
 
@@ -113,7 +113,11 @@ Seen:
 
 ## C9 The boot service
 
-Not seen yet, on either system.
+- Seen in part, on 2026-11-22, in a Linux test account with no administrator rights and lingering already on:
+  `setup` wrote the systemd user unit, and `systemctl --user enable --now` started it. The forge answered on
+  127.0.0.1, and the sync timer was enabled beside it.
+- Not seen yet: either one across a restart; lingering switched on by a person who is not an administrator;
+  launchd on macOS, on Intel and Apple Silicon, with FileVault on and off.
 
 ## C10 Gitea's settings take effect
 

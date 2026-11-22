@@ -18,7 +18,7 @@
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
    "test": "test_G3_4_the_key_travels_only_in_the_fetchs_own_environment",
-   "proven": "",
+   "proven": "2026-11-22, a Linux test account with no administrator rights, against the real GitHub on a private proof repository holding made-up data, with a broad GitHub login standing in for the read-only key the skill asks for: after four syncs, the key was found in none of the 4,201 files the account held (the forge's data, every repository config, the logs included).",
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
@@ -60,7 +60,7 @@
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
    "test": "test_G5_1_a_rewritten_or_deleted_branch_is_kept_before_the_copy_follows",
-   "proven": "",
+   "proven": "2026-11-22, a Linux test account with no administrator rights, against the real GitHub on a private proof repository holding made-up data, with a broad GitHub login standing in for the read-only key the skill asks for: a branch forced back on GitHub was followed by the copy at the next sync, 8 s later, and its old commit was kept in the copy as kept/2026-11-22/lab8.",
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
@@ -214,7 +214,7 @@
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
    "test": "test_G4_6_a_sync_fetches_only_what_changed_and_a_daily_pass_fetches_all",
-   "proven": "",
+   "proven": "2026-11-22, a Linux test account with no administrator rights, against the real GitHub on a private proof repository holding made-up data, with a broad GitHub login standing in for the read-only key the skill asks for: a sync with nothing changed on GitHub spent 1 API call and fetched nothing; after a force-push, the next sync fetched that repository.",
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
