@@ -13,7 +13,10 @@ writing call). What a real GitHub does that this does not: everything else. A co
 file is seen against the real GitHub before its version is tagged (PROMISES.json, how_to_use).
 """
 import base64
+import hashlib
 import json
+import shutil
+import tempfile
 import os
 import subprocess
 import threading
@@ -33,9 +36,11 @@ class FakeGitHub:
         self.rate_remaining = 5000
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
+        self.page_cap = 100                   # GitHub's own cap; tests lower it to see paging with few repositories
         self.log = []                         # (method, path) of every request
         self.login = "someone"                # the account the key belongs to
         self.orgs = set()                     # organisations this key can see
+        self.lfs = {}                         # oid -> bytes, served through the LFS batch API
         self.lock = threading.Lock()
         self.server = None
 
@@ -55,6 +60,59 @@ class FakeGitHub:
                             "pushed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         return path
 
+    def commit(self, full, files, branch="main", message="a commit"):
+        """Make a commit on 'GitHub' with the given files {path: bytes}; returns its sha."""
+        owner, name = full.split("/")
+        bare = os.path.join(self.root, owner, name + ".git")
+        work = tempfile.mkdtemp(prefix="fgw-")
+        try:
+            plain = ["-c", "filter.lfs.clean=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=",
+                     "-c", "filter.lfs.required=false", "-c", "core.hooksPath=/dev/null"]
+
+            def run(*a):
+                a = list(a)
+                if a[0] == "git":
+                    a[1:1] = plain
+                return subprocess.run(a, check=True, capture_output=True, text=True)
+            run("git", "init", "-q", "-b", branch, work)
+            has = subprocess.run(["git", "--git-dir", bare, "rev-parse", "--verify", "-q", f"refs/heads/{branch}"],
+                                 capture_output=True, text=True).stdout.strip()
+            if has:
+                run("git", "-C", work, "fetch", "-q", bare, f"{branch}:refs/remotes/o/{branch}")
+                run("git", "-C", work, "reset", "-q", "--soft", f"refs/remotes/o/{branch}")
+                run("git", "-C", work, "checkout", "-q", f"refs/remotes/o/{branch}", "--", ".")
+            for path, data in files.items():
+                full_path = os.path.join(work, path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                with open(full_path, "wb") as f:
+                    f.write(data)
+            run("git", "-C", work, "add", "-A")
+            run("git", "-C", work, "-c", "user.email=a@example.invalid", "-c", "user.name=a", "commit", "-q",
+                "--allow-empty", "-m", message)
+            run("git", "-C", work, "push", "-q", "-f", bare, f"HEAD:refs/heads/{branch}")
+            sha = run("git", "-C", work, "rev-parse", "HEAD").stdout.strip()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        self.touch(full)
+        return sha
+
+    def lfs_file(self, data):
+        """An LFS pointer for data, with the object served by this stand-in."""
+        oid = hashlib.sha256(data).hexdigest()
+        self.lfs[oid] = data
+        return (f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {len(data)}\n").encode()
+
+    def git(self, full, *args):
+        owner, name = full.split("/")
+        bare = os.path.join(self.root, owner, name + ".git")
+        out = subprocess.run(["git", "--git-dir", bare, *args], check=True, capture_output=True, text=True)
+        self.touch(full)
+        return out.stdout
+
+    def touch(self, full):
+        if full in self.repos:
+            self.repos[full]["pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
     def rename(self, full, new_name):
         r = self.repos.pop(full)
         owner = r["owner"]["login"]
@@ -63,7 +121,8 @@ class FakeGitHub:
         self.repos[r["full_name"]] = r
 
     def delete(self, full):
-        self.repos.pop(full)
+        r = self.repos.pop(full)
+        shutil.rmtree(os.path.join(self.root, r["owner"]["login"], r["name"] + ".git"), ignore_errors=True)
 
     # ---- serving ----
     def start(self):
@@ -116,6 +175,8 @@ class FakeGitHub:
                 u = urllib.parse.urlsplit(self.path)
                 with fake.lock:
                     fake.log.append((method, u.path + ("?" + u.query if u.query else "")))
+                if "/info/lfs/" in u.path or u.path.startswith("/lfs-objects/"):
+                    return self.lfs_api(method, u)
                 if ".git/" in u.path or u.path.endswith(".git"):
                     return self.git(method, u)
                 if not self.authed():
@@ -125,7 +186,7 @@ class FakeGitHub:
                 with fake.lock:
                     fake.rate_remaining -= 1
                 q = urllib.parse.parse_qs(u.query)
-                page, per = int(q.get("page", ["1"])[0]), min(int(q.get("per_page", ["30"])[0]), 100)
+                page, per = int(q.get("page", ["1"])[0]), min(int(q.get("per_page", ["30"])[0]), fake.page_cap)
                 if fake.fail_page == (u.path, page):
                     return self.send_json(502, {"message": "stand-in: this page fails"})
                 parts = u.path.strip("/").split("/")
@@ -152,6 +213,36 @@ class FakeGitHub:
                     nxt = f"http://{self.headers['Host']}{u.path}?{urllib.parse.urlencode(nq, doseq=True)}"
                     extra["Link"] = f'<{nxt}>; rel="next"'
                 return self.send_json(200, chunk, extra)
+
+            def lfs_api(self, method, u):
+                if not self.authed():
+                    return self.send_json(401, {"message": "Bad credentials"})
+                if u.path.startswith("/lfs-objects/"):
+                    data = fake.lfs.get(u.path.rsplit("/", 1)[1])
+                    if data is None:
+                        return self.send_json(404, {"message": "no such object"})
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                if req.get("operation") != "download":
+                    return self.send_json(403, {"message": "the stand-in refuses uploads"})
+                objs = []
+                for o in req.get("objects", []):
+                    if o["oid"] in fake.lfs:
+                        objs.append({"oid": o["oid"], "size": o["size"], "authenticated": True, "actions": {"download": {
+                            "href": f"http://{self.headers['Host']}/lfs-objects/{o['oid']}",
+                            "header": {"Authorization": self.headers.get("Authorization", "")}}}})
+                    else:
+                        objs.append({"oid": o["oid"], "size": o["size"], "error": {"code": 404, "message": "not found"}})
+                data = json.dumps({"transfer": "basic", "objects": objs}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.git-lfs+json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
 
             def git(self, method, u):
                 if not self.authed():

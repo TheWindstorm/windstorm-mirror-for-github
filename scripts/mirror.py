@@ -6,6 +6,8 @@ service, reachable from this computer only, and (in later genes) keeps a copy of
 The plan this is built from: DNA-STRAND-MASTER-PLAN.md. Run with `python3 -I mirror.py <command>`.
 """
 import argparse
+import base64
+import fnmatch
 import getpass
 import urllib.parse
 import hashlib
@@ -19,6 +21,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -71,6 +74,7 @@ def paths():
         "password": os.path.join(conf, "forge-password"),
         "mirror_key": os.path.join(conf, "forge-mirror-key"),
         "keys": os.path.join(conf, "keys"),
+        "cache": os.path.join(data, "cache"),
         "settings": os.path.join(conf, "settings.json"),
         "unit": os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
                              "systemd", "user", SERVICE + ".service"),
@@ -465,6 +469,351 @@ def cmd_key_set(args):
     return 0
 
 
+# ---------------------------------------------------------------- G3 find every project, and copy it
+
+GITHUB_GIT = "https://github.com"
+NOT_COPIED = "Not copied in 0.1: GitHub's pull-request refs, releases, issues and wikis."
+FETCH_SPEC = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
+GIT_TIMEOUT = 600
+
+
+def github_git():
+    return os.environ.get("WSM_GITHUB_GIT") or GITHUB_GIT
+
+
+def now_utc():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def next_link(headers):
+    for part in (headers.get("Link") or headers.get("link") or "").split(","):
+        if 'rel="next"' in part:
+            return part.split(";")[0].strip().strip("<>")
+    return None
+
+
+def list_owner(owner, kind, key):
+    """Every repository of one owner, page by page to the last page. (repos, None), or (None, why) when any page
+    failed: half a list is never acted on as if it were whole."""
+    url = ("/user/repos?affiliation=owner&per_page=100" if kind == "user"
+           else f"/orgs/{urllib.parse.quote(owner)}/repos?type=all&per_page=100")
+    repos, page, calls = [], 0, 0
+    while url:
+        page += 1
+        code, headers, body = gh_get(key, url)
+        calls += 1
+        if code == 401:
+            return None, f"GitHub refused the key for {owner} (401)", calls
+        if code != 200 or not isinstance(body, list):
+            return None, f"the listing of {owner} failed at page {page} (GitHub answered {code})", calls
+        repos.extend(r for r in body if r.get("owner", {}).get("login", "").lower() == owner.lower())
+        url = next_link(headers)
+    return repos, None, calls
+
+
+def chosen(full, settings):
+    inc, exc = settings.get("include") or [], settings.get("exclude") or []
+    if inc and not any(fnmatch.fnmatchcase(full.lower(), x.lower()) for x in inc):
+        return False, "not in include"
+    for x in exc:
+        if fnmatch.fnmatchcase(full.lower(), x.lower()):
+            return False, f"left out by '{x}'"
+    return True, ""
+
+
+def copy_name(full):
+    """The copy's name in the forge. GitHub names cannot hold '--' in an owner, so owner--name is one-to-one."""
+    owner, name = full.split("/", 1)
+    return f"{owner}--{name}"
+
+
+class HardStop(Exception):
+    """Something that must stop the whole sync at once, said in one line."""
+
+
+class Forge:
+    """The person's own forge, through its API, as the mirror account."""
+
+    def __init__(self, p, st):
+        self.base = f"http://127.0.0.1:{st['port']}"
+        self.key = open(p["mirror_key"], encoding="utf-8").read().strip()
+        self.user = st.get("mirror_user", MIRROR_USER)
+
+    def call(self, method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + "/api/v1" + path, data=data, method=method,
+                                     headers={"Authorization": f"token {self.key}", "Content-Type": "application/json",
+                                              "User-Agent": USER_AGENT})
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        try:
+            with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"null")
+            except ValueError:
+                return e.code, None
+        except (urllib.error.URLError, OSError) as e:
+            return 0, {"message": str(e)}
+
+    def by_id(self, rid):
+        code, body = self.call("GET", f"/repositories/{rid}")
+        return body if code == 200 else None
+
+    def by_name(self, name):
+        code, body = self.call("GET", f"/repos/{self.user}/{urllib.parse.quote(name)}")
+        return body if code == 200 and body and body.get("name", "").lower() == name.lower() else None
+
+    def rename(self, rid, cur, new):
+        code, body = self.call("PATCH", f"/repos/{self.user}/{urllib.parse.quote(cur)}", {"name": new})
+        return code == 200 and body.get("id") == rid
+
+    def create(self, name, about):
+        """M17: a repository made through the API is public unless 'private' is sent. The answer is checked, and
+        a copy that comes back not private is deleted at once and the whole sync stops."""
+        code, body = self.call("POST", "/user/repos", {"name": name, "private": True, "description": about})
+        if code != 201:
+            raise RuntimeError(f"the forge refused to create {name} ({code})")
+        if body.get("private") is not True:
+            dcode, _ = self.call("DELETE", f"/repos/{self.user}/{urllib.parse.quote(name)}")
+            raise HardStop(f"the forge made the copy {name} without 'private'; it was deleted at once "
+                           f"({'deleted' if dcode == 204 else f'delete answered {dcode}: delete it by hand'}), "
+                           "and the sync stopped. Nothing else was copied.")
+        self.call("PATCH", f"/repos/{self.user}/{urllib.parse.quote(name)}", {"has_actions": False})
+        return body
+
+    def git_env(self):
+        hdr = "Authorization: Basic " + base64.b64encode(f"{self.user}:{self.key}".encode()).decode()
+        return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"http.{self.base}/.extraheader", "GIT_CONFIG_VALUE_0": hdr}
+
+
+def github_env(key):
+    """G3.4: the key travels only in the environment of the one git process that fetches from GitHub."""
+    hdr = "Authorization: Basic " + base64.b64encode(f"x-access-token:{key}".encode()).decode()
+    return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"http.{github_git()}/.extraheader", "GIT_CONFIG_VALUE_0": hdr}
+
+
+def git(cache, *args, env=None, timeout=GIT_TIMEOUT):
+    e = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+    for k in [k for k in e if k.startswith("GIT_CONFIG_")]:
+        e.pop(k)
+    e.update(env or {})
+    cmd = ["git", "-c", "http.followRedirects=false", "-c", "credential.helper="]
+    if cache:
+        cmd += ["--git-dir", cache]
+    return run(cmd + list(args), env=e, timeout=timeout)
+
+
+def has_git_lfs():
+    try:
+        return run(["git", "lfs", "version"], timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def uses_lfs(cache):
+    """Does any branch or tag tip say, in its top .gitattributes, that files are kept with Git LFS?"""
+    for ref in git(cache, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags").stdout.split():
+        if "filter=lfs" in git(cache, "show", f"{ref}:.gitattributes").stdout:
+            return True
+    return False
+
+
+def refs_of(cache):
+    out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags")
+    return dict(reversed(line.split(" ", 1)) for line in out.stdout.splitlines() if line.strip())
+
+
+def place_copy(forge, rec, full, gid, report):
+    """Find this GitHub repository's copy by the forge id kept for it, follow a rename, and move aside any other
+    copy that sits under the name it should have. Returns the copy's current forge record."""
+    want = copy_name(full)
+    cur = forge.by_id(rec["forge_id"]) if rec.get("forge_id") else None
+    if cur and cur.get("name") != want:
+        other = forge.by_name(want)
+        if other and other["id"] != cur["id"]:
+            aside = f"{want}--was-{gid_of(other)}"
+            forge.rename(other["id"], other["name"], aside)
+            report.append(f"{want}: another copy held this name; it was moved aside to {aside}")
+        if forge.rename(cur["id"], cur["name"], want):
+            report.append(f"{full}: renamed on GitHub; its copy {cur['name']} is now {want}")
+            cur = forge.by_id(cur["id"])
+    if not cur:
+        other = forge.by_name(want)
+        if other:
+            aside = f"{want}--was-{gid_of(other)}"
+            forge.rename(other["id"], other["name"], aside)
+            report.append(f"{want}: an older copy held this name; it was moved aside to {aside}")
+        cur = forge.create(want, f"Copy of github.com/{full} (GitHub id {gid}), kept by Windstorm Mirror for GitHub")
+        rec["forge_id"] = cur["id"]
+    return cur
+
+
+def gid_of(forge_repo):
+    m = re.search(r"GitHub id (\d+)", forge_repo.get("description") or "")
+    return m.group(1) if m else f"forge{forge_repo['id']}"
+
+
+def copy_one(p, forge, key, rec, gh, report):
+    """Fetch one repository from GitHub (key in memory only) into its cache, then push it into the forge."""
+    gid = str(gh["id"])
+    full = gh["full_name"]
+    cache = os.path.join(p["cache"], gid + ".git")
+    if not os.path.exists(cache):
+        os.makedirs(p["cache"], mode=0o700, exist_ok=True)
+        if git(None, "init", "-q", "--bare", cache).returncode != 0:
+            return "the local cache could not be made"
+    git(cache, "config", "remote.github.url", f"{github_git()}/{full}.git")
+    for i, spec in enumerate(FETCH_SPEC):
+        git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.github.fetch", spec)
+    try:
+        out = git(cache, "fetch", "--prune", "--quiet", "github", env=github_env(key))
+    except subprocess.TimeoutExpired:
+        return "the fetch from GitHub took too long"
+    if out.returncode != 0:
+        return "the fetch from GitHub failed: " + last_line(out.stderr).replace(key, "<the key>")
+    lfs = None
+    if not refs_of(cache):
+        pass                                   # an empty repository has no large files to fetch or push
+    elif has_git_lfs():
+        out = git(cache, "lfs", "fetch", "--all", "github", env=github_env(key))
+        if out.returncode != 0:
+            return "the large files could not be fetched: " + last_line(out.stderr).replace(key, "<the key>")
+        lfs = True
+    elif uses_lfs(cache):
+        lfs = False
+    cur = place_copy(forge, rec, full, gid, report)
+    # Read the copy's name by its id again just before the push, and never follow a redirect (contract C7).
+    check = forge.by_id(rec["forge_id"])
+    if not check or check.get("name") != copy_name(full):
+        return "the copy's name could not be confirmed before the push"
+    url = f"{forge.base}/{forge.user}/{check['name']}.git"
+    git(cache, "config", "remote.forge.url", url)
+    out = git(cache, "push", "--quiet", "--prune", "forge", *FETCH_SPEC, env=forge.git_env())
+    if out.returncode != 0 and "No refs in common and none specified" not in out.stderr:
+        empty = not refs_of(cache)
+        if not empty:
+            return "the push into the forge failed: " + last_line(out.stderr)
+    if lfs:
+        out = git(cache, "lfs", "push", "--all", "forge", env=forge.git_env())
+        if out.returncode != 0:
+            return "the large files could not be pushed into the forge: " + last_line(out.stderr)
+    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
+               last_good=now_utc(), pushed_at=gh.get("pushed_at"), problem="", lfs_missing=(lfs is False))
+    return ""
+
+
+def cmd_config(args):
+    p = paths()
+    s = load_json(p["settings"], {})
+    if args.clear:
+        s.pop(args.what, None)
+    else:
+        s[args.what] = list(args.patterns)
+    write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
+    say(f"{args.what}: {', '.join(s.get(args.what) or []) or '(none)'}")
+    return 0
+
+
+def cmd_sync(args):
+    p = paths()
+    st = load_json(p["state"], {})
+    s = load_json(p["settings"], {})
+    owners = s.get("owners") or {}
+    if not st.get("port") or not os.path.exists(p["mirror_key"]):
+        say("Run setup first.")
+        return 2
+    if not owners:
+        say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
+        return 2
+    state = st.setdefault("repos", {})
+    found, problems, report, calls = {}, [], [], 0
+    complete = set()
+    for owner, meta in owners.items():
+        kp = key_path(p, owner)
+        if not os.path.exists(kp):
+            problems.append(f"{owner}: no key is kept for it")
+            continue
+        key = open(kp, encoding="utf-8").read().strip()
+        repos, why, n = list_owner(owner, meta.get("kind", "user"), key)
+        calls += n
+        if repos is None:
+            problems.append(f"{owner}: {why}; nothing was changed for {owner}")
+            for rec in state.values():
+                if rec.get("owner", "").lower() == owner.lower():
+                    rec["problem"] = "cannot refresh: " + why
+            continue
+        complete.add(owner.lower())
+        for r in repos:
+            found[str(r["id"])] = (owner, key, r)
+    picked, skipped = {}, []
+    for gid, (owner, key, r) in found.items():
+        ok, why = chosen(r["full_name"], s)
+        (picked.__setitem__(gid, (owner, key, r)) if ok else skipped.append(f"{r['full_name']} ({why})"))
+    if s.get("include") and not picked and found:
+        say("The include list matches no repository GitHub shows; the sync stops rather than copy everything.")
+        return 2
+    if not st.get("announced") and not args.announce:
+        say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
+        return 2
+    if args.announce and not st.get("announced"):
+        size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
+        say(f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
+            f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).")
+        say(NOT_COPIED)
+        say("The copy is as private as this computer. Anyone who can read this account's files can read every "
+            "project in it. Disk encryption, and who uses this computer, are yours.")
+        st["announced"] = now_utc()
+        write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+        say("When the person says go, run: sync")
+        return 0
+    forge = Forge(p, st)
+    done, started = 0, time.time()
+    order = sorted(picked.items(), key=lambda x: x[1][2]["full_name"].lower())
+    for i, (gid, (owner, key, r)) in enumerate(order):
+        if i == 3 and len(order) > 3 and not st.get("first_copy_done"):
+            per = (time.time() - started) / 3
+            say(f"first copy: 3 of {len(order)} done; about {max(1, round(per * (len(order) - 3) / 60))} min left at this pace")
+        rec = state.setdefault(gid, {})
+        rec.update(owner=owner, full_name=r["full_name"], gone_since="")
+        try:
+            why = copy_one(p, forge, key, rec, r, report)
+        except HardStop as e:
+            rec["problem"] = "cannot refresh: the sync stopped"
+            st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": done, "problems": 1, "stopped": str(e)}
+            write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+            say(f"STOPPED: {e}")
+            return 1
+        except RuntimeError as e:
+            why = str(e)
+        if why:
+            rec["problem"] = "cannot refresh: " + why
+            problems.append(f"{r['full_name']}: {why}")
+        else:
+            done += 1
+    for gid, rec in state.items():
+        if gid not in found and rec.get("owner", "").lower() in complete and not rec.get("gone_since"):
+            rec["gone_since"] = now_utc()
+            report.append(f"{rec.get('full_name')}: gone from GitHub (or no longer visible to its key); its copy is kept")
+    st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": done, "problems": len(problems)}
+    if not problems:
+        st["first_copy_done"] = st.get("first_copy_done") or now_utc()
+    write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
+    for line in report + [f"problem: {x}" for x in problems]:
+        say(line)
+    for x in skipped:
+        say(f"left out: {x}")
+    lfs_missing = [rec["full_name"] for rec in state.values() if rec.get("lfs_missing")]
+    if lfs_missing:
+        say("Large files NOT copied (git lfs is not installed here): " + ", ".join(sorted(lfs_missing)))
+    say(f"sync: {len(found)} on GitHub, {done} copied now, {len(problems)} problem(s), {calls} GitHub API call(s)")
+    say(NOT_COPIED)
+    return 0 if not problems else 1
+
+
 # ---------------------------------------------------------------- commands
 
 def setup_plan(p, st):
@@ -574,6 +923,14 @@ def main(argv=None):
     kset = ks.add_parser("set", help="keep one owner's read-only key, read from standard input")
     kset.add_argument("owner", help="your GitHub account, or one organisation")
     kset.set_defaults(fn=cmd_key_set)
+    c = sub.add_parser("config", help="choose what is copied: include or exclude patterns of owner/name")
+    c.add_argument("what", choices=["include", "exclude"])
+    c.add_argument("patterns", nargs="*")
+    c.add_argument("--clear", action="store_true")
+    c.set_defaults(fn=cmd_config)
+    y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
+    y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
+    y.set_defaults(fn=cmd_sync)
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
