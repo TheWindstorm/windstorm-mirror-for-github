@@ -31,6 +31,11 @@ import mirror  # noqa: E402
 from fake_github import FakeGitHub  # noqa: E402
 
 
+def fread_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def fread(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -1122,11 +1127,11 @@ class G5(unittest.TestCase):
     def test_G5_3_nothing_is_ever_written_to_github(self):
         src = fread(SCRIPT)
         self.assertNotRegex(src, r'"push"[^\n]*"github"', "the script has a push to GitHub")
-        for fn in (mirror.gh_get, mirror.release_check):       # the only two callers of GitHub's API
+        for fn in (mirror.gh_get, mirror.gh_public):           # the only two callers of GitHub's API
             get = inspect.getsource(fn)
             self.assertNotIn("method=", get)
             self.assertNotIn("data=", get)
-        self.assertEqual(src.count("github_api()"), 3, "a call to GitHub's API goes around gh_get and release_check")
+        self.assertEqual(src.count("github_api()"), 3, "a call to GitHub's API goes around gh_get and gh_public")
         with World(self) as w:
             for n in ("alpha", "beta"):
                 w.gh.add_repo("someone", n)
@@ -1552,6 +1557,157 @@ class G8(unittest.TestCase):
             rc, out = w.sync("--announce")
             self.assertIn(sentence, out)
             self.assertEqual(w.forge_get("/user/repos")[1], [], "something was copied before the person was told")
+
+
+PINS_28_3 = {("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
+             ("darwin", "x86_64"): ("darwin-amd64", "4420bb44df8047cd4f3bec9162d559c0245dee7ef3b58bc5540d7a1eefd8b94f"),
+             ("darwin", "arm64"): ("darwin-arm64", "0aca8f1f1d6a0b31abc2c7e5c40feec18f3e45ab0c7b11deaef259794ce45812")}
+
+
+@contextlib.contextmanager
+def pinned(version, pins):
+    """As if this were a release of the skill that pins another Gitea."""
+    saved = mirror.GITEA_VERSION, dict(mirror.PINS)
+    mirror.GITEA_VERSION = version
+    mirror.PINS.clear()
+    mirror.PINS.update(pins)
+    try:
+        yield
+    finally:
+        mirror.GITEA_VERSION = saved[0]
+        mirror.PINS.clear()
+        mirror.PINS.update(saved[1])
+
+
+def forge_version(w):
+    return w.forge_get("/version")[1].get("version")
+
+
+class G9(unittest.TestCase):
+    def test_G9_1_a_forge_upgrade_backs_up_first_and_rolls_back_on_failure(self):
+        if not real_gitea():
+            if os.environ.get("WSM_REQUIRE_GITEA"):
+                raise AssertionError("the real pinned Gitea is required here")
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        new_bin = fread_bytes(real_gitea())
+        with contextlib.ExitStack() as stack:
+            with pinned("28.3.0", PINS_28_3):        # the forge was set up by an older release of the skill
+                w = stack.enter_context(World(self))
+                self.assertEqual(forge_version(w), "28.3.0")
+                w.gh.add_repo("someone", "alpha")
+                w.gh.commit("someone/alpha", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+            # This release pins 28.4.0. A setup does not move the forge; upgrade-forge does, a backup first.
+            rc, out = quiet(mirror.main, ["setup"])
+            self.assertEqual(rc, 2)
+            self.assertIn("Setup does not move the forge: run upgrade-forge", out)
+            site = ServeFile(new_bin)
+            stack.callback(site.close)
+            os.environ["WSM_GITEA_BASE"] = site.url
+            stack.callback(os.environ.pop, "WSM_GITEA_BASE", None)
+            ok, _ = mirror.take_lock(w.p)                        # not while a sync runs
+            rc, out = quiet(mirror.main, ["upgrade-forge"])
+            mirror.drop_lock(w.p)
+            self.assertEqual(rc, 3, out)
+            self.assertEqual(forge_version(w), "28.3.0")
+            rc, out = quiet(mirror.main, ["upgrade-forge"])
+            self.assertIn("upgrade-forge: Gitea 28.3.0 to 28.4.0. First, a backup.", out)
+            self.assertIn("The forge runs Gitea 28.4.0 now.", out)
+            self.assertEqual(rc, 0, out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(os.path.exists(st["upgraded"]["backup"]), "no backup was made first")
+            self.assertEqual(forge_version(w), "28.4.0")
+            self.assertEqual(quiet(mirror.main, ["restore", "--check"])[0], 0)
+            # A newer pin whose binary cannot run: the old binary and the database come back.
+            bad = b"#!/bin/sh\nexit 3\n"
+            site2 = ServeFile(bad)
+            stack.callback(site2.close)
+            os.environ["WSM_GITEA_BASE"] = site2.url
+            badpins = {k: (v[0], hashlib.sha256(bad).hexdigest()) for k, v in mirror.PINS.items()}
+            with pinned("28.4.1", badpins):
+                rc, out = quiet(mirror.main, ["upgrade-forge"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("The upgrade to Gitea 28.4.1 failed: Gitea's migration failed", out)
+            self.assertIn("The old forge, Gitea 28.4.0, is back with its database as it was before.", out)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["gitea"], "28.4.0")
+            self.assertEqual(forge_version(w), "28.4.0")
+            self.assertEqual(quiet(mirror.main, ["restore", "--check"])[0], 0)
+            # Never moved back.
+            with pinned("28.3.0", PINS_28_3):
+                rc, out = quiet(mirror.main, ["upgrade-forge"])
+            self.assertEqual(rc, 2)
+            self.assertIn("A forge is never moved back", out)
+
+    def test_G9_2_self_update_swaps_whole_and_never_during_a_sync(self):
+        with World(self) as w:
+            src = fread(SCRIPT)
+            new = src.replace(f'VERSION = "{mirror.VERSION}"', 'VERSION = "0.2.0"').replace(
+                f'GITEA_VERSION = "{mirror.GITEA_VERSION}"', 'GITEA_VERSION = "28.9.0"').encode()
+            self.assertNotEqual(new, src.encode())
+            w.gh.contents["scripts/mirror.py"] = new
+            target = w.p["script"]
+            before = fread_bytes(target)
+            binary, gitea_ver = mirror.sha256_of(w.p["bin"]), mirror.load_json(w.p["state"], {})["gitea"]
+            w.gh.release = {"tag_name": "v0.2.0", "body": "mirror.py SHA-256 " + "0" * 64}
+            rc, out = quiet(mirror.main, ["self-update"])
+            self.assertEqual(rc, 1)
+            self.assertIn("does not match its checksum. Nothing was changed.", out)
+            w.gh.release["body"] = "Notes.\nmirror.py SHA-256 " + hashlib.sha256(new).hexdigest()
+            ok, _ = mirror.take_lock(w.p)
+            rc, out = quiet(mirror.main, ["self-update"])
+            mirror.drop_lock(w.p)
+            self.assertEqual(rc, 3)
+            self.assertIn("Try again when it is done.", out)
+            self.assertEqual(fread_bytes(target), before)
+            self.assertFalse(os.path.exists(target + ".new"))
+            rc, out = quiet(mirror.main, ["self-update"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"self-update: {mirror.VERSION} to v0.2.0, replaced whole", out)
+            self.assertIn("v0.2.0 pins Gitea 28.9.0: run upgrade-forge when you choose", out)
+            self.assertEqual(fread_bytes(target), new)
+            ran = subprocess.run([sys.executable, "-I", target, "--version"], capture_output=True, text=True)
+            self.assertIn("0.2.0", ran.stdout)
+            self.assertEqual((mirror.sha256_of(w.p["bin"]), mirror.load_json(w.p["state"], {})["gitea"]), (binary, gitea_ver),
+                             "the self-update changed the forge")
+            self.assertEqual(w.gh.release_calls.count(True), 0, "a release or file was asked for with a key")
+            self.assertIn("os.replace(tmp, target)", inspect.getsource(mirror.cmd_self_update))
+
+    def test_G9_3_uninstall_leaves_only_the_copies_and_deletes_them_only_on_the_persons_word(self):
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            for gone in (os.path.dirname(p["bin"]), p["conf"], p["cache"], p["script"], p["keys"], p["mirror_key"],
+                         p["settings"], p["password"]):
+                self.assertFalse(os.path.exists(gone), gone)
+            if mirror.system()[0] == "darwin":
+                self.assertFalse(os.path.exists(p["plist"]))
+            else:
+                self.assertFalse(os.path.exists(p["unit"]))
+                self.assertIn(["systemctl", "--user", "disable", "--now", mirror.SERVICE, mirror.SYNC_UNIT + ".timer"],
+                              w.home.calls)
+            repos = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
+            self.assertEqual(sorted(os.listdir(repos)), ["someone--alpha.git", "someone--beta.git"])
+            self.assertIn(f"Left: the folder of copies, {p['data']} (2 copies).", out)
+            saved = sys.stdin
+            try:
+                sys.stdin = io.StringIO("1\n")
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                self.assertEqual(rc, 1)
+                self.assertIn("That is not 2. The copies were not deleted.", out)
+                self.assertTrue(os.path.exists(repos))
+                sys.stdin = io.StringIO("2\n")
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(p["data"]))
 
 
 class Harness(unittest.TestCase):
