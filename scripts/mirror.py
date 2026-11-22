@@ -21,6 +21,8 @@ import shutil
 import socket
 import stat
 import subprocess
+import tarfile
+import tempfile
 import sys
 import time
 import urllib.error
@@ -873,6 +875,7 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         return f"the fetch from GitHub took longer than {limit} s, and so did the retry"
     if out.returncode != 0:
         return "the fetch from GitHub failed: " + last_line(out.stderr).replace(key, "<the key>")
+    rec.update(seen_refs=refs_of(cache), seen_at=now_utc())      # G7.1: what GitHub showed, written down
     lfs = None
     if not refs_of(cache):
         pass                                   # an empty repository has no large files to fetch or push
@@ -1162,6 +1165,8 @@ def setup_plan(p, st):
 
 def cmd_setup(args):
     p = paths()
+    if getattr(args, "from_file", None):
+        return setup_from(p, args)
     st = load_json(p["state"], {})
     plan = setup_plan(p, st)
     back, note = comes_back_by_itself(dry=True)
@@ -1402,6 +1407,328 @@ def cmd_status(args):
     return 1 if problems else 0
 
 
+# ---------------------------------------------------------------- G7 restore, and the backup
+
+ONLY_THIS_COMPUTER = {"http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
+                      "all_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9",
+                      "HTTPS_PROXY": "http://127.0.0.1:9", "ALL_PROXY": "http://127.0.0.1:9",
+                      "no_proxy": "127.0.0.1,localhost", "NO_PROXY": "127.0.0.1,localhost"}
+
+
+def scratch(p, what):
+    os.makedirs(p["data"], mode=0o700, exist_ok=True)
+    return tempfile.mkdtemp(prefix=f"{what}-", dir=p["data"])
+
+
+def clone_copy(forge, name, into):
+    """A bare clone of one copy from the forge, with every host but this computer shut off (G7.2)."""
+    env = dict(forge.git_env(), **ONLY_THIS_COMPUTER)
+    out = git(None, "clone", "--quiet", "--bare", f"{forge.base}/{forge.user}/{name}.git", into, env=env)
+    if out.returncode != 0:
+        return "the copy could not be cloned from the forge: " + last_line(out.stderr)
+    if uses_lfs(into):
+        if not has_git_lfs():
+            return "it holds large files, and git lfs is not installed here to check them"
+        out = git(into, "lfs", "fetch", "--all", "origin", env=env)
+        if out.returncode != 0:
+            return "its large files could not be fetched from the forge: " + last_line(out.stderr)
+        out = git(into, "lfs", "fsck", env=env)
+        if out.returncode != 0:
+            return "its large files are damaged: " + last_line(out.stdout + out.stderr)
+    return ""
+
+
+def cmd_restore(args):
+    p = paths()
+    st = load_json(p["state"], {})
+    if not st.get("port") or not os.path.exists(p["mirror_key"]):
+        say("Run setup first.")
+        return 2
+    forge = Forge(p, st)
+    if args.to:
+        return restore_to(p, st, forge, args.to, args.repository)
+    if not args.check:
+        say("Say what to do: restore --check, or restore --to <url> <owner/name>.")
+        return 2
+    work = scratch(p, "restore-check")
+    diffs, whole, total = [], 0, 0
+    try:
+        for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
+            if not rec.get("forge_id"):
+                continue
+            total += 1
+            name = rec.get("full_name") or gid
+            cur = forge.by_id(rec["forge_id"])
+            if not cur:
+                diffs.append(f"{name}: its copy is not in the forge")
+                continue
+            into = os.path.join(work, gid + ".git")
+            why = clone_copy(forge, cur["name"], into)
+            if why:
+                diffs.append(f"{name}: {why}")
+                continue
+            mine = 0
+            have = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
+            seen = rec.get("seen_refs") or rec.get("refs") or {}
+            for ref in sorted(set(have) | set(seen)):
+                if have.get(ref) != seen.get(ref):
+                    mine += 1
+                    diffs.append(f"{name}: {ref} is {(have.get(ref) or 'missing')[:12]} in the copy, "
+                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen")
+            out = git(into, "fsck", "--no-progress", "--no-dangling")
+            if out.returncode != 0:
+                mine += 1
+                diffs.append(f"{name}: git fsck found damage: {last_line(out.stdout + out.stderr)}")
+            if not mine:
+                whole += 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    for d in diffs:
+        say(d)
+    say(f"restore check: {total} copies, {whole} whole, {len(diffs)} difference(s); "
+        "nothing outside this computer was asked")
+    return 0 if not diffs and total else 1
+
+
+def github_hosts():
+    hosts = {"github.com"}
+    host = urllib.parse.urlsplit(github_git()).hostname
+    if host:
+        hosts.add(host.lower())
+    return hosts
+
+
+def restore_to(p, st, forge, url, repository):
+    """G7.3: one copy, every branch and tag, into a new home the person names; never GitHub (INV1)."""
+    if not repository:
+        say("Name the repository: restore --to <url> <owner/name>.")
+        return 2
+    low = url.lower()
+    host = (urllib.parse.urlsplit(url).hostname or re.sub(r"^[^@]*@([^:/]+).*$", r"\1", url)).lower()
+    if any(h == host or host.endswith("." + h) for h in github_hosts()) or "github.com" in low:
+        say("This skill never writes to GitHub, so it will not restore there. To put this project back on GitHub "
+            "yourself, clone it from your forge and push it with your own login:")
+        say(f"  git clone --mirror http://127.0.0.1:{st['port']}/{forge.user}/{copy_name(repository)}.git")
+        say("  cd <that folder> and run: git push --mirror <the new, empty GitHub repository>")
+        return 2
+    rec = next((r for r in (st.get("repos") or {}).values()
+                if (r.get("full_name") or "").lower() == repository.lower()
+                or (r.get("forge_name") or "").lower() == repository.lower()), None)
+    cur = forge.by_id(rec["forge_id"]) if rec and rec.get("forge_id") else None
+    if not cur:
+        say(f"There is no copy of {repository} in the forge.")
+        return 2
+    # The person's own git login for the new home; the skill's keys are not used there.
+    out = run(["git", "ls-remote", url], env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=120)
+    if out.returncode != 0:
+        say(f"The new home could not be reached: {last_line(out.stderr)}. Nothing was pushed.")
+        return 1
+    if out.stdout.strip():
+        say("The new home is not empty, so nothing was pushed. Make a new, empty repository and name that.")
+        return 1
+    work = scratch(p, "restore-to")
+    try:
+        into = os.path.join(work, "copy.git")
+        why = clone_copy(forge, cur["name"], into)
+        if why:
+            say(f"{repository}: {why}. Nothing was pushed.")
+            return 1
+        mine = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        run(["git", "--git-dir", into, "remote", "add", "home", url], env=mine)
+        if uses_lfs(into) and has_git_lfs():
+            # Large files first, to the new home by its own name (git lfs would otherwise ask the forge).
+            out = run(["git", "--git-dir", into, "lfs", "push", "--all", "home"], env=mine, timeout=3600)
+            if out.returncode != 0:
+                say("The large files could not be put in the new home, so nothing else was pushed: "
+                    + " / ".join(out.stderr.strip().splitlines()[-3:]))
+                return 1
+        specs = ["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*", "^refs/heads/kept/*"]
+        out = run(["git", "--git-dir", into, "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--atomic", "home",
+                   *specs], env=mine, timeout=3600)
+        if out.returncode != 0:
+            say("The push to the new home failed: " + " / ".join(out.stderr.strip().splitlines()[-4:]))
+            return 1
+        sent = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
+        back = run(["git", "ls-remote", url], env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=120)
+        there = {r: s for s, r in (l.split("\t", 1) for l in back.stdout.splitlines() if "\t" in l)
+                 if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
+        if there != sent:
+            say("The new home does not hold what was sent; check it before you rely on it.")
+            return 1
+        heads = sum(1 for r in sent if r.startswith("refs/heads/"))
+        say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
+            "the kept refs stay in your forge")
+        return 0
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def service(p, verb):
+    """Stop or start the forge's own service."""
+    if system()[0] == "darwin":
+        uid = str(os.getuid())
+        cmd = (["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"] if verb == "stop"
+               else ["launchctl", "bootstrap", f"gui/{uid}", p["plist"]])
+    else:
+        cmd = ["systemctl", "--user", verb, SERVICE]
+    return run(cmd).returncode == 0
+
+
+def port_answers(port):
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def safe_extract(archive, into):
+    with tarfile.open(archive) as tf:
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(into, filter="data")
+            return
+        root = os.path.realpath(into)
+        for m in tf.getmembers():
+            dest = os.path.realpath(os.path.join(into, m.name))
+            if not dest.startswith(root + os.sep) or m.issym() or m.islnk() or m.isdev():
+                raise SystemExit(f"The backup holds an entry that points outside it ({m.name}); nothing was restored.")
+        tf.extractall(into)
+
+
+def cmd_backup(args):
+    """G7.4: the forge's own dump, plus the skill's state and settings (never its keys), in one file only the
+    person can read."""
+    p = paths()
+    st = load_json(p["state"], {})
+    if not st.get("port"):
+        say("Run setup first.")
+        return 2
+    folder = os.path.abspath(os.path.expanduser(args.folder))
+    os.makedirs(folder, exist_ok=True)
+    work = scratch(p, "backup")
+    lock_ok, why = take_lock(p)
+    if not lock_ok:
+        shutil.rmtree(work, ignore_errors=True)
+        say(f"No backup was made: {why}.")
+        return 3
+    try:
+        service(p, "stop")
+        for _ in range(60):
+            if not port_answers(st["port"]):
+                break
+            time.sleep(0.5)
+        else:
+            say("The forge did not stop, so no backup was made (a backup of a running forge can be torn).")
+            return 1
+        dump = os.path.join(work, "gitea-dump.tar.gz")
+        out = gitea(p, "dump", "--type", "tar.gz", "--file", dump, "--tempdir", work)
+        if out.returncode != 0 or not os.path.exists(dump):
+            say(f"Gitea's dump failed: {last_line(out.stderr)}. No backup was made.")
+            return 1
+    finally:
+        started = service(p, "start")
+        drop_lock(p)
+    try:
+        skill = os.path.join(work, "skill")
+        os.makedirs(skill)
+        shutil.copyfile(p["state"], os.path.join(skill, "state.json"))
+        if os.path.exists(p["settings"]):
+            shutil.copyfile(p["settings"], os.path.join(skill, "settings.json"))
+        write_file(os.path.join(skill, "VERSION"), VERSION + "\n")
+        name = os.path.join(folder, f"windstorm-mirror-backup-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.tar.gz")
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f, tarfile.open(fileobj=f, mode="w:gz") as tf:
+            tf.add(dump, arcname="gitea-dump.tar.gz")
+            tf.add(skill, arcname="skill")
+        os.chmod(name, 0o600)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    n = sum(1 for r in (st.get("repos") or {}).values() if r.get("forge_id"))
+    say(f"backup: {name} ({os.path.getsize(name) // 1024} KB, {n} copies), readable by you only.")
+    say("It holds the forge's own secrets, so keep it as private as the forge. Your GitHub keys are not in it.")
+    if not started:
+        say("problem: the forge's service did not start again after the backup; run setup to start it")
+        return 1
+    return 0
+
+
+def setup_from(p, args):
+    """G7.4: a new computer with only the backup file and the skill gets back every copy."""
+    if load_json(p["state"], {}).get("port"):
+        say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed.")
+        return 2
+    src = os.path.abspath(os.path.expanduser(args.from_file))
+    os.makedirs(p["data"], mode=0o700, exist_ok=True)
+    os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
+    work = scratch(p, "setup-from")
+    try:
+        safe_extract(src, work)
+        old_st = load_json(os.path.join(work, "skill", "state.json"), None)
+        if not old_st or not os.path.exists(os.path.join(work, "gitea-dump.tar.gz")):
+            say("That file is not a backup of this skill. Nothing was changed.")
+            return 2
+        dump = os.path.join(work, "dump")
+        os.makedirs(dump)
+        safe_extract(os.path.join(work, "gitea-dump.tar.gz"), dump)
+        f = p["forge"]
+        os.makedirs(f, mode=0o700, exist_ok=True)
+        if os.path.isdir(os.path.join(dump, "custom")):
+            shutil.copytree(os.path.join(dump, "custom"), os.path.join(f, "custom"), dirs_exist_ok=True)
+        shutil.copytree(os.path.join(dump, "data"), os.path.join(f, "data"), dirs_exist_ok=True)
+        if os.path.isdir(os.path.join(dump, "repos")):
+            shutil.copytree(os.path.join(dump, "repos"), os.path.join(f, "data", "gitea-repositories"), dirs_exist_ok=True)
+        os.makedirs(os.path.join(f, "log"), exist_ok=True)
+        with open(os.path.join(dump, "app.ini"), encoding="utf-8") as fh:
+            ini = fh.read()
+        old = (re.search(r"^WORK_PATH\s*=\s*(.+)$", ini, re.M) or [None, ""])[1].strip()
+        port = free_port()
+        if old:
+            ini = ini.replace(old, f)
+        ini = re.sub(r"^HTTP_PORT\s*=.*$", f"HTTP_PORT = {port}", ini, flags=re.M)
+        ini = re.sub(r"^ROOT_URL\s*=.*$", f"ROOT_URL = http://127.0.0.1:{port}/", ini, flags=re.M)
+        ini = re.sub(r"^HTTP_ADDR\s*=.*$", "HTTP_ADDR = 127.0.0.1", ini, flags=re.M)
+        os.makedirs(os.path.dirname(p["app_ini"]), exist_ok=True)
+        write_file(p["app_ini"], ini, 0o600)
+        settings = os.path.join(work, "skill", "settings.json")
+        if os.path.exists(settings):
+            write_file(p["settings"], json.dumps(load_json(settings, {}), indent=1) + "\n", 0o600)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    for step in (["migrate"], ["admin", "regenerate", "hooks"]):
+        out = gitea(p, *step)
+        if out.returncode != 0:
+            raise SystemExit(f"Gitea could not {' '.join(step)}: {last_line(out.stderr)}")
+    user = old_st.get("mirror_user", MIRROR_USER)
+    out = gitea(p, "admin", "user", "generate-access-token", "--username", user,
+                "--token-name", "windstorm-mirror-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()),
+                "--scopes", MIRROR_SCOPES, "--raw")
+    if out.returncode != 0 or not out.stdout.strip():
+        raise SystemExit("Gitea did not give the mirror account a new key; nothing was printed.")
+    write_private(p["mirror_key"], secret(out.stdout.strip()) + "\n")
+    st = dict(old_st, port=port, version=VERSION, gitea=GITEA_VERSION, restored_from=os.path.basename(src),
+              restored_at=now_utc())
+    st.pop("keys", None)
+    save_state(p, st)
+    here = os.path.abspath(__file__)
+    if os.path.abspath(p["script"]) != here:
+        shutil.copyfile(here, p["script"] + ".tmp")
+        os.replace(p["script"] + ".tmp", p["script"])
+    ok, why = install_service(p)
+    if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
+        ok, why = False, "the sync timer could not be switched on"
+    n = sum(1 for r in (st.get("repos") or {}).values() if r.get("forge_id"))
+    owners = ", ".join(sorted((load_json(p["settings"], {}).get("owners") or {}))) or "(none)"
+    say(f"Restored from {os.path.basename(src)}: {n} copies are back, on http://127.0.0.1:{port}/ (this computer only).")
+    say(f"Your GitHub keys are not in a backup. To keep the copies current, make new keys and run `key set` for "
+        f"each owner: {owners}. Until then, `status` shows them behind.")
+    say("Your Gitea password is the one it had on the old computer.")
+    say(f"The forge runs as your own service." if ok else f"The forge's service did not start: {why}")
+    back, note = comes_back_by_itself()
+    say("After a restart it starts by itself." if back else note)
+    return 0 if ok else 1
+
+
 def cmd_run_forge(args):
     """What the service runs: check the port is still ours to take, then become Gitea."""
     p = paths()
@@ -1423,6 +1750,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("setup", help="install the forge as your own service")
     s.add_argument("--dry-run", action="store_true", help="say what setup would do and change nothing")
+    s.add_argument("--from", dest="from_file", metavar="BACKUP", help="on a new computer: bring every copy back from a backup")
     s.set_defaults(fn=cmd_setup)
     k = sub.add_parser("key", help="the GitHub keys, one per owner")
     ks = k.add_subparsers(dest="key_cmd", required=True)
@@ -1441,6 +1769,14 @@ def main(argv=None):
     st_.add_argument("--check-release", action="store_true", help="ask GitHub for the latest release now")
     st_.set_defaults(fn=cmd_status)
     y.set_defaults(fn=cmd_sync)
+    rs = sub.add_parser("restore", help="prove every copy from the forge alone, or put one in a new home")
+    rs.add_argument("--check", action="store_true", help="clone every copy from the forge and check it against GitHub's last refs")
+    rs.add_argument("--to", metavar="URL", help="a new, empty home for one copy (never GitHub)")
+    rs.add_argument("repository", nargs="?", help="owner/name of the copy to put in the new home")
+    rs.set_defaults(fn=cmd_restore)
+    b = sub.add_parser("backup", help="the forge's own backup plus the skill's settings, readable by you only")
+    b.add_argument("folder")
+    b.set_defaults(fn=cmd_backup)
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)

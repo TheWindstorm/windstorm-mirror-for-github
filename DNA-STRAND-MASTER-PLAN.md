@@ -185,10 +185,10 @@ reaches several owners, and a classic key that can read private repositories can
 
 | Codon | Claim | Proof |
 |---|---|---|
-| G7.1 | Each sync writes down the refs it last saw on GitHub for every repository. | `test_G7_1_each_sync_writes_down_the_refs_github_last_showed` *(to build)* |
-| G7.2 | `restore --check` needs no network beyond this computer. It clones every copy from the forge into a scratch folder, checks every branch and tag against the last refs seen on GitHub, runs `git fsck`, prints one line per difference, then a total, and removes the scratch folder. | `test_G7_2_restore_check_proves_every_copy_from_the_forge_alone` *(to build)* |
-| G7.3 | `restore --to <url> <repository>` pushes one copy, every branch and tag, to a new, empty home the person names. It refuses a home that is not empty. | `test_G7_3_a_copy_is_restored_to_a_new_empty_home` *(to build)* |
-| G7.4 | `backup <folder>` writes the forge's own backup (Gitea's dump) plus the skill's settings without its keys. The file holds the forge's own secrets, so it is readable by the person only, and the skill says so (C8). A new computer with only that file and the skill gets back every copy (`setup --from <file>`). | `test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup` *(to build)* |
+| G7.1 | Each sync writes down the refs it last saw on GitHub for every repository. | `test_G7_1_each_sync_writes_down_the_refs_github_last_showed` |
+| G7.2 | `restore --check` needs no network beyond this computer. It clones every copy from the forge into a scratch folder, checks every branch and tag against the last refs seen on GitHub, runs `git fsck`, prints one line per difference, then a total, and removes the scratch folder. | `test_G7_2_restore_check_proves_every_copy_from_the_forge_alone` |
+| G7.3 | `restore --to <url> <repository>` pushes one copy, every branch and tag, to a new, empty home the person names. It refuses a home that is not empty. | `test_G7_3_a_copy_is_restored_to_a_new_empty_home` |
+| G7.4 | `backup <folder>` writes the forge's own backup (Gitea's dump) plus the skill's settings without its keys. The file holds the forge's own secrets, so it is readable by the person only, and the skill says so (C8). A new computer with only that file and the skill gets back every copy (`setup --from <file>`). | `test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup` |
 
 ### G8 Never reachable from outside
 
