@@ -104,6 +104,7 @@ class Home:
         TEMPS.append(self.tmp)
         self.calls = []
         self.linger, self.enable_ok, self.service_ok = linger, enable_linger_ok, service_ok
+        self.timer_next = "Sun 2026-11-22 19:15:00 UTC"     # what the system says of the sync timer's next run
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -116,6 +117,14 @@ class Home:
             self.calls.append(cmd)
             if cmd[:2] == ["loginctl", "show-user"]:
                 return subprocess.CompletedProcess(cmd, 0, f"Linger={self.linger}\n", "")
+            if cmd[:3] == ["systemctl", "--user", "show"]:
+                if self.timer_next is None:
+                    return subprocess.CompletedProcess(cmd, 0, "ActiveState=inactive\nNextElapseUSecRealtime=\n", "")
+                return subprocess.CompletedProcess(cmd, 0, f"ActiveState=active\nNextElapseUSecRealtime={self.timer_next}\n", "")
+            if cmd[:2] == ["launchctl", "print"]:
+                if self.timer_next is None:
+                    return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
+                return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n", "")
             if cmd[:2] == ["loginctl", "enable-linger"]:
                 if self.enable_ok:
                     self.linger = "yes"
@@ -563,7 +572,7 @@ class G3(unittest.TestCase):
             self.assertEqual(w.key_set()[0], 0)
             rc, out = w.first_sync()
             self.assertEqual(rc, 0, out)
-            self.assertIn("sync: 5 on GitHub, 5 copied now, 0 problem(s), 3 GitHub API call(s)", out)
+            self.assertIn("sync: 5 on GitHub, 5 copied now, 0 unchanged, 0 problem(s), 3 GitHub API call(s)", out)
             # A page that fails stops that owner's listing: nothing is changed or marked gone for it.
             w.gh.add_repo("someone", "r5")
             w.gh.fail_page = ("/user/repos", 2)
@@ -806,8 +815,208 @@ class G2Sync(unittest.TestCase):
             w.gh.commit("someone/alpha", {"b": b"2"})
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
-            self.assertIn("sync: 2 on GitHub, 2 copied now, 0 problem(s)", out)
+            self.assertIn("sync: 2 on GitHub, 2 copied now, 0 unchanged, 0 problem(s)", out)
             self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+
+
+def put_settings(p, **kw):
+    s = mirror.load_json(p["settings"], {})
+    s.update(kw)
+    mirror.write_file(p["settings"], json.dumps(s), 0o600)
+
+
+def git_calls(gh, full=None):
+    return [x for x in gh.log if ".git/" in x[1] and (full is None or x[1].startswith(f"/{full}.git/"))]
+
+
+class G4(unittest.TestCase):
+    def test_G4_1_a_timer_runs_sync_and_status_reads_its_next_run(self):
+        with World(self) as w:
+            p, h = w.p, w.home
+            if mirror.system()[0] == "darwin":
+                plist = fread(os.path.join(os.path.dirname(p["plist"]), mirror.SYNC_LABEL + ".plist"))
+                self.assertIn("<integer>900</integer>", plist)
+                self.assertIn("<string>--from-timer</string>", plist)
+            else:
+                base = os.path.dirname(p["unit"])
+                self.assertIn("OnUnitActiveSec=15min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))
+                self.assertIn("Persistent=true", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))
+                unit = fread(os.path.join(base, mirror.SYNC_UNIT + ".service"))
+                self.assertIn(f"{p['script']} sync --from-timer", unit)
+                self.assertIn("WSM_HOME=", unit)
+                self.assertIn(["systemctl", "--user", "enable", "--now", mirror.SYNC_UNIT + ".timer"], h.calls)
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            # Before the person's go, the timer copies nothing and is not a failure.
+            rc, out = w.sync("--from-timer")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("waiting for the person's go", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [])
+            self.assertEqual(w.first_sync()[0], 0)
+            w.gh.commit("someone/alpha", {"b": b"2"})
+            rc, out = w.sync("--from-timer")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copied now", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("next sync: " + ("every 15 min" if mirror.system()[0] == "darwin" else h.timer_next), out)
+            self.assertRegex(out, r"last sync: \S+, 1 copied, 0 unchanged, 0 problem\(s\), \d+ GitHub API call\(s\)")
+            # A timer that is not running, or (after a restart) is on with no next run, is a problem, not "on".
+            h.timer_next = None
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertEqual(rc, 1)
+            self.assertIn("problem: the sync timer is not", out)
+            if mirror.system()[0] != "darwin":
+                h.timer_next = "n/a"
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertEqual(rc, 1)
+                self.assertIn("the sync timer is on but has no next run", out)
+
+    def test_G4_2_one_slow_repository_never_holds_up_the_rest(self):
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            put_settings(w.p, git_timeout_s=2)
+            w.gh.slow["someone/alpha"] = 5
+            started = time.time()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 1, out)
+            self.assertLess(time.time() - started, 40)
+            self.assertIn("problem: someone/alpha: the fetch from GitHub took longer than 2 s, and so did the retry", out)
+            self.assertIn("2 on GitHub, 1 copied now", out)
+            self.assertEqual(len([x for x in git_calls(w.gh, "someone/alpha") if "info/refs" in x[1]]), 2,
+                             "the slow fetch was not tried exactly twice")
+            self.assertEqual(w.forge_refs("someone--beta"), w.gh_refs("someone/beta"))
+            st = mirror.load_json(w.p["state"], {})
+            alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
+            self.assertTrue(alpha["problem"].startswith("cannot refresh: the fetch from GitHub took longer"))
+            # When it is quick again, the next sync copies it.
+            w.gh.slow.clear()
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+
+    def test_G4_3_one_sync_at_a_time(self):
+        with Home() as h:
+            p = mirror.paths()
+            lock = os.path.join(p["data"], "sync.lock")
+            os.makedirs(p["data"], exist_ok=True)
+            ok, _ = mirror.take_lock(p)                 # a sync of this process holds the lock
+            self.assertTrue(ok)
+            rc, out = quiet(mirror.main, ["sync"])
+            self.assertEqual(rc, 3)
+            self.assertIn(f"another sync is running (process {os.getpid()}); this one did not start", out)
+            mirror.drop_lock(p)
+            self.assertFalse(os.path.exists(lock))
+            gone = subprocess.Popen([sys.executable, "-c", "pass"])
+            gone.wait()
+            mirror.write_file(lock, str(gone.pid), 0o600)  # a lock left by a sync that is gone
+            rc, out = quiet(mirror.main, ["sync"])
+            self.assertIn(f"a lock left by a sync that is gone (process {gone.pid}) was taken over", out)
+            self.assertIn("Run setup first.", out)
+            self.assertFalse(os.path.exists(lock), "the lock outlived its sync")
+
+    def test_G4_4_a_sync_spends_few_api_calls_and_stops_above_a_floor(self):
+        with World(self) as w:
+            w.gh.page_cap = 2
+            for i in range(5):
+                w.gh.add_repo("someone", f"r{i}")
+                w.gh.commit(f"someone/r{i}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            before = {f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}
+            w.gh.rate_remaining = 450                  # below the floor of 500
+            rc, out = w.sync()
+            self.assertEqual(rc, 1, out)
+            self.assertIn("GitHub's remaining API allowance (449) is below the floor (500), so the listing of someone "
+                          "stopped at page 1", out)
+            self.assertIn("0 copied now", out)
+            self.assertIn("1 GitHub API call(s)", out)
+            self.assertNotIn("gone from GitHub", out)
+            self.assertEqual({f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}, before)
+            put_settings(w.p, api_floor=100)           # the floor is a setting
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("3 GitHub API call(s)", out)
+            self.assertIn("3 GitHub API call(s)", quiet(mirror.main, ["status"])[1])
+
+    def test_G4_5_a_full_disk_stops_the_sync_cleanly(self):
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            before = w.forge_refs("someone--alpha")
+            w.gh.commit("someone/alpha", {"b": b"2"})
+            put_settings(w.p, disk_floor_mb=10 ** 9)
+            rc, out = w.sync()
+            self.assertEqual(rc, 1)
+            self.assertRegex(out, r"The sync did not start: only \d+ MB free on this disk, below the floor of "
+                                  r"1000000000 MB\. Every copy is as it was\.")
+            self.assertEqual(w.forge_refs("someone--alpha"), before)
+            self.assertIn("stopped: only", quiet(mirror.main, ["status"])[1])
+            put_settings(w.p, disk_floor_mb=0)
+            # A sync killed part-way through a copy: that copy stays as it was and is not counted current.
+            w.gh.slow["someone/alpha"] = 3
+            pr = subprocess.Popen([sys.executable, "-I", w.p["script"], "sync"], env=dict(os.environ),
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            STARTED.append(pr)
+            for _ in range(100):
+                st = mirror.load_json(w.p["state"], {})
+                if any(r.get("copying_since") for r in st.get("repos", {}).values()):
+                    break
+                time.sleep(0.1)
+            pr.kill()
+            pr.wait()
+            st = mirror.load_json(w.p["state"], {})
+            alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
+            self.assertTrue(alpha.get("copying_since"), "the copy in progress was not marked")
+            self.assertEqual(w.forge_refs("someone--alpha"), before)
+            w.gh.slow.clear()
+            time.sleep(4)                              # the killed sync's own git child finishes its stalled request
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("was taken over", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+            st = mirror.load_json(w.p["state"], {})
+            self.assertFalse(any(r.get("copying_since") for r in st["repos"].values()))
+
+    def test_G4_6_a_sync_fetches_only_what_changed_and_a_daily_pass_fetches_all(self):
+        with World(self) as w:
+            for i in range(3):
+                w.gh.add_repo("someone", f"r{i}")
+                w.gh.commit(f"someone/r{i}", {"a": b"1"})
+            w.key_set()
+            time.sleep(1.1)                            # pushed_at has whole seconds: a push in a fetch's own second is fetched again
+            rc, out = w.first_sync()
+            self.assertIn("a full pass", out)
+            time.sleep(1.1)                            # pushed_at has whole seconds
+            # A change the listing does not show: a branch made with no new pushed_at.
+            bare = os.path.join(w.gh_root, "someone", "r2.git")
+            subprocess.run(["git", "--git-dir", bare, "branch", "side", "main"], check=True)
+            n = len(git_calls(w.gh))
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("sync: 3 on GitHub, 0 copied now, 3 unchanged, 0 problem(s), 1 GitHub API call(s)", out)
+            self.assertEqual(git_calls(w.gh)[n:], [], "a quiet sync fetched")
+            w.gh.commit("someone/r1", {"b": b"2"})
+            rc, out = w.sync()
+            self.assertIn("1 copied now, 2 unchanged", out)
+            self.assertNotIn("refs/heads/side", w.forge_refs("someone--r2"))
+            st = mirror.load_json(w.p["state"], {})
+            st["last_full_pass"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 25 * 3600))
+            mirror.save_state(w.p, st)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("3 copied now, 0 unchanged, 0 problem(s), 1 GitHub API call(s), a full pass", out)
+            self.assertIn("refs/heads/side", w.forge_refs("someone--r2"))
+            for i in range(3):
+                self.assertEqual(w.forge_refs(f"someone--r{i}"), w.gh_refs(f"someone/r{i}"))
 
 
 class Harness(unittest.TestCase):
