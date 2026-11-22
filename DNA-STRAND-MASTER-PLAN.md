@@ -174,12 +174,12 @@ reaches several owners, and a classic key that can read private repositories can
 
 | Codon | Claim | Proof |
 |---|---|---|
-| G6.1 | `status` prints one line per problem, then `copies: N on GitHub, N copied, M behind, U unreadable`. A copy is behind when its last good refresh is older than twice the sync interval, or when its refs differ from GitHub's after a grace period. | `test_G6_1_status_says_how_many_are_current_and_names_the_rest` *(to build)* |
-| G6.2 | A copy that cannot refresh is never shown as current, for any reason. There is no "known stale" pardon. | `test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current` *(to build)* |
-| G6.3 | `status` scans every repository config in the forge, and the skill's own files, for anything shaped like a key. A scan that read no files is a failure, not a pass. | `test_G6_3_the_key_scan_counts_what_it_read_and_zero_is_a_failure` *(to build)* |
-| G6.4 | The skill never prints or logs a key, a password or a config file whole. It reads settings by name. | `test_G6_4_no_secret_reaches_the_output_or_the_log` *(to build)* |
-| G6.5 | `status` shows the forge's version, the key's expiry, free disk space, the last good sync, and the next. | `test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync` *(to build)* |
-| G6.6 | Once a day, `status` asks GitHub for this skill's latest release, one call with no key. It says when that release pins a newer Gitea than the one running, and whether the release names it as a security fix. It changes nothing by itself: `self-update`, then `upgrade-forge`, is the person's choice. | `test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge` *(to build)* |
+| G6.1 | `status` prints one line per problem, then `copies: N on GitHub, N copied, M behind, U unreadable`. A copy is behind when its last good refresh is older than twice the sync interval, or when its refs differ from GitHub's after a grace period. | `test_G6_1_status_says_how_many_are_current_and_names_the_rest` |
+| G6.2 | A copy that cannot refresh is never shown as current, for any reason. There is no "known stale" pardon. | `test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current` |
+| G6.3 | `status` scans every repository config in the forge, and the skill's own files, for anything shaped like a key. A scan that read no files is a failure, not a pass. | `test_G6_3_the_key_scan_counts_what_it_read_and_zero_is_a_failure` |
+| G6.4 | The skill never prints or logs a key, a password or a config file whole. It reads settings by name. | `test_G6_4_no_secret_reaches_the_output_or_the_log` |
+| G6.5 | `status` shows the forge's version, the key's expiry, free disk space, the last good sync, and the next. | `test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync` |
+| G6.6 | Once a day, `status` asks GitHub for this skill's latest release, one call with no key. It says when that release pins a newer Gitea than the one running, and whether the release names it as a security fix. It changes nothing by itself: `self-update`, then `upgrade-forge`, is the person's choice. | `test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge` |
 
 ### G7 Restore
 
