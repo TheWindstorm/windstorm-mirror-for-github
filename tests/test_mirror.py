@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import signal
 import http.server
+import inspect
 import io
 import json
 import os
@@ -549,6 +550,14 @@ class World:
         code, _, body = http_get(f"http://127.0.0.1:{self.port}/api/v1{path}", key)
         return code, (json.loads(body) if body.strip().startswith(("{", "[")) else body)
 
+    def forge_push(self, cache, name, *specs):
+        key = fread(self.p["mirror_key"]).strip()
+        hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+        env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"http.http://127.0.0.1:{self.port}/.extraheader",
+                   GIT_CONFIG_VALUE_0=hdr, GIT_TERMINAL_PROMPT="0")
+        subprocess.run(["git", "--git-dir", cache, "push", "-q", f"http://127.0.0.1:{self.port}/mirror/{name}.git", *specs],
+                       env=env, check=True, capture_output=True)
+
     def forge_refs(self, name):
         key = fread(self.p["mirror_key"]).strip()
         hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
@@ -1017,6 +1026,109 @@ class G4(unittest.TestCase):
             self.assertIn("refs/heads/side", w.forge_refs("someone--r2"))
             for i in range(3):
                 self.assertEqual(w.forge_refs(f"someone--r{i}"), w.gh_refs(f"someone/r{i}"))
+
+
+class G5(unittest.TestCase):
+    def test_G5_1_a_rewritten_or_deleted_branch_is_kept_before_the_copy_follows(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            first = w.gh.commit("someone/alpha", {"a": b"1"})
+            second = w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "branch", "side", second)
+            w.gh.git("someone/alpha", "tag", "v1", second)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            # On GitHub: main forced back, side deleted, the tag moved.
+            w.gh.git("someone/alpha", "update-ref", "refs/heads/main", first)
+            w.gh.git("someone/alpha", "branch", "-D", "side")
+            w.gh.git("someone/alpha", "tag", "-f", "v1", first)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"someone/alpha: main was rewritten or moved back on GitHub; its old commit is kept as kept/{day}/main", out)
+            self.assertIn(f"someone/alpha: side was deleted on GitHub; its old commit is kept as kept/{day}/side", out)
+            self.assertIn(f"someone/alpha: tags/v1 was moved on GitHub; its old commit is kept as kept/{day}/tags/v1", out)
+            refs = w.forge_refs("someone--alpha")
+            self.assertEqual(refs["refs/heads/main"], first)
+            self.assertNotIn("refs/heads/side", refs)
+            self.assertEqual(refs["refs/tags/v1"], first)
+            self.assertEqual(refs[f"refs/heads/kept/{day}/main"], second)
+            self.assertEqual(refs[f"refs/heads/kept/{day}/side"], second)
+            self.assertEqual(refs[f"refs/heads/kept/{day}/tags/v1"], second)
+            # Moving forward keeps nothing; a second rewrite the same day gets a name of its own.
+            third = w.gh.commit("someone/alpha", {"a": b"3"})
+            rc, out = w.sync()
+            self.assertNotIn("is kept as", out)
+            w.gh.git("someone/alpha", "update-ref", "refs/heads/main", first)
+            rc, out = w.sync()
+            self.assertIn(f"its old commit is kept as kept/{day}/main-2", out)
+            refs = w.forge_refs("someone--alpha")
+            self.assertEqual(refs[f"refs/heads/kept/{day}/main-2"], third)
+            self.assertEqual(refs[f"refs/heads/kept/{day}/main"], second)
+            # Every kept ref survives later syncs, and a lost cache is rebuilt from the copy with them.
+            shutil.rmtree(w.p["cache"])
+            w.gh.commit("someone/alpha", {"a": b"4"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len([r for r in w.forge_refs("someone--alpha") if "/kept/" in r]), 4)
+
+    def test_G5_2_kept_refs_live_for_the_set_period(self):
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            cache = next(os.path.join(w.p["cache"], d) for d in os.listdir(w.p["cache"]))
+            g = lambda *a: subprocess.run(["git", "--git-dir", cache, *a], check=True, capture_output=True, input="",
+                                          text=True, env=dict(os.environ, GIT_AUTHOR_NAME="a", GIT_AUTHOR_EMAIL="a@example.invalid",
+                                                              GIT_COMMITTER_NAME="a", GIT_COMMITTER_EMAIL="a@example.invalid")).stdout.strip()
+            main = g("rev-parse", "refs/heads/main")
+            lone = g("commit-tree", "-m", "only a kept ref reaches me", g("mktree", "--missing"))
+            # Two kept refs from long ago, in the copy: one whose commit is on main too, one that alone reaches its commit.
+            w.forge_push(cache, "someone--alpha", f"{main}:refs/heads/kept/2020-01-01/reached",
+                         f"{lone}:refs/heads/kept/2020-01-01/lone")
+            refs = w.forge_refs("someone--alpha")
+            self.assertIn("refs/heads/kept/2020-01-01/reached", refs)
+            self.assertIn("refs/heads/kept/2020-01-01/lone", refs)
+            # The default period (90 days): the old kept ref whose commit is reached otherwise goes; the lone one stays.
+            w.gh.commit("someone/alpha", {"c": b"3"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("someone/alpha: 1 kept ref(s) older than the kept period were dropped", out)
+            refs = w.forge_refs("someone--alpha")
+            self.assertNotIn("refs/heads/kept/2020-01-01/reached", refs)
+            self.assertEqual(refs["refs/heads/kept/2020-01-01/lone"], lone)
+            # A period the person set is kept to, even for the only ref to a commit.
+            put_settings(w.p, kept_days=30)
+            w.gh.commit("someone/alpha", {"d": b"4"})
+            self.assertEqual(w.sync()[0], 0)
+            self.assertNotIn("refs/heads/kept/2020-01-01/lone", w.forge_refs("someone--alpha"))
+
+    def test_G5_3_nothing_is_ever_written_to_github(self):
+        src = fread(SCRIPT)
+        self.assertNotRegex(src, r'"push"[^\n]*"github"', "the script has a push to GitHub")
+        get = inspect.getsource(mirror.gh_get)
+        self.assertNotIn("method=", get)
+        self.assertNotIn("data=", get)
+        self.assertEqual(src.count("github_api()"), 2, "a call to GitHub's API goes around gh_get")
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.gh.rename("someone/beta", "gamma")
+            w.gh.delete("someone/alpha")
+            self.assertEqual(w.sync()[0], 0)
+            self.assertEqual(w.gh.writes(), [], "something was written to the stand-in GitHub")
+            for d in os.listdir(w.p["cache"]):
+                cache = os.path.join(w.p["cache"], d)
+                url = subprocess.run(["git", "--git-dir", cache, "config", "remote.github.pushurl"],
+                                     capture_output=True, text=True).stdout.strip()
+                self.assertEqual(url, mirror.NO_PUSH)
+                out = subprocess.run(["git", "--git-dir", cache, "push", "github", "HEAD"], capture_output=True, text=True)
+                self.assertNotEqual(out.returncode, 0)
+            self.assertEqual(w.gh.writes(), [])
 
 
 class Harness(unittest.TestCase):

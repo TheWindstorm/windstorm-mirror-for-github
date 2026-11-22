@@ -166,9 +166,9 @@ reaches several owners, and a classic key that can read private repositories can
 
 | Codon | Claim | Proof |
 |---|---|---|
-| G5.1 | Before a branch or tag is moved backwards, rewritten or deleted in the copy, its old commit is kept under `kept/<date>/<name>` in the same copy. | `test_G5_1_a_rewritten_or_deleted_branch_is_kept_before_the_copy_follows` *(to build)* |
-| G5.2 | Kept refs are dropped after 90 days by default (a setting). Nothing is dropped while it is the only ref that reaches a commit, unless the person has set that period. | `test_G5_2_kept_refs_live_for_the_set_period` *(to build)* |
-| G5.3 | The skill never writes to GitHub. It has no push to GitHub, no push mirror and no API call that changes anything there. | `test_G5_3_nothing_is_ever_written_to_github` *(to build)* |
+| G5.1 | Before a branch or tag is moved backwards, rewritten or deleted in the copy, its old commit is kept under `kept/<date>/<name>` in the same copy. | `test_G5_1_a_rewritten_or_deleted_branch_is_kept_before_the_copy_follows` |
+| G5.2 | Kept refs are dropped after 90 days by default (a setting). Nothing is dropped while it is the only ref that reaches a commit, unless the person has set that period. | `test_G5_2_kept_refs_live_for_the_set_period` |
+| G5.3 | The skill never writes to GitHub. It has no push to GitHub, no push mirror and no API call that changes anything there. | `test_G5_3_nothing_is_ever_written_to_github` |
 
 ### G6 Say what is true
 
