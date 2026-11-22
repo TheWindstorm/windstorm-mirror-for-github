@@ -37,6 +37,7 @@ class FakeGitHub:
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
         self.lfs_uploads = []                 # LFS batch calls that asked to upload (a batch call to download is a read)
+        self.contents = {}                    # path in the skill's repository -> bytes, served with no key
         self.release = None                   # what /repos/<o>/<n>/releases/latest answers (no key needed)
         self.release_calls = []               # for each such call: did it carry a key?
         self.page_cap = 100                   # GitHub's own cap; tests lower it to see paging with few repositories
@@ -182,6 +183,17 @@ class FakeGitHub:
                     return self.lfs_api(method, u)
                 if ".git/" in u.path or u.path.endswith(".git"):
                     return self.git(method, u)
+                if method == "GET" and "/contents/" in u.path:
+                    data = fake.contents.get(u.path.split("/contents/", 1)[1])
+                    with fake.lock:
+                        fake.release_calls.append(bool(self.headers.get("Authorization")))
+                    if data is None:
+                        return self.send_json(404, {"message": "Not Found"})
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if method == "GET" and u.path.endswith("/releases/latest"):
                     with fake.lock:
                         fake.release_calls.append(bool(self.headers.get("Authorization")))

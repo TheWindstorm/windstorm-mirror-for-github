@@ -271,8 +271,16 @@ def ini_value(path, section, key):
     return None
 
 
+def running_bin(p):
+    """The forge's binary is the one the state names, not this script's own pin: a self-update that brings a newer
+    pin never changes the forge by itself (G9.1)."""
+    st = load_json(p["state"], {})
+    ver = st.get("gitea")
+    return os.path.join(os.path.dirname(p["bin"]), f"gitea-{ver}") if ver else p["bin"]
+
+
 def gitea(p, *args):
-    return run([p["bin"], "--config", p["app_ini"], "--work-path", p["forge"], *args],
+    return run([running_bin(p), "--config", p["app_ini"], "--work-path", p["forge"], *args],
                env=dict(os.environ, GITEA_WORK_DIR=p["forge"]))
 
 
@@ -1168,6 +1176,11 @@ def cmd_setup(args):
     p = paths()
     if getattr(args, "from_file", None):
         return setup_from(p, args)
+    have = load_json(p["state"], {}).get("gitea")
+    if have and have != GITEA_VERSION:
+        say(f"This forge runs Gitea {have}, and this release of the skill pins {GITEA_VERSION}. Setup does not move "
+            "the forge: run upgrade-forge, which makes a backup first. Nothing was changed.")
+        return 2
     st = load_json(p["state"], {})
     plan = setup_plan(p, st)
     back, note = comes_back_by_itself(dry=True)
@@ -1297,15 +1310,31 @@ def key_scan(p, st):
     return len(files), found
 
 
+def vt(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+
+
+def gh_public(path, accept="application/vnd.github+json"):
+    """One read of GitHub's API with no key at all (the skill's own releases). Returns (status, bytes)."""
+    req = urllib.request.Request(github_api() + path, headers={"User-Agent": USER_AGENT, "Accept": accept})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+    except (urllib.error.URLError, OSError):
+        return 0, b""
+
+
 def release_check(st, force=False):
     """G6.6: once a day, one call with no key for this skill's latest release. Returns lines to show."""
     rc = st.get("release_check") or {}
     if force or time.time() - epoch_of(rc.get("at")) >= 86400:
-        req = urllib.request.Request(f"{github_api()}/repos/{SKILL_REPO}/releases/latest",
-                                     headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                body = json.loads(r.read() or b"null") or {}
+            code, raw = gh_public(f"/repos/{SKILL_REPO}/releases/latest")
+            if code != 200:
+                raise urllib.error.HTTPError("", code or 0, "no answer", None, None)
+            body = json.loads(raw or b"null") or {}
             m = re.search(r"Pins Gitea (\d+\.\d+\.\d+)([^\n]*)", body.get("body") or "")
             rc = {"at": now_utc(), "tag": body.get("tag_name", ""), "gitea": m.group(1) if m else "",
                   "security": bool(m and "security fix" in m.group(2).lower())}
@@ -1315,7 +1344,6 @@ def release_check(st, force=False):
     if rc.get("error"):
         return [f"newer release: not known (GitHub gave {rc['error']}; it is asked again tomorrow)"]
     lines = []
-    vt = lambda v: tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
     if rc.get("tag") and vt(rc["tag"]) > vt(VERSION):
         lines.append(f"newer release of this skill: {rc['tag']} (this is {VERSION}); `self-update` is your choice")
     if rc.get("gitea") and vt(rc["gitea"]) > vt(GITEA_VERSION):
@@ -1395,7 +1423,8 @@ def cmd_status(args):
     if not up:
         problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}")
     elif (ver or {}).get("version") != GITEA_VERSION:
-        problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, not the pinned {GITEA_VERSION}")
+        problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, and this release pins {GITEA_VERSION}"
+                        + ("; `upgrade-forge` moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
     max_age = 2 * setting(s, "interval_min") * 60
     on_gh = copied = behind = unreadable = 0
     for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
@@ -1667,14 +1696,20 @@ def cmd_backup(args):
     if not st.get("port"):
         say("Run setup first.")
         return 2
-    folder = os.path.abspath(os.path.expanduser(args.folder))
-    os.makedirs(folder, exist_ok=True)
-    work = scratch(p, "backup")
     lock_ok, why = take_lock(p)
     if not lock_ok:
-        shutil.rmtree(work, ignore_errors=True)
         say(f"No backup was made: {why}.")
         return 3
+    try:
+        return make_backup(p, st, args.folder)
+    finally:
+        drop_lock(p)
+
+
+def make_backup(p, st, folder):
+    folder = os.path.abspath(os.path.expanduser(folder))
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    work = scratch(p, "backup")
     try:
         service(p, "stop")
         for _ in range(60):
@@ -1691,7 +1726,6 @@ def cmd_backup(args):
             return 1
     finally:
         started = service(p, "start")
-        drop_lock(p)
     try:
         skill = os.path.join(work, "skill")
         os.makedirs(skill)
@@ -1713,6 +1747,7 @@ def cmd_backup(args):
     if not started:
         say("problem: the forge's service did not start again after the backup; run setup to start it")
         return 1
+    st["last_backup"] = name
     return 0
 
 
@@ -1793,6 +1828,206 @@ def setup_from(p, args):
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------- G9 upgrades and uninstall
+
+def wait_forge(port, up=True, seconds=60):
+    for _ in range(seconds * 2):
+        if port_answers(port) == up:
+            if not up:
+                return True
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/healthz", timeout=2):
+                    return True
+            except (urllib.error.URLError, OSError):
+                pass
+        time.sleep(0.5)
+    return False
+
+
+def cmd_upgrade_forge(args):
+    """G9.1: only to the version this release pins; a backup first; the binary checksum-checked; started and
+    checked; on any failure the old binary and the database as it was are put back."""
+    p = paths()
+    st = load_json(p["state"], {})
+    if not st.get("port"):
+        say("Run setup first.")
+        return 2
+    cur, new = st.get("gitea") or GITEA_VERSION, GITEA_VERSION
+    if vt(cur) == vt(new):
+        say(f"The forge runs Gitea {cur}, the version this release pins. Nothing to do.")
+        return 0
+    if vt(cur) > vt(new):
+        say(f"The forge runs Gitea {cur}, newer than the {new} this release pins. A forge is never moved back. "
+            "Nothing was changed.")
+        return 2
+    ok, why = take_lock(p)
+    if not ok:
+        say(f"No upgrade: {why}.")
+        return 3
+    rollback = os.path.join(p["data"], "upgrade-rollback")
+    try:
+        say(f"upgrade-forge: Gitea {cur} to {new}. First, a backup.")
+        if make_backup(p, st, os.path.join(p["data"], "backups")) != 0:
+            say("The backup failed, so the forge was not touched.")
+            return 1
+        save_state(p, st)
+        try:
+            fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
+        except SystemExit as e:
+            say(f"{e} The forge was not touched.")
+            return 1
+        service(p, "stop")
+        if not wait_forge(st["port"], up=False, seconds=30):
+            service(p, "start")
+            say("The forge did not stop, so it was not upgraded.")
+            return 1
+        shutil.rmtree(rollback, ignore_errors=True)
+        os.makedirs(rollback, mode=0o700)
+        db = os.path.join(p["forge"], "data", "gitea.db")
+        shutil.copy2(db, os.path.join(rollback, "gitea.db"))
+        shutil.copy2(p["app_ini"], os.path.join(rollback, "app.ini"))
+        st["gitea"] = new
+        save_state(p, st)
+        why = ""
+        out = gitea(p, "migrate")
+        if out.returncode != 0:
+            why = "Gitea's migration failed: " + last_line(out.stderr or out.stdout)
+        else:
+            service(p, "start")
+            if not wait_forge(st["port"], up=True, seconds=90):
+                why = "the new forge did not answer within 90 s"
+            else:
+                code, ver = Forge(p, st).call("GET", "/version")
+                if code != 200 or (ver or {}).get("version") != new:
+                    why = f"the new forge says it is {(ver or {}).get('version')}, not {new}"
+        if why:
+            service(p, "stop")
+            wait_forge(st["port"], up=False, seconds=30)
+            shutil.copy2(os.path.join(rollback, "gitea.db"), db)
+            shutil.copy2(os.path.join(rollback, "app.ini"), p["app_ini"])
+            st["gitea"] = cur
+            save_state(p, st)
+            service(p, "start")
+            back = wait_forge(st["port"], up=True, seconds=90)
+            say(f"The upgrade to Gitea {new} failed: {why}. "
+                + (f"The old forge, Gitea {cur}, is back with its database as it was before."
+                   if back else f"The old forge, Gitea {cur}, was put back but does not answer yet; run status.")
+                + f" The backup is at {st.get('last_backup')}.")
+            return 1
+        st["upgraded"] = {"from": cur, "to": new, "at": now_utc(), "backup": st.get("last_backup")}
+        save_state(p, st)
+        old_bin = os.path.join(os.path.dirname(p["bin"]), f"gitea-{cur}")
+        say(f"The forge runs Gitea {new} now. The backup made first is at {st.get('last_backup')}; "
+            f"the old binary is kept at {old_bin} until uninstall.")
+    finally:
+        shutil.rmtree(rollback, ignore_errors=True)
+        drop_lock(p)
+    return cmd_status(args)
+
+
+def cmd_self_update(args):
+    """G9.2: the skill's own file, replaced whole in one rename, checked first, and never while a sync runs."""
+    p = paths()
+    code, raw = gh_public(f"/repos/{SKILL_REPO}/releases/latest")
+    if code != 200:
+        say(f"GitHub did not show the latest release ({code or 'no answer'}). Nothing was changed.")
+        return 1
+    rel = json.loads(raw or b"null") or {}
+    tag = rel.get("tag_name", "")
+    if vt(tag) <= vt(VERSION):
+        say(f"This is the latest release ({VERSION}). Nothing was changed.")
+        return 0
+    m = re.search(r"mirror\.py SHA-256 ([0-9a-f]{64})", rel.get("body") or "")
+    if not m:
+        say(f"Release {tag} does not name the checksum of mirror.py, so it is not installed. Nothing was changed.")
+        return 1
+    code, data = gh_public(f"/repos/{SKILL_REPO}/contents/scripts/mirror.py?ref={urllib.parse.quote(tag)}",
+                           accept="application/vnd.github.raw")
+    if code != 200 or hashlib.sha256(data).hexdigest() != m.group(1):
+        say(f"The mirror.py of {tag} did not arrive whole or does not match its checksum. Nothing was changed.")
+        return 1
+    target = p["script"] if os.path.exists(p["script"]) else os.path.abspath(__file__)
+    tmp = target + ".new"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    out = run([sys.executable, "-I", tmp, "--version"], timeout=60)
+    if out.returncode != 0 or vt(out.stdout) != vt(tag):
+        os.remove(tmp)
+        say(f"The new mirror.py did not run as {tag}. Nothing was changed.")
+        return 1
+    ok, why = take_lock(p)
+    if not ok:
+        os.remove(tmp)
+        say(f"No update: {why}. Try again when it is done.")
+        return 3
+    try:
+        os.chmod(tmp, os.stat(target).st_mode & 0o777 if os.path.exists(target) else 0o644)
+        os.replace(tmp, target)
+    finally:
+        drop_lock(p)
+    say(f"self-update: {VERSION} to {tag}, replaced whole at {target}. The forge was not changed.")
+    pin = re.search(r'^GITEA_VERSION = "([\d.]+)"', data.decode("utf-8", "replace"), re.M)
+    if pin and vt(pin.group(1)) > vt(load_json(p["state"], {}).get("gitea") or GITEA_VERSION):
+        say(f"{tag} pins Gitea {pin.group(1)}: run upgrade-forge when you choose (it makes a backup first).")
+    return 0
+
+
+def cmd_uninstall(args):
+    """G9.3: everything but the folder of copies goes; that folder goes only on the person's typed word."""
+    p = paths()
+    st = load_json(p["state"], {})
+    ok, why = take_lock(p)
+    if not ok:
+        say(f"Not now: {why}.")
+        return 3
+    removed = []
+    try:
+        uid = str(os.getuid())
+        if system()[0] == "darwin":
+            for label, plist in ((LAUNCHD_LABEL, p["plist"]),
+                                 (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"))):
+                run(["launchctl", "bootout", f"gui/{uid}/{label}"])
+                if os.path.exists(plist):
+                    os.remove(plist)
+                    removed.append(plist)
+        else:
+            run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
+            base = os.path.dirname(p["unit"])
+            for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
+                if os.path.exists(f):
+                    os.remove(f)
+                    removed.append(f)
+            run(["systemctl", "--user", "daemon-reload"])
+        for d in (os.path.dirname(p["bin"]), p["cache"], p["conf"]):
+            if os.path.exists(d):
+                shutil.rmtree(d)
+                removed.append(d)
+        for f in (p["script"],):
+            if os.path.exists(f):
+                os.remove(f)
+                removed.append(f)
+    finally:
+        drop_lock(p)
+    say("uninstall: the service, the sync timer, the forge's binary, the settings and every key are removed:")
+    for r in removed:
+        say(f"  removed {r}")
+    n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
+    if not os.path.exists(p["forge"]):
+        return 0
+    if not args.delete_copies:
+        say(f"Left: the folder of copies, {p['data']} ({n} copies). It is yours; delete it only when you are sure, "
+            "with: uninstall --delete-copies")
+        return 0
+    say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds:")
+    answer = sys.stdin.readline().strip() if not sys.stdin.isatty() else input("> ").strip()
+    if answer != str(n):
+        say(f"That is not {n}. The copies were not deleted.")
+        return 1
+    shutil.rmtree(p["data"])
+    say(f"The folder of copies is deleted ({n} copies).")
+    return 0
+
+
 def cmd_run_forge(args):
     """What the service runs: check the port is still ours to take, then become Gitea."""
     p = paths()
@@ -1805,7 +2040,8 @@ def cmd_run_forge(args):
             "Run setup again to pick a free one.")
         return 3
     env = dict(os.environ, GITEA_WORK_DIR=p["forge"])
-    os.execve(p["bin"], [p["bin"], "--config", p["app_ini"], "--work-path", p["forge"], "web"], env)
+    binary = running_bin(p)
+    os.execve(binary, [binary, "--config", p["app_ini"], "--work-path", p["forge"], "web"], env)
 
 
 def main(argv=None):
@@ -1843,6 +2079,13 @@ def main(argv=None):
     b = sub.add_parser("backup", help="the forge's own backup plus the skill's settings, readable by you only")
     b.add_argument("folder")
     b.set_defaults(fn=cmd_backup)
+    u = sub.add_parser("upgrade-forge", help="move the forge to the Gitea this release pins (a backup first)")
+    u.set_defaults(fn=cmd_upgrade_forge, check_release=False)
+    su = sub.add_parser("self-update", help="replace this skill's own file with the latest release, whole")
+    su.set_defaults(fn=cmd_self_update)
+    un = sub.add_parser("uninstall", help="remove everything but the folder of copies")
+    un.add_argument("--delete-copies", action="store_true", help="also delete the copies, after you type their number")
+    un.set_defaults(fn=cmd_uninstall)
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)

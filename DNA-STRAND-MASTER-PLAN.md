@@ -202,9 +202,9 @@ reaches several owners, and a classic key that can read private repositories can
 
 | Codon | Claim | Proof |
 |---|---|---|
-| G9.1 | `upgrade-forge` moves only to a version pinned in a newer release of the skill. It makes a backup first, stops the forge, swaps the binary (checksum checked), starts it and runs `status`. When that fails, it puts the old binary and the backup back. | `test_G9_1_a_forge_upgrade_backs_up_first_and_rolls_back_on_failure` *(to build)* |
-| G9.2 | `self-update` replaces the skill's own files whole, in one rename, and never while a sync runs. | `test_G9_2_self_update_swaps_whole_and_never_during_a_sync` *(to build)* |
-| G9.3 | `uninstall` stops and removes the service, the timer, the binary, the settings and both keys, then lists what is left: the folder of copies. That folder is deleted only by `uninstall --delete-copies`, after the person types the number of copies it holds. | `test_G9_3_uninstall_leaves_only_the_copies_and_deletes_them_only_on_the_persons_word` *(to build)* |
+| G9.1 | `upgrade-forge` moves only to a version pinned in a newer release of the skill. It makes a backup first, stops the forge, swaps the binary (checksum checked), starts it and runs `status`. When that fails, it puts the old binary and the backup back. | `test_G9_1_a_forge_upgrade_backs_up_first_and_rolls_back_on_failure` |
+| G9.2 | `self-update` replaces the skill's own files whole, in one rename, and never while a sync runs. | `test_G9_2_self_update_swaps_whole_and_never_during_a_sync` |
+| G9.3 | `uninstall` stops and removes the service, the timer, the binary, the settings and both keys, then lists what is left: the folder of copies. That folder is deleted only by `uninstall --delete-copies`, after the person types the number of copies it holds. | `test_G9_3_uninstall_leaves_only_the_copies_and_deletes_them_only_on_the_persons_word` |
 
 ### G10 The skill an agent follows
 
