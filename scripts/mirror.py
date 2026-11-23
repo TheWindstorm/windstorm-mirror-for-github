@@ -1628,7 +1628,54 @@ def sync(p, args):
         + (f", {len(lfs_missing)} cop{'y' if len(lfs_missing) == 1 else 'ies'} without its large files"
            if lfs_missing else ""))
     say(NOT_COPIED)
+    if plugin_removed(st):
+        say(PLUGIN_GONE.format(script=p["script"]))
     return 0 if not problems else 1
+
+
+# ---------------------------------------------------------------- Claude Code's own uninstall (rule 8)
+
+PLUGIN = "windstorm-mirror-for-github"
+PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes on as your own service on this "
+               "computer and keeps every copy current. To take it off: python3 -I {script} uninstall")
+
+
+def plugin_registry_for(here):
+    """Claude Code keeps an installed plugin in <its folder>/plugins/cache/<catalog>/<plugin>/<version>/, and its
+    list of installed plugins in <its folder>/plugins/installed_plugins.json. None when `here` is not in such a
+    folder (a clone, or the copy setup made)."""
+    parts = os.path.abspath(here).split(os.sep)
+    for i in range(len(parts) - 3, 0, -1):
+        if parts[i] == "cache" and parts[i - 1] == "plugins" and parts[i + 2] == PLUGIN:
+            return os.sep.join(parts[:i] + ["installed_plugins.json"])
+    return None
+
+
+def plugin_removed(st):
+    """G9.6: True only when Claude Code's list of installed plugins, the one setup was run from, was READ and names
+    this plugin nowhere. A list that could not be read is never taken for 'removed' (a failed read is not a no)."""
+    reg = st.get("plugin_registry")
+    if not reg:
+        return False
+    try:
+        with open(reg, encoding="utf-8") as f:
+            rows = json.load(f)["plugins"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(rows, dict):
+        return False
+    return not any(k.split("@")[0] == PLUGIN and v for k, v in rows.items())
+
+
+def set_aside_folder(here):
+    """G9.6: the folder Claude Code marked `.orphaned_at` (the plugin was removed, or updated to a newer version)
+    when `here` is inside one; None otherwise. Nothing runs from such a folder."""
+    d = os.path.dirname(os.path.abspath(here))
+    for _ in range(2):
+        if os.path.exists(os.path.join(d, ".orphaned_at")):
+            return d
+        d = os.path.dirname(d)
+    return None
 
 
 # ---------------------------------------------------------------- commands
@@ -1723,6 +1770,8 @@ def cmd_setup(args):
     if os.path.abspath(p["script"]) != here:
         shutil.copyfile(here, p["script"] + ".tmp")
         os.replace(p["script"] + ".tmp", p["script"])
+    if plugin_registry_for(here):
+        st["plugin_registry"] = plugin_registry_for(here)
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
     ok, why = install_service(p)
@@ -2001,6 +2050,8 @@ def cmd_status(args):
     save_state(p, st)
     if epoch_of(st.get("github_wait_until")) > time.time():
         notes.append(f"github: {spent_line(st)}")
+    if plugin_removed(st):
+        notes.append("plugin: " + PLUGIN_GONE.format(script=p["script"]))
     for x in problems:
         say(f"problem: {x}")
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
@@ -2751,6 +2802,14 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
+    aside = set_aside_folder(__file__)
+    if aside:
+        own = paths()["script"]
+        say(f"Stopped: this copy of the skill is in a folder Claude Code set aside when its plugin was removed or "
+            f"updated ({aside}), and nothing runs from there. Nothing was done. "
+            + (f"The skill set up on this computer is {own}: python3 -I {own} {a.cmd}" if os.path.exists(own) else
+               "Nothing of the skill's is set up on this computer."))
+        return 3
     return a.fn(a)
 
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G9.6 (row M55): after Claude Code's own plugin uninstall, `status` and each sync say the plugin was removed, with the one command that takes the mirror off; nothing runs from a folder Claude Code set aside.
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.
 - G4.8 (row M25, #94): while the sync waits for GitHub's reset, `status` does not make its daily release read either.
 - G7.5 (row M53, #92): `restore --check` says when the forge does not answer, with what to do, and counts a copy it could not read apart from the differences.

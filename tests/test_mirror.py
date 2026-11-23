@@ -2789,6 +2789,87 @@ class G9(unittest.TestCase):
             self.assertEqual(w.gh.release_calls.count(True), 0, "the release was read with a key")
             self.assertGreater(len(w.gh.release_calls), 0)
 
+    def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
+        """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never
+        run ours. Claude Code empties the plugin's row in its list of installed plugins and marks the plugin's folder
+        `.orphaned_at`. The mirror is the thing the person set up, so it goes on, and status and each sync say the
+        plugin was removed, with the one command that takes the mirror off; a list that could not be read is never
+        'removed'. Nothing runs from a set-aside folder."""
+        cc = tempfile.mkdtemp(prefix="wsm-cc-")
+        TEMPS.append(cc)
+        ver = os.path.join(cc, "plugins", "cache", "thewindstorm", mirror.PLUGIN, "0.0.0")
+        here = os.path.join(ver, "scripts", "mirror.py")
+        reg = os.path.join(cc, "plugins", "installed_plugins.json")
+        self.assertEqual(mirror.plugin_registry_for(here), reg)
+        self.assertIsNone(mirror.plugin_registry_for(os.path.join(ROOT, "scripts", "mirror.py")))
+        self.assertIsNone(mirror.plugin_registry_for(os.path.join(cc, "plugins", "cache", "c", "other", "1", "mirror.py")))
+        row = {"scope": "user", "installPath": ver, "version": "0.0.0"}
+        os.makedirs(os.path.dirname(reg))
+
+        def registry(x):
+            with open(reg, "w", encoding="utf-8") as f:
+                f.write(x if isinstance(x, str) else json.dumps(x))
+        registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [row]}})
+        st = {"plugin_registry": reg}
+        self.assertFalse(mirror.plugin_removed(st), "read, and it names the plugin")
+        for gone in ({mirror.PLUGIN + "@thewindstorm": []}, {"other@x": [row]}, {}):
+            registry({"version": 2, "plugins": gone})
+            self.assertTrue(mirror.plugin_removed(st), gone)
+        for unread in ("", "{not json", json.dumps({"version": 2}), json.dumps({"version": 2, "plugins": []})):
+            registry(unread)
+            self.assertFalse(mirror.plugin_removed(st), f"could not be read, never removed: {unread!r}")
+        os.remove(reg)
+        self.assertFalse(mirror.plugin_removed(st), "no list at all is not 'removed'")
+        self.assertFalse(mirror.plugin_removed({}), "never set up from Claude Code's plugin")
+
+        os.makedirs(os.path.dirname(here))
+        shutil.copyfile(mirror.__file__, here)
+        with open(os.path.join(ver, ".orphaned_at"), "w") as f:
+            f.write("1763930000000")
+        home = os.path.join(cc, "home")
+        env = dict(os.environ, HOME=home, WSM_HOME=os.path.join(cc, "wsm"), XDG_CONFIG_HOME=os.path.join(home, ".config"))
+        for cmd in (["status"], ["sync"], ["setup"], ["uninstall"]):
+            r = subprocess.run([sys.executable, "-I", here, *cmd], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+            self.assertIn(f"in a folder Claude Code set aside when its plugin was removed or updated ({ver})", r.stdout)
+            self.assertIn("Nothing was done. Nothing of the skill's is set up on this computer.", r.stdout)
+            self.assertFalse(os.path.exists(env["WSM_HOME"]), "nothing made")
+        own = os.path.join(env["WSM_HOME"], "data", "mirror.py")
+        os.makedirs(os.path.dirname(own))
+        shutil.copyfile(mirror.__file__, own)
+        r = subprocess.run([sys.executable, "-I", here, "uninstall"], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn(f"The skill set up on this computer is {own}: python3 -I {own} uninstall", r.stdout)
+        self.assertTrue(os.path.exists(own), "nothing removed")
+        os.remove(os.path.join(ver, ".orphaned_at"))
+        r = subprocess.run([sys.executable, "-I", here, "status"], env=env, capture_output=True, text=True, timeout=60)
+        self.assertNotIn("set aside", r.stdout)
+
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            st = mirror.load_json(w.p["state"], {})
+            st["plugin_registry"] = reg
+            mirror.save_state(w.p, st)
+            said = "plugin: " + mirror.PLUGIN_GONE.format(script=w.p["script"])
+            self.assertIn("To take it off: python3 -I " + w.p["script"] + " uninstall", said)
+            registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [row]}})
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("plugin:", out)
+            registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": []}})
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(said, out.splitlines())
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(out.splitlines()[-1], said[len("plugin: "):])
+            registry("{not json")
+            rc, out = status()
+            self.assertNotIn("plugin:", out)
+
     def test_G9_3_uninstall_leaves_only_the_copies_and_deletes_them_only_on_the_persons_word(self):
         with World(self) as w:
             for n in ("alpha", "beta"):

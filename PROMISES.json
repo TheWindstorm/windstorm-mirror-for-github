@@ -873,6 +873,22 @@
    "issue": "#96",
    "seen": "2026-11-23: one afternoon had 34 runs queued and none running, Mac runners being shared by the family's five repositories; changes in two of them waited about an hour each.",
    "promise": "A pull request runs one Mac job, the floor's Python; the full Mac matrix runs on main and release-*; the gate expects the reports of the event it runs on; a newer push to a pull request cancels its older runs, never a run on main or a release branch."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M55",
+   "codon": "G9.6",
+   "test": "test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder",
+   "stand_in": "Claude Code's list of installed plugins and its set-aside mark (files the test writes in the shape Claude Code 2.1.330 writes them)",
+   "exception": "",
+   "issue": "",
+   "seen": "2026-11-23, a sister skill, on a stock virtual machine with Claude Code 2.1.280 and 2.1.330: Claude Code's own plugin uninstall emptied the plugin's row in its list of installed plugins and marked the plugin's folder as set aside, and a launcher of that skill went on running the uninstalled code from that folder every five minutes. A person may leave by that road and never run the skill's own uninstall.",
+   "promise": "After Claude Code's own plugin uninstall the mirror goes on, because it is the thing the person set up, and status and each sync say the plugin was removed, with the one command that takes the mirror off. 'Removed' only when Claude Code's list of installed plugins was read and names the plugin nowhere; a list that could not be read, or none, is never 'removed'. Nothing runs from a folder Claude Code set aside: every command run from one stops, does nothing, and names the copy setup made."
   }
  ],
  "declined": []
