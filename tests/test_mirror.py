@@ -2785,9 +2785,18 @@ class G8(unittest.TestCase):
             w.gh.commit("someone/alpha", {"a": b"1"})
             w.key_set()
             self.assertEqual(w.first_sync()[0], 0)
-            rc, out = status()
+            # The count is of the addresses status itself read: on a computer whose addresses come and go (a VPN, a
+            # virtual machine's bridge), a count read earlier by the test can differ by then (seen 2026-11-23).
+            read, real = [], mirror.own_addresses
+            mirror.own_addresses = lambda: read.append(real()) or read[-1]
+            try:
+                rc, out = status()
+            finally:
+                mirror.own_addresses = real
             self.assertEqual(rc, 0, out)
-            self.assertIn(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es)", out)
+            self.assertTrue(read, "status did not read this computer's addresses")
+            now = [a for a in read[-1] if not (a == "::1" or a.startswith("127."))]
+            self.assertIn(f"network: the forge answers on 127.0.0.1 only (tried {len(now)} other address(es)", out)
             saved = mirror.answers_on
             mirror.answers_on = lambda a, p: ["192.0.2.7"]
             try:
