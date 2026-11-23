@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G6.10 (row M48, #79): `sync` says when the forge does not answer, with what to do, even when nothing changed on GitHub. A real machine saw a stopped forge and a sync that said `0 problem(s)`.
 - G3.11 (row M47, #76): `sync` no longer prints the name of every project your include list or exclude patterns leave out, only how many; `left-out` names them when you ask. Five cold starts saw every left-out name land in every agent's transcript.
 - G3.10: a page size that only tests and labs set (`WSM_PAGE_SIZE`), so paging can be seen on a real owner with few repositories. People never need it.
 - G10.11 (row M46, #73): the cold starts are the skill's first evals, written as a case with ten graders, with the record of the five runs so far.

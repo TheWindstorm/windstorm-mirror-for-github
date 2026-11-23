@@ -761,6 +761,22 @@
    "issue": "#76",
    "seen": "2026-11-23, five cold starts on a stock virtual machine: every plain sync printed one 'left out' line per project the include list left out, so the proof organisation's other 6 projects (2 of them private) were printed 12 times each, 72 lines, into every agent transcript. On a person's own account it would be their whole list.",
    "promise": "The tool prints the names of what it will copy or has copied; everything left out is a count, by include list and exclude patterns, and its names come only from left-out, a command the person asks for, which the count line names. No left-out name appears in setup's dry run, the announcement, sync, status or restore --check unless asked."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M48",
+   "codon": "G6.10",
+   "test": "test_G6_10_a_sync_says_when_the_forge_does_not_answer",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "#79",
+   "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine against the real GitHub: the forge's service was stopped, nothing had changed on GitHub, and sync said 0 problem(s) and ended with 0, though no copy had been read.",
+   "promise": "sync asks the forge first: a forge that does not answer is a problem line with its next step and a failing code, even when nothing changed on GitHub; nothing is copied, changed or used up, not the person's go either."
   }
  ],
  "declined": []
