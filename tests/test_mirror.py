@@ -1109,6 +1109,78 @@ class G3(unittest.TestCase):
             self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
 
 
+
+    def test_G3_9_the_go_copies_only_what_the_last_announcement_named(self):
+        """The person says yes to a list; "seven projects" must not become seventy between the yes and the copy,
+        whoever changed the settings in between (a cold start saw the include list kept only by the person's care).
+        The announcement names the projects; the first copy copies exactly the last one announced, or nothing."""
+        def told(out):
+            return [x.split(": ", 1)[1] for x in out.splitlines() if x.startswith("tell the person ")]
+
+        with World(self) as w:
+            for n in ("a", "b", "c"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"f": n.encode()})
+            w.key_set()
+            self.assertEqual(quiet(mirror.main, ["config", "include", "someone/a", "someone/b"])[0], 0)
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("They are: someone/a, someone/b.", told(out))
+            lst = w.p["first_copy_list"]
+            self.assertEqual(fread(lst), "someone/a\nsomeone/b\n")
+            self.assertEqual(os.stat(lst).st_mode & 0o777, 0o600)
+
+            def refused(why, counts):
+                rc, out = w.sync()
+                self.assertEqual(rc, 2, f"{why}: {out}")
+                self.assertIn(f"Needs you: the first copy would not be what the person was told ({counts} than the "
+                              "last announcement). Nothing was copied.", out)
+                self.assertEqual(w.forge_get("/user/repos")[1], [], f"{why}: copied after a change")
+                self.assertNotIn("go", mirror.load_json(w.p["state"], {}), f"{why}: a go recorded")
+                self.assertTrue(out.rstrip().endswith("when they say go to this list, run: sync"), out)
+                return told(out)
+
+            # 1. The include list grows between the announcement and the go.
+            quiet(mirror.main, ["config", "include", "someone/a", "someone/b", "someone/c"])
+            self.assertIn("They are: someone/a, someone/b, someone/c.", refused("include list", "1 more and 0 fewer"))
+            # 2. A project appears on GitHub.
+            w.gh.add_repo("someone", "d")
+            w.gh.commit("someone/d", {"f": b"d"})
+            quiet(mirror.main, ["config", "include", "--clear"])
+            self.assertIn("They are: someone/a, someone/b, someone/c, someone/d.",
+                          refused("a project appeared", "1 more and 0 fewer"))
+            # 3. A project goes.
+            w.gh.delete("someone/d")
+            self.assertIn("They are: someone/a, someone/b, someone/c.", refused("a project went", "0 more and 1 fewer"))
+            # 4. A key for another owner arrives.
+            w.gh.add_repo("acme", "x", owner_type="Organization")
+            w.gh.commit("acme/x", {"f": b"x"})
+            self.assertEqual(w.key_set("acme")[0], 0)
+            said = refused("another owner's key", "1 more and 0 fewer")
+            self.assertTrue(said[0].startswith("The first copy: 4 repositories from 2 owner(s)"), said)
+            self.assertIn("They are: acme/x, someone/a, someone/b, someone/c.", said)
+            # The go to the list as it was last said copies exactly that list.
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            names = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
+            self.assertEqual(names, ["acme--x", "someone--a", "someone--b", "someone--c"])
+            # After the first copy, a new project joins by itself, as the README says.
+            w.gh.add_repo("someone", "e")
+            w.gh.commit("someone/e", {"f": b"e"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("Needs you", out)
+            self.assertIn("someone--e", [r["name"] for r in w.forge_get("/user/repos")[1]])
+        with World(self) as w:                                   # many: the first 20 named, the rest in the file
+            for i in range(25):
+                w.gh.add_repo("someone", f"r{i:02d}")
+            w.key_set()
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            first = ", ".join(f"someone/r{i:02d}" for i in range(mirror.ANNOUNCE_NAMES))
+            self.assertIn(f"They are: {first}, and 5 more; the whole list is in {w.p['first_copy_list']}.", told(out))
+            self.assertEqual(fread(w.p["first_copy_list"]).splitlines(), [f"someone/r{i:02d}" for i in range(25)])
+
 class G2Sync(unittest.TestCase):
     def test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it(self):
         with World(self) as w:
@@ -2303,11 +2375,12 @@ class G10(unittest.TestCase):
             rc, out = w.sync("--announce")
             self.assertEqual(rc, 0, out)
             said = block(out, "sync --announce")
-            self.assertEqual(len(said), 4, said)
+            self.assertEqual(len(said), 5, said)
             self.assertTrue(said[0].startswith("The first copy: 1 repositories from 1 owner(s)"), said)
-            self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[1])
-            self.assertIn("Nothing is ever written to GitHub.", said[1])
-            self.assertEqual(said[2:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
+            self.assertEqual(said[1], "They are: someone/alpha.")
+            self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[2])
+            self.assertIn("Nothing is ever written to GitHub.", said[2])
+            self.assertEqual(said[3:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
             self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
         _, _, body = skill_front()
         self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
