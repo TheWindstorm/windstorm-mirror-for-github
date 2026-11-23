@@ -697,6 +697,22 @@
    "issue": "#66",
    "seen": "2026-11-23, one stack of pull requests queued 17 workflow runs, each commit twice (a push run and a pull-request run), so the Mac jobs waited for hours and every run read the shared login.",
    "promise": "The workflow runs on pull requests, and on pushes only to main and release-*: each commit's checks run once."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M44",
+   "codon": "G10.9",
+   "test": "test_G10_9_one_version_in_every_place",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "#68",
+   "seen": "2026-11-23, the repository read against the family's rule 10: the script and the manifest were held equal by a test, but the changelog's heading was not (the release branch still said 'Unreleased'), and the repository's own catalog entry named no version.",
+   "promise": "One version in the manifest, the script, the changelog's first heading ('Unreleased' only at 0.0.0) and the repository's own catalog entry, held by a test."
   }
  ],
  "declined": []

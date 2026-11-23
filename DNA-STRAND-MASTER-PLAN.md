@@ -245,6 +245,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G10.6 | What the person must hear before the go is in the block they say go to: the announcement's block says what happens after a restart, whether large files are copied when git lfs is missing, what is not copied and how private the copy is. Setup prints no block of its own (a cold start saw the smallest model lose it by going straight on). Lingering may be said in the agent's own words only because the tool holds the choice: on Linux setup changes nothing until the person's own `--linger` or `--no-linger` (M34). | `test_G10_6_what_the_person_must_hear_before_the_go_is_in_the_block_they_say_go_to` |
 | G10.7 | The order is given so plainly that the person is never sent to a step that refuses: setup first, then each `key set`; the refusal's own line names the one next step (M36). | `test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step` |
 | G10.8 | The agent reaches GitHub through the tool only: SKILL.md says it never tries the person's own git, SSH or gh for GitHub, and why (their own login reaches every repository they can, beyond the one read-only key) (M37). | `test_G10_8_the_agent_reaches_github_through_the_tool_only` |
+| G10.9 | One version in every place it is written: the manifest, the script, the changelog's first heading ("Unreleased" only at 0.0.0, otherwise the version, with the date once released) and this repository's own catalog entry (the family's rule 10; M44). | `test_G10_9_one_version_in_every_place` |
 
 ## Milestones
 

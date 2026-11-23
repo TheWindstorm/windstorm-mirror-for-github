@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.9 (row M44, #68): one version in every place: the manifest, the script, the changelog's heading and the repository's own catalog entry.
 - T3 (row M43, #66): the tests run once per commit: on pull requests, and on pushes only to main and release branches.
 - G9.5 (row M42, #64): `self-update` on the latest release says so with the checksum of mirror.py that the release names, and whether this file matches it; on a mismatch it changes nothing and names Claude Code's own plugin update, then setup. A real move to a newer version (row M13) is first seen at 0.1.1: there is no newer release before 0.1.0. A promise row can now carry a named exception, set only by the owner's word, when its real sighting can only come after the tag.
 - G9.4 (row M41, #61): leaving is never refused. `uninstall` waits for a running sync and says which one; the last thing it prints says what is gone now and what is kept (your copies, and the record of what the skill did); run twice, it is safe and makes nothing again. The README says that Claude Code's own plugin uninstall leaves the forge and the timer running, and the one command that takes them off.
