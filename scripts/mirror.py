@@ -796,6 +796,10 @@ class HardStop(Exception):
     """Something that must stop the whole sync at once, said in one line."""
 
 
+class CouldNotRead(RuntimeError):
+    """G5.4: a read that failed. It is a third answer, never taken for "not there"."""
+
+
 class Forge:
     """The person's own forge, through its API, as the mirror account."""
 
@@ -826,12 +830,28 @@ class Forge:
             return 0, {"message": str(e)}
 
     def by_id(self, rid):
+        """The copy with this forge id; None only when the forge says it is not there (404); CouldNotRead when
+        the read failed (G5.4)."""
         code, body = self.call("GET", f"/repositories/{rid}")
-        return body if code == 200 else None
+        if code == 404:
+            return None
+        if code != 200 or not isinstance(body, dict):
+            raise CouldNotRead(f"the forge could not be read ({self.why(code, body)})")
+        return body
 
     def by_name(self, name):
+        """The copy under this name; None only when the forge says there is none: a 404, or a redirect left by a
+        rename (the name now points elsewhere; redirects are never followed, contract C7)."""
         code, body = self.call("GET", f"/repos/{self.user}/{urllib.parse.quote(name)}")
-        return body if code == 200 and body and body.get("name", "").lower() == name.lower() else None
+        if code == 404 or code in (301, 302, 307, 308):
+            return None
+        if code != 200 or not isinstance(body, dict):
+            raise CouldNotRead(f"the forge could not be read ({self.why(code, body)})")
+        return body if body.get("name", "").lower() == name.lower() else None
+
+    @staticmethod
+    def why(code, body):
+        return f"it answered {code}" if code else f"no answer: {(body or {}).get('message', '')}"[:160]
 
     def rename(self, rid, cur, new):
         code, body = self.call("PATCH", f"/repos/{self.user}/{urllib.parse.quote(cur)}", {"name": new})
@@ -1221,6 +1241,10 @@ def sync(p, args):
     if not st.get("announced") and not args.announce:
         say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
         return 2
+    if args.announce and not st.get("announced") and len(complete) < len(owners):
+        say("The first copy is not announced: the list of projects could not be read for "
+            + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
+        return 1
     if args.announce and not st.get("announced"):
         size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
         say(f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
@@ -1613,7 +1637,10 @@ def cmd_status(args):
         on_gh += 1
         if rec.get("last_good"):
             copied += 1
-        cur = forge.by_id(rec["forge_id"]) if up and rec.get("forge_id") else None
+        try:
+            cur = forge.by_id(rec["forge_id"]) if up and rec.get("forge_id") else None
+        except CouldNotRead:
+            cur = None
         refs = forge_refs_of(forge, cur["name"]) if cur else None
         if rec.get("last_good") and refs is None:
             unreadable += 1
@@ -1733,7 +1760,11 @@ def cmd_restore(args):
                 continue
             total += 1
             name = rec.get("full_name") or gid
-            cur = forge.by_id(rec["forge_id"])
+            try:
+                cur = forge.by_id(rec["forge_id"])
+            except CouldNotRead as e:
+                diffs.append(f"{name}: its copy could not be read: {e}")
+                continue
             if not cur:
                 diffs.append(f"{name}: its copy is not in the forge")
                 continue
@@ -1789,7 +1820,11 @@ def restore_to(p, st, forge, url, repository):
     rec = next((r for r in (st.get("repos") or {}).values()
                 if (r.get("full_name") or "").lower() == repository.lower()
                 or (r.get("forge_name") or "").lower() == repository.lower()), None)
-    cur = forge.by_id(rec["forge_id"]) if rec and rec.get("forge_id") else None
+    try:
+        cur = forge.by_id(rec["forge_id"]) if rec and rec.get("forge_id") else None
+    except CouldNotRead as e:
+        say(f"The copy of {repository} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
+        return 1
     if not cur:
         say(f"There is no copy of {repository} in the forge.")
         return 2
