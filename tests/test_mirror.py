@@ -2507,7 +2507,7 @@ class G9(unittest.TestCase):
                               w.home.calls)
             repos = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
             self.assertEqual(sorted(os.listdir(repos)), ["someone--alpha.git", "someone--beta.git"])
-            self.assertIn(f"Left: the folder of copies, {p['data']} (2 copies).", out)
+            self.assertIn(f"Kept: the folder of copies, {p['data']} (2 copies), with the record", out)
             saved = sys.stdin
 
             class AtTerminal(io.StringIO):
@@ -2531,6 +2531,93 @@ class G9(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertFalse(os.path.exists(p["data"]))
 
+
+    def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):
+        """Rule 8 (the family's): a person who wants to leave is never refused. A running sync is a wait that says
+        what holds it and the one next step; the last thing printed says what is gone and what is kept; run twice,
+        it is safe; what setup left on the computer takes itself off without the plugin; and nothing of ours acts
+        on the person's Claude Code sessions, so Claude Code's own plugin uninstall leaves nothing of ours running
+        there (the README says what does go on running, and the one command that takes it off)."""
+        with Home() as h:                                      # nothing installed: twice, and no folder made
+            for _ in (1, 2):
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                lines = out.strip().splitlines()
+                self.assertIn("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and "
+                              "the keys were already gone.", lines)
+                self.assertEqual(lines[-1], "Kept: nothing. Nothing of the skill's is left on this computer.")
+                self.assertFalse(os.path.exists(mirror.paths()["data"]))
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            # What setup left takes itself off: the copy the service runs is this very script, whole.
+            self.assertEqual(fread(p["script"]), fread(SCRIPT))
+            if mirror.system()[0] != "darwin":
+                self.assertIn(p["script"], fread(os.path.join(os.path.dirname(p["unit"]), mirror.SYNC_UNIT + ".service")))
+            # A sync holds the lock: uninstall waits, says what holds it, and goes on when it ends.
+            lock = os.path.join(p["data"], "sync.lock")
+            with open(lock, "w") as f:
+                f.write(str(os.getpid()))
+            threading.Timer(3, os.remove, [lock]).start()
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Waiting: a sync is running (process {os.getpid()}); uninstall goes on as soon as it ends", out)
+            lines = out.strip().splitlines()
+            self.assertEqual(lines[-1], f"Kept: the folder of copies, {p['data']} (2 copies), with the record of what "
+                                        "the skill did here. It is yours; delete it only when you are sure, with: "
+                                        "uninstall --delete-copies")
+            self.assertIn("Gone now:", lines)
+            # Twice: nothing more goes, the copies and the record stay, and it says so last.
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("Gone now: nothing;", out)
+            self.assertTrue(out.strip().splitlines()[-1].startswith("Kept: the folder of copies"))
+            self.assertTrue(os.path.exists(p["state"]))
+            # A sync that does not end: the line names what runs and the one next step, and nothing is removed.
+            with open(lock, "w") as f:
+                f.write(str(os.getpid()))
+
+            class Clock:
+                now = time.time()
+
+                def __getattr__(self, name):
+                    return getattr(time, name)
+
+                def time(self):
+                    return Clock.now
+
+                def sleep(self, s):
+                    Clock.now += s
+            saved = mirror.time
+            mirror.time = Clock()
+            try:
+                rc, out = quiet(mirror.main, ["uninstall"])
+            finally:
+                mirror.time = saved
+                os.remove(lock)
+            self.assertEqual(rc, 3, out)
+            self.assertEqual(out.strip().splitlines()[-1],
+                             f"Not now: a sync is still running (process {os.getpid()}) after 10 minutes, and nothing "
+                             "was removed. Run uninstall again once it has ended.")
+            self.assertTrue(os.path.exists(p["forge"]))
+        # Nothing of ours acts on the person's Claude Code sessions: no hooks, no status line, no launcher.
+        manifest = jload(os.path.join(ROOT, ".claude-plugin", "plugin.json"))
+        for k in ("hooks", "statusLine", "mcpServers", "commands", "agents"):
+            self.assertNotIn(k, manifest)
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "hooks")))
+        # Where the README says how to install (a release branch), it says what goes on running after Claude
+        # Code's own plugin uninstall, and the one command that takes it off.
+        readme = fread(os.path.join(ROOT, "README.md"))
+        if "## Taking it off" in readme:
+            off = " ".join(readme.split("## Taking it off", 1)[1].split("\n## ", 1)[0].split())
+            self.assertIn("Claude Code's own `claude plugin uninstall`", off)
+            self.assertIn("keep running", off)
+            self.assertIn("python3 -I ~/.local/share/windstorm-mirror/mirror.py uninstall", off)
+            self.assertIn("needs nothing else installed", off)
 
 SKILL = os.path.join(ROOT, "skills", "mirror", "SKILL.md")
 
@@ -2821,7 +2908,8 @@ class G6Words(unittest.TestCase):
             if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
-        data = {"SKILL_REPO", "GITEA_VERSION", "last_line"}          # facts inside a line, not its words
+        data = {"SKILL_REPO", "GITEA_VERSION", "last_line",          # facts inside a line, not its words
+                "lock_holder", "UNINSTALL_WAIT"}                     # (which process; how long uninstall waits)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop"},
                          set(),
                          "a stop line is built from something this test does not check")
