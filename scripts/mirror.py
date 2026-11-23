@@ -697,10 +697,11 @@ def gh_get(key, path):
         return 0, {}, {"message": str(e)}
 
 
-def spent_until(code, headers, floor=0):
+def spent_until(code, headers, floor=0, note=None):
     """G4.8: the time (epoch) until which GitHub's allowance for this key is spent, else None. GitHub says it two ways:
     a 403 or 429 with no calls remaining (back at X-RateLimit-Reset), or with Retry-After (back that many seconds
-    on). Below the skill's own floor counts as spent too, until the same reset."""
+    on). Below the skill's own floor the sync waits too, until the same reset; that is not "spent", so `note` gets
+    below_floor = [left, floor] for the line to say what it is (M9: a real machine was told "spent" with 4755 left)."""
     h = {k.lower(): str(v) for k, v in (headers or {}).items()}
     reset = int(h["x-ratelimit-reset"]) if h.get("x-ratelimit-reset", "").isdigit() else int(time.time()) + 3600
     if code in (403, 429):
@@ -710,6 +711,8 @@ def spent_until(code, headers, floor=0):
             return reset
     left = h.get("x-ratelimit-remaining", "")
     if floor and left.isdigit() and int(left) < floor:
+        if note is not None:
+            note["below_floor"] = [int(left), floor]
         return reset
     return None
 
@@ -839,7 +842,7 @@ def list_owner(owner, kind, key, floor=0, info=None):
         if info is not None and page == 1:
             info["expires"] = headers.get("github-authentication-token-expiration") or headers.get(
                 "Github-Authentication-Token-Expiration") or ""
-        until = spent_until(code, headers, floor if next_link(headers) else 0)
+        until = spent_until(code, headers, floor if next_link(headers) else 0, info)
         if until and info is not None:
             info["spent_until"] = until
             return None, "GitHub's allowance is spent", calls
@@ -1396,9 +1399,13 @@ def cmd_left_out(args):
 
 
 def spent_line(st):
-    return (f"GitHub's allowance for your keys is spent until {local_time(st['github_wait_until'])}. The sync waits "
-            "until then and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer "
-            "starts the next sync by itself.")
+    """G4.8: "spent" only when GitHub said so; under the skill's own floor, how much is left and the floor."""
+    when, low = local_time(st["github_wait_until"]), st.get("github_wait_floor")
+    head = (f"GitHub's allowance for your keys is down to {low[0]}, under the floor of {low[1]} this skill keeps, so "
+            f"the sync waits until {when}" if low else
+            f"GitHub's allowance for your keys is spent until {when}. The sync waits until then")
+    return head + (" and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer starts the "
+                   "next sync by itself.")
 
 
 def sync(p, args):
@@ -1443,8 +1450,10 @@ def sync(p, args):
             # G4.8: one line for the whole sync, never a failed project; nothing more is asked of GitHub until the
             # reset, by this process or any later one (the time is kept in the state, so it survives a restart).
             st["github_wait_until"] = stamp_of(max(info["spent_until"], epoch_of(st.get("github_wait_until"))))
+            st["github_wait_floor"] = info.get("below_floor")
             st["last_sync"] = {"at": now_utc(), "calls": calls + n, "copied": 0, "problems": 0,
-                               "stopped": "GitHub's allowance is spent"}
+                               "stopped": "under the floor of GitHub's allowance this skill keeps"
+                               if info.get("below_floor") else "GitHub's allowance is spent"}
             save_state(p, st)
             say(spent_line(st))
             return 0

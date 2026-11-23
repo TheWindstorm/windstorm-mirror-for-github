@@ -1568,8 +1568,12 @@ class G4(unittest.TestCase):
             before = {f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}
             w.gh.rate_remaining = 450                  # below the floor of 500
             rc, out = w.sync()
-            self.assertEqual(rc, 0, out)               # G4.8: below the floor is said as spent, until the reset
-            self.assertIn("GitHub's allowance for your keys is spent until", out)
+            self.assertEqual(rc, 0, out)               # G4.8: below the floor the sync waits for the reset, and says
+            st = mirror.load_json(w.p["state"], {})    # what it is, never "spent" (a real machine was told so, M9)
+            self.assertIn("GitHub's allowance for your keys is down to 450, under the floor of 500 this skill keeps, "
+                          "so the sync waits until " + mirror.local_time(st["github_wait_until"]), out)
+            self.assertNotIn("spent", out)
+            self.assertNotIn("spent", quiet(mirror.main, ["status"])[1])
             self.assertNotIn("gone from GitHub", out)
             self.assertNotIn("cannot refresh", out)
             st = mirror.load_json(w.p["state"], {})
