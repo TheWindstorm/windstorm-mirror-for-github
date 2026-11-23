@@ -1059,7 +1059,37 @@ class G3(unittest.TestCase):
             finally:
                 mirror.has_git_lfs = saved
             self.assertEqual(rc, 0, out)
-            self.assertIn("Large files NOT copied (git lfs is not installed here): someone/big", out)
+            gone = f"problem: someone/big: {mirror.LFS_NOT_IN_COPY}"
+            self.assertIn(gone, out)
+            self.assertIn("1 copy without its large files", out)
+            # Seen in a cold start (P1a run A, 2026-11-23): git lfs installed after the first copy, and the next
+            # sync skipped the project as unchanged until the daily full pass, while status said no problem.
+            mirror.has_git_lfs = lambda: False
+            try:
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(gone, out)
+                self.assertLess(out.index(gone), out.index("copies:"), "the worst true thing is not said first")
+                self.assertIn("1 without its large files", out)
+                rc, out = quiet(mirror.main, ["restore", "--check"])
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"someone/big: {mirror.LFS_NOT_IN_COPY}", out)
+            finally:
+                mirror.has_git_lfs = saved
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(st.get("last_full_pass"), "the first copy was not a full pass")
+            rc, out = w.sync()                          # git lfs is here now; no full pass is due
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn(", a full pass", out)
+            self.assertIn("1 copied now, 0 unchanged", out)
+            self.assertNotIn("without its large files", out)
+            req = urllib.request.Request(f"http://127.0.0.1:{w.port}/api/v1/repos/mirror/someone--big/media/blob.bin",
+                                         headers={"Authorization": f"token {fread(w.p['mirror_key']).strip()}"})
+            self.assertEqual(urllib.request.urlopen(req, timeout=10).read(), data)
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertNotIn("large files", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
 
 
 class G2Sync(unittest.TestCase):
