@@ -376,7 +376,7 @@
   {
    "id": "M28",
    "seen": "2026-11-23: both cold-start agents met `sudo apt install git-lfs` failing on a fresh Ubuntu 24.04 image. Then every line was run as written on fresh systems: on Ubuntu 24.04.5 `sudo apt install git` failed with a 404 on the stale list and `sudo apt install git-lfs` said 'Unable to locate package'; on Debian 13 (no package lists in the image) both said 'Unable to locate package'; the Fedora 45 dnf lines worked; on macOS 13.7.8 (Intel) with Homebrew, `brew install git-lfs` did not install git lfs and Homebrew called the system an unsupported 'Tier 3' configuration; `xcode-select --install` was seen only on Macs that already had the tools.",
-   "promise": "Every install line the tool or the README names was run as written on a fresh system first, and the plan's 'Install lines, as seen' table says where; the apt lines start with `sudo apt update &&`; the Mac's git line says it opens Apple's installer; large files on a Mac point to the project's own site, not brew.",
+   "promise": "Every install line the tool or the README names was run as written on a fresh system first, and the plan's 'Install lines, as seen' table says where; the apt lines start with `sudo apt update &&`; the Mac's git line names Apple's developer tools and Apple's command for them (row M39); large files on a Mac point to the project's own site, not brew.",
    "codon": "G1.8",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
@@ -540,6 +540,20 @@
    "issue": "#53",
    "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model told the person the mirror warns two weeks before the key ends while its end date could not be read; status said 'expiry not known' but no block for the person said what that means, and SKILL.md itself promised the warning without a condition.",
    "promise": "Each key's end has three answers: a date (the warning two weeks before is promised), no end date (said only once GitHub's way of saying it has been seen, contract C3), or could not be read: said so in the block the person hears before the go, with no warning promised and the place to read the date. SKILL.md never promises the warning itself."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M39",
+   "codon": "G1.13",
+   "test": "test_G1_13_a_mac_is_written_as_what_was_seen",
+   "issue": "#57",
+   "seen": "2026-11-23, a reading of our own text against the family's rule on Macs: the Mac's git line, in the tool and the README, described what Apple's command shows on a Mac without the developer tools, while it was only ever run on Macs that had them; and the one Mac sighting in 'Seen to work' did not say which kind of Mac or which account it was (it was the Mac's own main account, with two stand-in launch agents).",
+   "promise": "Every Mac sighting is written as what it was: a Mac that carries Apple's developer tools, and in which account; no Mac is called untouched (we have none), and no text describes what a Mac without those tools shows. The Mac's git line names the developer tools and Apple's command for them, nothing more."
   }
  ],
  "declined": []

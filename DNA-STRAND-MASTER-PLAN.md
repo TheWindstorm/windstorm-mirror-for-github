@@ -139,6 +139,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.7 | On a Mac, the forge comes back by itself after a restart only when the system logs the person in by itself (automatic login set to them, FileVault off). Otherwise setup says the copy stands still until they log in, and why. Of the automatic-login setting it keeps only whether it is set and whether it is this person's own account; another account's name is never said or kept. | `test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login` |
 | G1.11 | Every wait for a forge's first answer (setup's, upgrade-forge's, and the tests') is `FIRST_START_WAIT`, more than three times the slowest first answer measured on a slow machine (`FIRST_START_SEEN`, "First start, as measured"). When the forge is not answering by then, setup says what that means, to run `status` in 5 minutes, and where the forge's own log is. A test that waits for the forge and fails carries the forge's last log lines (M33). | `test_G1_11_the_first_start_waits_are_measured_and_said` |
 | G1.12 | The lowest Python the skill names, 3.9, is checked as the script's first act, for every command: below it the script stops with the version found and what it needs, exit 3, and has made nothing. The file stays readable by Python 3.8's grammar, so an older Python reaches that line. CI runs the floor it names (3.9, on Linux and on a Mac) on runner images it names, never "latest" (M35; the family's rules 11 and 17). | `test_G1_12_an_older_python_is_told_first_and_nothing_is_made` |
+| G1.13 | A Mac is written as what it was: every Mac sighting says it was a Mac that carries Apple's developer tools, and in which account; no Mac is called untouched (we have none), and no text describes what a Mac without those tools shows. The Mac's git line names the developer tools and Apple's command for them, nothing more (M39). | `test_G1_13_a_mac_is_written_as_what_was_seen` |
 
 ### G2 The GitHub keys: one read-only key per owner, each in its own file, each watched
 
@@ -350,7 +351,7 @@ that the tool names no command that is not in this table. Fresh cloud images, a 
 | `sudo apt update && sudo apt install git-lfs` | Ubuntu 24.04.5; Debian 13 | works (git-lfs 3.4.1; 3.6.1) |
 | `sudo dnf install git` | Fedora 45 Cloud Base | works (git 2.56.1; the image has no git) |
 | `sudo dnf install git-lfs` | Fedora 45 Cloud Base | works (git-lfs 3.7.1) |
-| `xcode-select --install` | macOS 13.7.8 (Intel) and macOS 27.2.1 (Apple M4), both with the tools already | seen only on a Mac that already had them: "already installed", exit 1. The installer window on a fresh Mac is not seen. |
+| `xcode-select --install` | macOS 13.7.8 (Intel) and macOS 27.2.1 (Apple M4), both with the tools already | seen only on a Mac that already had them: "already installed", exit 1. What it shows on a Mac without the tools is not seen, and no text of ours describes it (G1.13). |
 | large files on a Mac: https://git-lfs.com | | not seen installed on a Mac |
 
 Lines tried and NOT used, so that no one puts them back:
