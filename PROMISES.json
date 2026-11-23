@@ -809,6 +809,22 @@
    "issue": "#85",
    "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine with its road to GitHub cut: sync said 'GitHub answered 0'. Reading the code then found key set saying 'this key cannot see' on no answer or a 5xx.",
    "promise": "A read of GitHub that got no answer is said as 'GitHub could not be reached', never as an answer of 0; in key set, no answer or GitHub's own failure is never 'this key cannot see': nothing is kept, and the step is to run key set again."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M51",
+   "codon": "G1.14",
+   "test": "test_G1_14_the_install_words_name_this_computers_way_only",
+   "stand_in": "the system (an os-release file and a kernel name set by the test)",
+   "exception": "",
+   "issue": "#87",
+   "seen": "2026-11-23, a Mac test account: the dry run's git lfs line named the install commands for Ubuntu, Debian and Fedora as well as a Mac's; and the install lines had been run with -y, not exactly as printed.",
+   "promise": "The install words name this computer's way only, read from the system itself, and only a line run exactly as printed on that kind of system with its prompts answered by hand; any other system gets the program's own page."
   }
  ],
  "declined": []

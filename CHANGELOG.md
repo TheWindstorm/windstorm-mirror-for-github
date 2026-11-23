@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G1.14 (row M51, #87): the tool names how to install git and git lfs for this computer only (Ubuntu, Debian, Fedora, or a Mac), each line run exactly as printed on that system; any other system gets the program's own page.
 - G5.5 (row M52, #85): with no road to GitHub, the tool says "GitHub could not be reached" (it said "GitHub answered 0"), and `key set` no longer says a key cannot see an owner when GitHub did not answer or failed.
 - G4.4 and G4.8 (rows M9 and M25, #83): under the floor the sync keeps, it says how much is left and the floor, and "spent" only when GitHub says so. A real machine was told "spent" with 4755 calls left.
 - G6.11 (row M49, #81): piping the tool's words into `head` no longer ends in a traceback, and a sync whose reader goes away still finishes.

@@ -621,17 +621,45 @@ def service_path():
 
 
 
-# G1.8: every install line named here was run as written on a fresh system first; the plan's "Install lines, as
-# seen" table says where and when, and a test holds that no line is named here that is not in it. An apt line
-# alone fails on a fresh Ubuntu or Debian image (stale or no package lists), so it starts with apt update.
-INSTALL_GIT = ("on Ubuntu or Debian: sudo apt update && sudo apt install git; "
-               "on Fedora: sudo dnf install git; "
-               # G1.13: a Mac is written as what was seen; what this shows on a Mac without the tools, nobody has.
-               "on a Mac: git comes with Apple's developer tools, and xcode-select --install is Apple's command for them")
-INSTALL_LFS = ("on Ubuntu or Debian: sudo apt update && sudo apt install git-lfs; "
-               "on Fedora: sudo dnf install git-lfs; "
-               "on a Mac: from the project's own site, https://git-lfs.com; setup and sync find it by themselves "
-               "once it is installed")
+# G1.8 and G1.14 (M51, the family's rule 7): every install line here was run exactly as printed, in a terminal,
+# its prompts answered by hand, on a fresh image of that system; the plan's "Install lines, as seen" table says
+# where and when, and a test holds that no line is named that is not in it. Only this computer's own way is said:
+# a person on Fedora has no use for the apt line. An apt line alone fails on a fresh Ubuntu or Debian image (stale
+# or no package lists), so it starts with apt update. A system not named here (a kin of these too: its line was
+# never run there) gets the program's own page, not a guess.
+OS_RELEASE = "/etc/os-release"
+INSTALL_SEEN = {
+    ("ubuntu", "git"): "sudo apt update && sudo apt install git",
+    ("debian", "git"): "sudo apt update && sudo apt install git",
+    ("fedora", "git"): "sudo dnf install git",
+    ("ubuntu", "git-lfs"): "sudo apt update && sudo apt install git-lfs",
+    ("debian", "git-lfs"): "sudo apt update && sudo apt install git-lfs",
+    ("fedora", "git-lfs"): "sudo dnf install git-lfs",
+}
+OWN_PAGE = {"git": "https://git-scm.com/downloads", "git-lfs": "https://git-lfs.com"}
+
+
+def os_id():
+    """'mac', or the ID line of /etc/os-release ('ubuntu', 'debian', 'fedora', ...), or '' when it cannot be read."""
+    if system()[0] == "darwin":
+        return "mac"
+    try:
+        with open(OS_RELEASE, encoding="utf-8") as f:
+            m = re.search(r'^ID="?([A-Za-z0-9._-]+)"?\s*$', f.read(), re.M)
+    except OSError:
+        return ""
+    return m.group(1).lower() if m else ""
+
+
+def install_words(tool):
+    """How to install git or git-lfs on this computer, said only as far as it was seen (G1.14)."""
+    here = os_id()
+    if here == "mac" and tool == "git":
+        # G1.13: a Mac is written as what was seen; what this shows on a Mac without the tools, nobody has.
+        return "git comes with Apple's developer tools, and xcode-select --install is Apple's command for them"
+    line = INSTALL_SEEN.get((here, tool))
+    name = "git lfs" if tool == "git-lfs" else "git"
+    return f"on this computer: {line}" if line else f"{name}'s own page is {OWN_PAGE[tool]}"
 
 def git_out_of_service_reach():
     """The sentence when git is here only in a folder the service does not look in, else ''."""
@@ -640,19 +668,20 @@ def git_out_of_service_reach():
     if not here or shutil.which("git", path=where):
         return ""
     return (f"git is at {here}, in a folder the mirror's service does not look in ({where}), so the forge and the "
-            f"sync would not find it. Install git for the whole computer ({INSTALL_GIT}); that is the person's "
+            f"sync would not find it. Install git for the whole computer ({install_words('git')}); that is the person's "
             f"step, or their administrator's. Nothing was changed.")
 
 
 def git_missing_sentence():
-    return (f"git is not installed on this computer. The skill and the forge both need it. Install it ({INSTALL_GIT}), "
+    return (f"git is not installed on this computer. The skill and the forge both need it. Install it ({install_words('git')}), "
             "then run setup again.")
 
 
 LFS_NOT_IN_COPY = ("its large files are NOT in the copy, because git lfs was not installed when it was copied; "
                    "install git lfs, and the next sync copies them")
-LFS_MISSING = ("git lfs is not installed here, so projects with large files are copied without them until it is "
-               f"({INSTALL_LFS}).")
+def lfs_missing():
+    return ("git lfs is not installed here, so projects with large files are copied without them until it is "
+            f"({install_words('git-lfs')}; setup and sync find it by themselves once it is installed).")
 
 
 def install_service(p):
@@ -1358,7 +1387,7 @@ def announce_first_copy(p, st, picked, complete):
           else "There are none to copy yet.",
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
-          restart_line(st), LFS_MISSING if not has_git_lfs() else "",
+          restart_line(st), lfs_missing() if not has_git_lfs() else "",
           *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
           NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
     st["announced"] = st.get("announced") or now_utc()
@@ -1649,7 +1678,7 @@ def cmd_setup(args):
         say("setup --dry-run: nothing is changed.")
         tell([f"Setup would {step}." for step in plan]
              + [f"After a restart: {note}" if note else "After a restart it starts by itself.",
-                LFS_MISSING if not has_git_lfs() else ""])
+                lfs_missing() if not has_git_lfs() else ""])
         return 0
     if linger_unchosen(args, st):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
@@ -1715,7 +1744,7 @@ def cmd_setup(args):
         save_state(p, st)
     # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
     # person must hear before the go is in the announcement's block, the one they say go to.
-    for line in ("After a restart it starts by itself." if back else "", note, LFS_MISSING if not has_git_lfs() else "",
+    for line in ("After a restart it starts by itself." if back else "", note, lfs_missing() if not has_git_lfs() else "",
                  PRIVATE_AS_THIS_COMPUTER):
         if line:
             say(line)
