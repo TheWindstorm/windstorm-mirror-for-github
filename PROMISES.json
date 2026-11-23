@@ -358,6 +358,20 @@
    "issue": "#28",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M27",
+   "seen": "2026-11-23, a cold start on a stock Ubuntu 24.04 virtual machine (a fresh agent, the strongest model): git lfs installed after the first copy, and the next sync skipped the project as unchanged until the daily full pass; status said 1 copied with no problem line, and restore --check failed with a git error and no next step. The agent opened the script's source four times.",
+   "promise": "A copy made without its large files is a problem line in sync, status and restore --check, said before the counts, with its one next step; once git lfs is installed, the next sync copies the project again.",
+   "codon": "G3.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G3_8_large_files_are_copied_or_named_as_missing",
+   "proven": "",
+   "issue": "#30",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

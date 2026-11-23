@@ -612,6 +612,8 @@ def git_missing_sentence():
             "then run setup again.")
 
 
+LFS_NOT_IN_COPY = ("its large files are NOT in the copy, because git lfs was not installed when it was copied; "
+                   "install git lfs, and the next sync copies them")
 LFS_MISSING = ("git lfs is not installed here, so projects with large files are copied without them until it is "
                "(on Ubuntu or Debian: sudo apt install git-lfs; on Fedora: sudo dnf install git-lfs; on a Mac with "
                "Homebrew: brew install git-lfs).")
@@ -1273,13 +1275,14 @@ def sync(p, args):
     full_due = time.time() - epoch_of(st.get("last_full_pass")) >= setting(s, "full_pass_hours") * 3600
     limit = setting(s, "git_timeout_s")
     order = sorted(picked.items(), key=lambda x: x[1][2]["full_name"].lower())
+    lfs_here = has_git_lfs()
     for i, (gid, (owner, key, r)) in enumerate(order):
         if i == 3 and len(order) > 3 and not st.get("first_copy_done"):
             per = (time.time() - started) / 3
             say(f"first copy: 3 of {len(order)} done; about {max(1, round(per * (len(order) - 3) / 60))} min left at this pace")
         rec = state.setdefault(gid, {})
         if (not full_due and rec.get("forge_id") and not rec.get("problem") and rec.get("last_good")
-                and not rec.get("copying_since")
+                and not rec.get("copying_since") and not (rec.get("lfs_missing") and lfs_here)
                 and rec.get("full_name") == r["full_name"] and r.get("pushed_at")
                 and rec.get("pushed_at") == r["pushed_at"] and r["pushed_at"] < rec.get("fetched_from", "")):
             unchanged += 1
@@ -1320,11 +1323,13 @@ def sync(p, args):
         say(line)
     for x in skipped:
         say(f"left out: {x}")
-    lfs_missing = [rec["full_name"] for rec in state.values() if rec.get("lfs_missing")]
-    if lfs_missing:
-        say("Large files NOT copied (git lfs is not installed here): " + ", ".join(sorted(lfs_missing)))
+    lfs_missing = sorted(rec["full_name"] for rec in state.values() if rec.get("lfs_missing") and not rec.get("gone_since"))
+    for name in lfs_missing:
+        say(f"problem: {name}: {LFS_NOT_IN_COPY}")
     say(f"sync: {len(found)} on GitHub, {done} copied now, {unchanged} unchanged, {len(problems)} problem(s), "
-        f"{calls} GitHub API call(s)" + (", a full pass" if full_due else ""))
+        f"{calls} GitHub API call(s)" + (", a full pass" if full_due else "")
+        + (f", {len(lfs_missing)} cop{'y' if len(lfs_missing) == 1 else 'ies'} without its large files"
+           if lfs_missing else ""))
     say(NOT_COPIED)
     return 0 if not problems else 1
 
@@ -1640,7 +1645,7 @@ def cmd_status(args):
         problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, and this release pins {GITEA_VERSION}"
                         + ("; `upgrade-forge` moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
     max_age = 2 * setting(s, "interval_min") * 60
-    on_gh = copied = behind = unreadable = 0
+    on_gh = copied = behind = unreadable = no_lfs = 0
     for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
         name = rec.get("full_name") or gid
         if rec.get("gone_since"):
@@ -1662,6 +1667,9 @@ def cmd_status(args):
         if not ok:
             behind += 1
             problems.append(f"{name}: {why}")
+        if rec.get("lfs_missing"):
+            no_lfs += 1
+            problems.append(f"{name}: {LFS_NOT_IN_COPY}")
     for owner, k in sorted((st.get("keys") or {}).items()):
         exp = k.get("expires") or ""
         # The expiry header has not been seen on a real key yet (contract C3). Only a date GitHub sent and that
@@ -1699,7 +1707,8 @@ def cmd_status(args):
     save_state(p, st)
     for x in problems:
         say(f"problem: {x}")
-    say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable")
+    say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
+        + (f", {no_lfs} without its large files" if no_lfs else ""))
     say(f"first copy: made on {local_time(st['go'])}, on your go" if st.get("go") else
         "first copy: waiting for your go (sync --announce says what will be copied; a sync on your word starts it)")
     for x in notes:
@@ -1781,6 +1790,9 @@ def cmd_restore(args):
                 continue
             if not cur:
                 diffs.append(f"{name}: its copy is not in the forge")
+                continue
+            if rec.get("lfs_missing"):
+                diffs.append(f"{name}: {LFS_NOT_IN_COPY}")
                 continue
             into = os.path.join(work, gid + ".git")
             why = clone_copy(forge, cur["name"], into)
