@@ -2237,7 +2237,10 @@ RELEASE_ONLY = {"README.md", "CHANGELOG.md", ".claude-plugin/plugin.json"}
 
 
 def release_branch():
-    """The branch's name when it is a release branch (release-X.Y.Z): from CI, or from git here; else ''."""
+    """The branch's name when it is a release branch (release-X.Y.Z): from CI, or from git here; else ''. A pull
+    request into main never gets the exception: there the head is judged by main's own rule."""
+    if os.environ.get("GITHUB_BASE_REF") == "main":
+        return ""
     name = os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME") or subprocess.run(
         ["git", "-C", ROOT, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True).stdout.strip()
     return name if re.fullmatch(r"release-\d+\.\d+\.\d+", name or "") else ""
@@ -2260,6 +2263,8 @@ class Package(unittest.TestCase):
             return
         base = subprocess.run(["git", "-C", ROOT, "merge-base", "origin/main", "HEAD"], capture_output=True, text=True)
         self.assertEqual(base.returncode, 0, f"{branch}: main is not here to compare with: {base.stderr.strip()}")
+        today = subprocess.run(["git", "-C", ROOT, "merge-base", "--is-ancestor", "origin/main", "HEAD"])
+        self.assertEqual(today.returncode, 0, f"{branch} does not hold today's main: merge main into it first")
         changed = subprocess.run(["git", "-C", ROOT, "diff", "--name-only", base.stdout.strip(), "HEAD"],
                                  capture_output=True, text=True).stdout.split()
         self.assertTrue(changed, f"{branch} is main itself")
