@@ -2540,20 +2540,24 @@ class G10(unittest.TestCase):
             self.assertTrue(any(x.startswith("After a restart") for x in said), said)
             self.assertIn(mirror.LFS_MISSING, said)
         with World(self) as w:
-            said = block(w.setup_out, "setup")
-            self.assertIn(mirror.PRIVATE_AS_THIS_COMPUTER, said)
             w.gh.add_repo("someone", "alpha")
             w.gh.commit("someone/alpha", {"a": b"1"})
             w.key_set()
-            rc, out = w.sync("--announce")
+            saved = mirror.has_git_lfs
+            mirror.has_git_lfs = lambda: True
+            try:
+                rc, out = w.sync("--announce")
+            finally:
+                mirror.has_git_lfs = saved
             self.assertEqual(rc, 0, out)
             said = block(out, "sync --announce")
-            self.assertEqual(len(said), 5, said)
+            self.assertEqual(len(said), 6, said)
             self.assertTrue(said[0].startswith("The first copy: 1 repositories from 1 owner(s)"), said)
             self.assertEqual(said[1], "They are: someone/alpha.")
             self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[2])
             self.assertIn("Nothing is ever written to GitHub.", said[2])
-            self.assertEqual(said[3:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
+            self.assertTrue(said[3].startswith("After a restart"), said)
+            self.assertEqual(said[4:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
             self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
         _, _, body = skill_front()
         self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
@@ -2564,6 +2568,51 @@ class G10(unittest.TestCase):
                      "5. `M sync --announce`. Give the person its `tell the person` block whole"):
             self.assertIn(step, order)
 
+
+    def test_G10_6_what_the_person_must_hear_before_the_go_is_in_the_block_they_say_go_to(self):
+        """A cold start (2026-11-23, run 2): the smallest model gave setup's block 0 of 3, because it went straight on
+        to the next commands, while the announcement's block, the last thing before the go, came 5 of 5 on both
+        models. So setup prints no block; what happens after a restart, a missing git lfs and how private the copy
+        is are in the announcement's block. Lingering itself is chosen at setup by the person's own yes or no
+        (--linger, --no-linger), which the tool holds, so an agent may say that part in its own words."""
+        tell = re.compile(r"^tell the person (\d+) of (\d+): (.*)$", re.M)
+        with World(self) as w:
+            self.assertEqual(tell.findall(w.setup_out), [], "setup printed a block an agent can lose")
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            for lfs, linger, said_no in ((False, "yes", None), (True, "no", "no"), (True, "no", None)):
+                saved_lfs, saved_linger = mirror.has_git_lfs, mirror.linger_state
+                mirror.has_git_lfs, mirror.linger_state = (lambda v=lfs: v), (lambda v=linger: v)
+                st = mirror.load_json(mirror.paths()["state"], {})
+                st.pop("linger_said", None)
+                if said_no:
+                    st["linger_said"] = said_no
+                mirror.save_state(mirror.paths(), st)
+                try:
+                    rc, out = w.sync("--announce")
+                finally:
+                    mirror.has_git_lfs, mirror.linger_state = saved_lfs, saved_linger
+                self.assertEqual(rc, 0, out)
+                said = [t for _, _, t in tell.findall(out)]
+                self.assertEqual(said[-1], mirror.PRIVATE_AS_THIS_COMPUTER)
+                restart = [x for x in said if x.startswith("After a restart")]
+                self.assertEqual(len(restart), 1, said)
+                if mirror.system()[0] == "darwin":
+                    pass                                      # a Mac says its own case (G1.6); one line is enough
+                elif linger == "yes":
+                    self.assertIn("it starts by itself: lingering is on", restart[0])
+                elif said_no:
+                    self.assertIn("lingering is off, as you chose", restart[0])
+                    self.assertIn("run setup --linger", restart[0])
+                else:
+                    self.assertIn("administrator", restart[0])
+                    self.assertIn("sudo loginctl enable-linger", restart[0])
+                self.assertEqual(mirror.LFS_MISSING in said, not lfs, said)
+                self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
+        _, _, body = skill_front()
+        order = section(body, "The order")
+        self.assertIn("what happens after a restart", order)
 
 class G6Words(unittest.TestCase):
     NEXT = re.compile(r"\b(run|again|install|make|ask|try|wait|free|name|check|open an issue)\b|`|python3 -I", re.I)
