@@ -19,7 +19,30 @@ jobs:
         env:
           WSM_REQUIRE_GITEA: "1"
           WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
+          WSM_TEST_REPORT: ${{ runner.temp }}/report.json
         run: python -I tests/test_mirror.py -v
+      - name: Keep what this job saw pass, for the join
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.os }}-${{ matrix.python }}
+          path: ${{ runner.temp }}/report.json
+          if-no-files-found: error
+  gate:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: report-*
+          path: reports
+      - name: Every proof the plan names passed on at least one of the four jobs
+        run: python -I tests/test_mirror.py --join --expect 4 reports/*/report.json
   skill-spec:
     runs-on: ubuntu-latest
     steps:

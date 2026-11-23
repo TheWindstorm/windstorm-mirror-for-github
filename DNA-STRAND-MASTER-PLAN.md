@@ -299,6 +299,12 @@ version is 0.0.0.
   - An uninstall that leaves nothing behind but the copies.
   - A new computer restored from the backup.
 
+### What counts as a proof
+
+| Codon | Claim | Proof |
+|---|---|---|
+| T1 | A proof named in this plan counts only when the suite's own runner saw it pass. The runner refuses a test name defined twice, two classes of one name, a test that is not where unittest collects it, and any skip mark. A skip raised inside a test counts as "not run here", never as a pass, and only when its reason is on a fixed list (no real pinned Gitea for this system, no git lfs here) and that is true on that machine. In CI it is never true, and a last job needs every proof to have passed on at least one of the four jobs. | `test_the_gate_refuses_every_way_a_test_can_hide` |
+
 ## Proven by hand on real machines, not by a test
 
 Nothing yet. The lab facts above are about stock Gitea, not about this skill.

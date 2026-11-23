@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests, T1 (row M19): a proof counts only when the suite's own runner saw it pass. The runner refuses a name defined twice, a test unittest cannot collect, and any skip mark; a skip raised inside a test is "not run here", never a pass, and only on a true condition of that machine. A last CI job needs every proof the plan names to have passed on at least one of the four jobs. A self-test hides one real test eight ways and must see each refused.
 - G1.7, from a restart of a real Mac: on a Mac, the skill says the copy comes back by itself after a restart when the system logs the person in by itself (FileVault off), and otherwise that it stands still until they log in. Before, it said the second on every Mac.
 - A key's expiry is shown only from a date GitHub sent that reads cleanly; otherwise `status` says "expiry not known" and warns of nothing (the header is not seen yet).
 - INV6 also names the two read-only Mac commands G1.7 added. From the automatic-login setting the skill keeps only whether it is set and whether it is this person's own account; another account's name is never printed or kept ("automatic login is set for another account").
