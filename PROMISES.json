@@ -386,6 +386,20 @@
    "issue": "#32",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M29",
+   "seen": "2026-11-23, a cold start on a stock Ubuntu 24.04 virtual machine (a fresh agent, the smallest model): it gave the dry run's seven steps as one line with a claim of its own, dropped what a no to lingering means, and dropped 'Disk encryption, and who uses this computer, are yours' from the privacy line. The sister skill's cold starts showed the same; their numbered block cured it.",
+   "promise": "What the person must hear in the dry run, in setup and in the announcement comes as one block, `tell the person 1 of N:` to `N of N:`, and SKILL.md says to give it whole, word for word and in order, before any words of the agent's own.",
+   "codon": "G10.5",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G10_5_what_the_person_must_hear_comes_as_one_numbered_block",
+   "proven": "",
+   "issue": "#34",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

@@ -22,9 +22,13 @@ marked **Person** and is described under "The person's steps": say what is writt
 that is the person's is never done another way: if a program is missing, or the computer refuses something, say
 what the tool printed and wait; do not install, change or work around anything yourself.
 
-1. `M setup --dry-run`. Show the person its whole output: it says what setup would do and changes nothing.
-   On Linux it also says, in plain words, what lingering means: the mirror keeps running when they are logged
-   out and after a restart. That is a **Person** step: see "Lingering".
+**Lines for the person.** Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the
+person. Give them the whole block, every line from 1 of N to N of N, word for word and in that order, before any
+words of your own. Never shorten, merge, reword or leave one out; your own words come after the block.
+
+1. `M setup --dry-run`. Give the person its `tell the person` block whole: it says what setup would do, and it
+   changes nothing. On Linux it also says, in plain words, what lingering means: the mirror keeps running when
+   they are logged out and after a restart. That is a **Person** step: see "Lingering".
 2. **Person**: the keys to make. One read-only key for each owner whose projects are to be copied: their own
    account, and each organisation they name. See "Making each key".
 3. `M setup --linger` if the person said yes to lingering, `M setup --no-linger` if they said no. (On a Mac,
@@ -36,8 +40,9 @@ what the tool printed and wait; do not install, change or work around anything y
    you. Say: "In a terminal window of your own, run `python3 -I <the script> key set <owner>` and paste the
    key when it asks. Tell me when it says the key is kept." Never read a key, run nothing that would put a key
    on a command line, in a file you write or in your own output, and never ask for one.
-5. `M sync --announce`. Read its lines to the person: how many repositories, how big, what is not copied, and
-   that the copy is as private as this computer. Then the **Person** step: the go for the first copy.
+5. `M sync --announce`. Give the person its `tell the person` block whole: how many repositories, how big, where
+   they go, what is not copied, and that the copy is as private as this computer. Then the **Person** step: the
+   go for the first copy.
    Running `--announce` again copies nothing; it says it all again.
 6. `M sync`, only after the person said go. The first copy can take a while; it says how far it is.
 7. `M status`. Show the person its `copies:` line and every `problem:` line.

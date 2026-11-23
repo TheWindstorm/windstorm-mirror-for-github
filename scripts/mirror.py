@@ -101,6 +101,15 @@ def say(msg=""):
     print(msg, flush=True)
 
 
+def tell(lines):
+    """G10.5: what the person must hear goes out as one numbered block, "tell the person 1 of N: ..." to "N of N",
+    so a line dropped, shortened or merged on its way to the person shows (a cold start saw the smallest model
+    shorten the dry run to one line and drop a sentence of the privacy line)."""
+    lines = [x for x in lines if x]
+    for i, x in enumerate(lines, 1):
+        say(f"tell the person {i} of {len(lines)}: {x}")
+
+
 def load_json(path, default):
     try:
         with open(path, encoding="utf-8") as f:
@@ -1268,10 +1277,11 @@ def sync(p, args):
                 + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
             return 1
         size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
-        say(f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
-            f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).")
-        say(NOT_COPIED)
-        say(PRIVATE_AS_THIS_COMPUTER)
+        tell([f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
+              f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).",
+              f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
+              f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
+              NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
         st["announced"] = st.get("announced") or now_utc()
         save_state(p, st)
         say("Nothing was copied. When the person says go, run: sync")
@@ -1389,15 +1399,13 @@ def cmd_setup(args):
     if args.dry_run:
         back, note = (comes_back_by_itself(dry=True) if system()[0] == "darwin"
                       else linger_step(None, dry=True, allow=allow))
-        say("setup --dry-run: nothing is changed. Setup would:")
-        for i, step in enumerate(plan, 1):
-            say(f"  {i}. {step}")
-        say(f"After a restart: {note}" if note else "After a restart it starts by itself.")
-        if not has_git_lfs():
-            say(f"Note: {LFS_MISSING}")
+        say("setup --dry-run: nothing is changed.")
+        tell([f"Setup would {step}." for step in plan]
+             + [f"After a restart: {note}" if note else "After a restart it starts by itself.",
+                LFS_MISSING if not has_git_lfs() else ""])
         return 0
     if linger_unchosen(args, st):
-        say(f"After a restart: {linger_step(None, dry=True)[1]}")
+        tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
         say(LINGER_CHOICE)
         return 2
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
@@ -1458,13 +1466,8 @@ def cmd_setup(args):
         elif getattr(args, "linger", False):
             st.pop("linger_said", None)
         save_state(p, st)
-    if back:
-        say("After a restart it starts by itself.")
-    if note:
-        say(note)
-    if not has_git_lfs():
-        say(f"Note: {LFS_MISSING}")
-    say(PRIVATE_AS_THIS_COMPUTER)
+    tell(["After a restart it starts by itself." if back else "", note,
+          LFS_MISSING if not has_git_lfs() else "", PRIVATE_AS_THIS_COMPUTER])
     return 0 if ok else 1
 
 
@@ -2010,7 +2013,7 @@ def setup_from(p, args):
         say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed.")
         return 2
     if linger_unchosen(args, {}):
-        say(f"After a restart: {linger_step(None, dry=True)[1]}")
+        tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
         say(LINGER_CHOICE)
         return 2
     src = os.path.abspath(os.path.expanduser(args.from_file))
