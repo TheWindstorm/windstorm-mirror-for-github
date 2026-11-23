@@ -1714,7 +1714,12 @@ class G4(unittest.TestCase):
             self.assertEqual(st["github_wait_until"], until)
             self.assertFalse([r for r in st["repos"].values() if r.get("problem")], "a project was marked failed")
             self.assertEqual({f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(3)}, before)
+            st["release_check"] = {}                   # its daily read is due: still, nothing is asked in the wait
+            mirror.save_state(w.p, st)
+            asked = len(w.gh.log)
             out = quiet(mirror.main, ["status"])[1]
+            self.assertEqual(len(w.gh.log), asked, "status asked GitHub during the wait")
+            self.assertIn("newer release: not asked while the sync waits for GitHub's reset", out)
             self.assertIn("github: " + line.format(mirror.local_time(until)), out)
             self.assertNotIn("problem:", out)
             # 2. Nothing is asked of GitHub before the reset, even when it would answer again.

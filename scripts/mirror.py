@@ -1840,7 +1840,12 @@ def gh_public(path, accept="application/vnd.github+json"):
 def release_check(st, force=False):
     """G6.6: once a day, one call with no key for this skill's latest release. Returns lines to show."""
     rc = st.get("release_check") or {}
-    if force or time.time() - epoch_of(rc.get("at")) >= 86400:
+    due = force or time.time() - epoch_of(rc.get("at")) >= 86400
+    if due and not force and epoch_of(st.get("github_wait_until")) > time.time():
+        # G4.8 (M25): while GitHub's allowance waits for its reset, nothing at all is asked of GitHub, not even this
+        # read with no key (a real machine saw status make it during the wait).
+        return ["newer release: not asked while the sync waits for GitHub's reset; it is asked after it"]
+    if due:
         try:
             code, raw = gh_public(f"/repos/{SKILL_REPO}/releases/latest")
             if code != 200:
