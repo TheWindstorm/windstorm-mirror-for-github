@@ -841,6 +841,22 @@
    "issue": "#85",
    "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine with its road to GitHub cut: sync said 'GitHub answered 0'. Reading the code then found key set saying 'this key cannot see' on no answer or a 5xx.",
    "promise": "A read of GitHub that got no answer is said as 'GitHub could not be reached', never as an answer of 0; in key set, no answer or GitHub's own failure is never 'this key cannot see': nothing is kept, and the step is to run key set again."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M53",
+   "codon": "G7.5",
+   "test": "test_G7_5_restore_check_says_when_the_forge_does_not_answer",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "#92",
+   "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine: with the forge's service stopped, restore --check printed a raw connection error and '0 whole, 1 difference(s)', with no next step.",
+   "promise": "restore --check asks the forge first: a forge that does not answer is a problem line with sync's own next step and a failing code; a copy that could not be read is a third number, 'could not be read', never a difference; no raw library text is shown."
   }
  ],
  "declined": []
