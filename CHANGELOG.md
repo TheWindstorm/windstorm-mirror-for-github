@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The dry run's lingering sentence says the choice once (`setup --linger` is yes, `setup --no-linger` is no), where it said `setup --linger` twice.
 - From a stock Ubuntu 24.04 virtual machine (rows M20 to M23):
   - G4.7: the sync timer counts from the start of the person's own service manager (`OnStartupSec=2min`). With `OnBootSec`, as every build so far wrote it, a person who logged in more than 5 minutes after boot had a timer with no next run, so the sync never ran again in that boot.
   - G6.7: `status` reads a next run kept on the boot clock, instead of reporting "no next run" while one was due.

@@ -543,17 +543,18 @@ def linger_step(st, dry=False, allow=True):
     if not allow:
         return False, (f"Lingering stays off, as you chose: the mirror syncs only while you are logged in, and "
                        f"after a restart it waits until you log in. To change that later, run setup --linger.")
-    say_no = ("To say yes, run setup --linger; to say no, setup --no-linger, and then the mirror syncs only while "
-              "you are logged in.")
+    say_no = ("It is your choice: setup --linger is yes; setup --no-linger is no, and then the mirror syncs only "
+              "while you are logged in.")
     if dry:
         may = may_self_linger()
         if may == "yes":
-            return False, (f"setup --linger switches on lingering for your account (this computer lets you do "
-                           f"that yourself): {LINGER_MEANS}. {say_no}")
+            return False, (f"Lingering means {LINGER_MEANS}. This computer lets you do that yourself, so setup "
+                           f"can switch it on without asking for a password. {say_no}")
         if may == "unknown":
-            return False, (f"setup --linger tries to switch on lingering for your account, without asking for a "
-                           f"password: {LINGER_MEANS}. If this computer refuses, its administrator runs one "
-                           f"command: {LINGER_COMMAND.format(user=user)}. {say_no}")
+            return False, (f"Lingering means {LINGER_MEANS}. This computer did not say whether you may switch it on "
+                           f"yourself, so setup --linger tries without asking for a password; if the computer "
+                           f"refuses, its administrator runs one command: {LINGER_COMMAND.format(user=user)}. "
+                           f"{say_no}")
         return False, f"{admin} {say_no}"
     # Never a password prompt the person did not expect: refused means the administrator's one command.
     if run(["loginctl", "--no-ask-password", "enable-linger", user]).returncode == 0 and linger_state() == "yes":
