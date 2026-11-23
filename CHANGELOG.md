@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- G1.7, from a restart of a real Mac: on a Mac, the skill says the copy comes back by itself after a restart when the system logs the person in by itself (FileVault off), and otherwise that it stands still until they log in. Before, it said the second on every Mac.
+- A key's expiry is shown only from a date GitHub sent that reads cleanly; otherwise `status` says "expiry not known" and warns of nothing (the header is not seen yet).
+- INV6 also names the two read-only Mac commands G1.7 added. From the automatic-login setting the skill keeps only whether it is set and whether it is this person's own account; another account's name is never printed or kept ("automatic login is set for another account").
 - Plan: invariant INV6 now names everything the script reaches and runs: GitHub (its API and git), Gitea's download site, any host those two send a request on to, its own forge on 127.0.0.1, the address the person names for `restore --to`, and the programs `git`, the Gitea binary, the service manager, the address list and Python itself. The sentence was narrower than what the code has always done; nothing new is reached. A test now holds the script to that list: standard library only, a fixed set of addresses and ways to reach the network, and a fixed set of programs.
 
 - G10, the skill: `skills/mirror/SKILL.md` gives an agent one fixed order (`setup --dry-run` shown to the person, the keys to make, `setup`, `key set` run by the person, the first copy announced and the person's go, `sync`, `status`, `restore --check`), names every step that is the person's with what to say, and says what never to do.

@@ -461,8 +461,21 @@ def linger_state():
 def comes_back_by_itself(dry=False):
     """G1.6: (True, '') when the forge starts after a restart with no one logged in, else (False, what to say)."""
     if system()[0] == "darwin":
-        return False, (f"On a Mac, {NO_LOGIN_NOTE}: a launch agent runs only in a login session, and with "
-                       "FileVault on nothing runs before someone logs in.")
+        # Seen on a Mac (contract C9): when the system logs this account in by itself after a restart, the
+        # launch agents come back with no one at the keyboard. FileVault on turns that automatic login off.
+        # Two facts only are kept from the automatic-login setting: is it set, and is it this person's own
+        # account. It may name another person's account on a shared Mac; that name is never printed or kept.
+        auto = run(["defaults", "read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"])
+        auto_set = auto.returncode == 0 and bool(auto.stdout.strip())
+        auto_mine = auto_set and auto.stdout.strip() == getpass.getuser()
+        del auto
+        vault = run(["fdesetup", "status"])
+        if auto_mine and "FileVault is Off" in vault.stdout:
+            return True, ""
+        why = ("automatic login is set for another account, not yours" if auto_set and not auto_mine
+               else "this Mac does not log you in by itself after a restart")
+        return False, (f"On a Mac, {NO_LOGIN_NOTE}: a launch agent runs only in a login session, and {why}"
+                       + (" (FileVault is on)" if "FileVault is On" in vault.stdout else "") + ".")
     state = linger_state()
     if state == "yes":
         return True, ""
@@ -1447,17 +1460,21 @@ def cmd_status(args):
             problems.append(f"{name}: {why}")
     for owner, k in sorted((st.get("keys") or {}).items()):
         exp = k.get("expires") or ""
-        if exp:
-            try:
-                left = (calendar.timegm(time.strptime(exp.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")) - time.time()) / 86400
-            except ValueError:
-                left = None
-            if left is not None and left < 14:
-                problems.append(f"the key for {owner} expires {exp}" + (" (it has expired)" if left < 0 else
-                                f", in {int(left)} day(s): make a new one, then `key set {owner}`"))
-            notes.append(f"key for {owner}: expires {exp}")
-        else:
-            notes.append(f"key for {owner}: GitHub's answer shows no expiry")
+        # The expiry header has not been seen on a real key yet (contract C3). Only a date GitHub sent and that
+        # reads cleanly is shown or warned about; nothing is worked out, and nothing absent is called "no expiry".
+        try:
+            when = calendar.timegm(time.strptime(exp.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")) if exp else None
+        except ValueError:
+            when = None
+        if when is None:
+            notes.append(f"key for {owner}: expiry not known" + (f" (GitHub sent '{exp[:40]}', which could not be read)"
+                                                                if exp else ""))
+            continue
+        left = (when - time.time()) / 86400
+        if left < 14:
+            problems.append(f"the key for {owner} expires {exp}" + (" (it has expired)" if left < 0 else
+                            f", in {int(left)} day(s): make a new one, then `key set {owner}`"))
+        notes.append(f"key for {owner}: expires {exp}")
     free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
     floor_mb = setting(s, "disk_floor_mb")
     if free_mb < floor_mb:

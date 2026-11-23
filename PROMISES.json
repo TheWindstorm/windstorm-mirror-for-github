@@ -246,6 +246,20 @@
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M18",
+   "seen": "2026-11-22, a Mac on Intel (macOS 13), FileVault off, with the system logging its account in by itself: after a restart, two launch agents in that account came back with no one at the keyboard, the service-like one 45 s after the boot and the interval one on its interval. Until then the skill said, on every Mac, that the copy stands still until the person logs in.",
+   "promise": "On a Mac, the skill says the copy comes back by itself after a restart only when the system logs the person in by itself; otherwise it says the copy stands still until they log in.",
+   "codon": "G1.7",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

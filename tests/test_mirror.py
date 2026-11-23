@@ -113,6 +113,7 @@ class Home:
         self.linger, self.enable_ok, self.service_ok = linger, enable_linger_ok, service_ok
         self.timer_next = "Sun 2026-11-22 19:15:00 UTC"     # what the system says of the sync timer's next run
         self.forge_follows = False      # when True, stopping and starting the service stops and starts the forge
+        self.auto_login, self.filevault = None, False      # a Mac's automatic login after a restart, and FileVault
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -121,6 +122,11 @@ class Home:
         self.procs = []
 
     def fake_run(self, cmd, **kw):
+        if cmd[0] in ("defaults", "fdesetup"):
+            self.calls.append(cmd)
+            if cmd[0] == "defaults":
+                return subprocess.CompletedProcess(cmd, 0 if self.auto_login else 1, (self.auto_login or "") + "\n", "")
+            return subprocess.CompletedProcess(cmd, 0, f"FileVault is {'On' if self.filevault else 'Off'}.\n", "")
         if cmd[0] in ("systemctl", "loginctl", "launchctl"):
             self.calls.append(cmd)
             if cmd[:2] == ["loginctl", "show-user"]:
@@ -397,7 +403,8 @@ class G1(unittest.TestCase):
             self.assertIn("nothing is changed", out)
             self.assertIn("download Gitea", out)
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
-            self.assertFalse([c for c in h.calls if c[:2] != ["loginctl", "show-user"]], "the dry run ran a command that changes something")
+            reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"])   # read-only checks
+            self.assertFalse([c for c in h.calls if c[:2] not in reads], "the dry run ran a command that changes something")
             p = h.place_gitea()
             self.assertEqual(h.setup()[0], 0)
             first = (fread(p["app_ini"]), fread(p["password"]), fread(p["mirror_key"]), mirror.forge_users(p))
@@ -412,8 +419,7 @@ class G1(unittest.TestCase):
             with Home() as h:
                 h.place_gitea()
                 rc, out = h.setup()
-                self.assertIn(mirror.NO_LOGIN_NOTE, out)
-                self.assertIn("FileVault", out)
+                self.assertIn(mirror.NO_LOGIN_NOTE, out)       # each Mac case, FileVault's too: the G1.7 test
             return
         with Home(linger="no", enable_linger_ok=False) as h:      # the system refuses: an administrator's step
             h.place_gitea()
@@ -429,6 +435,27 @@ class G1(unittest.TestCase):
             rc, out = h.setup()
             self.assertIn("After a restart it starts by itself.", out)
             self.assertNotIn(mirror.NO_LOGIN_NOTE, out)
+
+
+    def test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login(self):
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        try:
+            with Home() as h:
+                me = mirror.getpass.getuser()
+                h.auto_login, h.filevault = me, False      # what the Mac test box had on 2026-11-22
+                self.assertEqual(mirror.comes_back_by_itself(), (True, ""))
+                for auto, vault in ((None, False), ("someone-else", False), (me, True)):
+                    h.auto_login, h.filevault = auto, vault
+                    back, note = mirror.comes_back_by_itself()
+                    self.assertFalse(back, (auto, vault))
+                    self.assertIn(mirror.NO_LOGIN_NOTE, note)
+                    self.assertEqual("(FileVault is on)" in note, vault)
+                    self.assertEqual("another account" in note, auto == "someone-else")
+                    self.assertNotIn("someone-else", note)      # another person's account name is never said
+                self.assertFalse([c for c in h.calls if c[0] not in ("defaults", "fdesetup")], "it changed something")
+        finally:
+            mirror.system = saved
 
 
 # ------------------------------------------------------------------ G2 the GitHub keys
@@ -1298,7 +1325,16 @@ class G6(unittest.TestCase):
             self.assertIn(f"problem: the key for someone expires {near}, in 5 day(s): make a new one, then `key set someone`", out)
             w.gh.expires = None
             self.assertEqual(w.sync()[0], 0)
-            self.assertIn("key for someone: GitHub's answer shows no expiry", status()[1])
+            out = status()[1]
+            self.assertIn("key for someone: expiry not known", out)
+            self.assertNotIn("no expiry", out)
+            # A date that cannot be read is shown as not known, and no warning fires on a guess.
+            w.gh.expires = "next Tuesday-ish"
+            self.assertEqual(w.sync()[0], 0)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("key for someone: expiry not known (GitHub sent 'next Tuesday-ish', which could not be read)", out)
+            self.assertNotIn("problem: the key for someone expires", out)
 
     def test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge(self):
         with World(self) as w:
@@ -1811,7 +1847,7 @@ class Invariants(unittest.TestCase):
                 first = n.args[0].elts[0] if n.args[0].elts else None
                 progs.add(first.value if isinstance(first, ast.Constant) else ast.unparse(first))
         self.assertEqual(progs - {"git", "systemctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
-                                  "running_bin(p)", "binary"}, set(), progs)
+                                  "running_bin(p)", "binary", "defaults", "fdesetup"}, set(), progs)
 
 
 class Harness(unittest.TestCase):
@@ -1905,7 +1941,9 @@ class Strand(unittest.TestCase):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
         to_build = set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", plan))
-        real = set(re.findall(r"def (test_(?:G|INV)[A-Za-z0-9_]+)\(", fread(os.path.abspath(__file__))))
+        # A test counts only when unittest runs it: a method of a TestCase here, not text that looks like one.
+        real = {n for c in list(globals().values()) if isinstance(c, type) and issubclass(c, unittest.TestCase)
+                for n in unittest.defaultTestLoader.getTestCaseNames(c) if re.match(r"test_(?:G|INV)", n)}
         self.assertEqual(to_build & real, set(), "a test marked 'to build' exists: remove the mark")
         if to_build:
             self.assertEqual(version(), "0.0.0", "a proof may be marked 'to build' only while nothing is released")
