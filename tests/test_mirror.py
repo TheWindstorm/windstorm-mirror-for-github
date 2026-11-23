@@ -2836,6 +2836,24 @@ class G10(unittest.TestCase):
         order = section(body, "The order")
         self.assertIn("what happens after a restart", order)
 
+    def test_G10_9_one_version_in_every_place(self):
+        """The family's rule 10: one version, in every place it is written: the manifest, the script, the
+        changelog's first heading ('Unreleased' only while nothing is released) and this repository's own catalog
+        entry."""
+        ver = version()
+        self.assertEqual(mirror.VERSION, ver, "the script")
+        entry = [p for p in jload(os.path.join(ROOT, ".claude-plugin", "marketplace.json"))["plugins"]
+                 if p["name"] == "windstorm-mirror-for-github"]
+        self.assertEqual(len(entry), 1)
+        self.assertEqual(entry[0].get("version"), ver, "the catalog entry")
+        heads = re.findall(r"^## (.+)$", fread(os.path.join(ROOT, "CHANGELOG.md")), re.M)
+        self.assertTrue(heads, "the changelog has no heading")
+        if ver == "0.0.0":
+            self.assertEqual(heads[0], "Unreleased")
+        else:
+            self.assertRegex(heads[0], "^" + re.escape(ver) + r"(?: \(\d{4}-\d{2}-\d{2}\))?$", "the changelog's heading")
+            self.assertNotIn("Unreleased", heads[:1])
+
     def test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step(self):
         """Two cold starts (2026-11-23): the smallest model sent the person to key set before setup, twice. Our
         words gave it room: step 2 made the keys before setup and nothing said the paste waits. Now the order says
