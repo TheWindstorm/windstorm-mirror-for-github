@@ -227,7 +227,7 @@ reaches several owners, and a classic key that can read private repositories can
 |---|---|---|---|
 | 0.1.0 | Genes G1 to G10, with Gitea 28.4.0 pinned. | Linux on x86-64; macOS 13 and later on Intel and Apple Silicon. | Every codon is built, and its test is green in CI on Linux and macOS. Every row due in 0.1.0 has its test. Every platform contract below has been seen. The cold start (G10.4) has passed once on Linux and once on a Mac, in clean accounts. Each hard case under "How it is tested" has been run on at least one of the two. The restore drill with GitHub blocked has passed on both. The skill's owner decides the tag. |
 | 0.1.x | Fixes from what real machines show. | The same. | Each fix has its row, its test and its proof. |
-| 0.2.0 | Candidates, not promises: wikis, Forgejo as a setting, Windows. | | Planned only after 0.1.0 has been out a while. |
+| 0.2.0 | Candidates, not promises: wikis, Forgejo as a setting, Windows, a sync at wake (seen on a stock Ubuntu 24.04 VM, 2026-11-23: after a 90 s suspend the timer's next run moved later by exactly the time asleep, because `OnUnitActiveSec` counts on the boot clock, which stops in sleep; so after a night asleep the first sync comes up to one interval after the wake, not at once). | | Planned only after 0.1.0 has been out a while. |
 
 Order of work after this plan: the platform contracts first (written in `docs/CONTRACTS.md`), then one gene per
 pull request, G1 first and G10 last.

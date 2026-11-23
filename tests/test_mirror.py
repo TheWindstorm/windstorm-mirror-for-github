@@ -546,9 +546,9 @@ class G1(unittest.TestCase):
         me = mirror.getpass.getuser()
         try:
             # (a, b) The dry run says what lingering means, from this computer's own three answers.
-            for code, said in ((0, "this computer lets you do that yourself"), (1, "administrator runs one command"),
-                               (2, "administrator runs one command"), (127, "setup --linger tries"),
-                               (None, "setup --linger tries"), ("timeout", "setup --linger tries")):
+            for code, said in ((0, "This computer lets you do that yourself"), (1, "administrator runs one command"),
+                               (2, "administrator runs one command"), (127, "so setup --linger tries"),
+                               (None, "so setup --linger tries"), ("timeout", "so setup --linger tries")):
                 with Home(linger="no") as h:
                     h.pkcheck = code
                     rc, out = h.setup("--dry-run")
