@@ -958,7 +958,7 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "proven": "",
+   "proven": "2026-11-23, a Mac (macOS 13.7.8, Intel) in an administrator test account, over ssh, no key: the line the tool printed for `uninstall --delete-copies`, its path quoted, was run exactly as printed in a terminal, the count typed by hand, and removed everything; the README's quoted Mac line for `uninstall` was run exactly as printed and ended with code 0; the account was left as found.",
    "moved_why": "",
    "moved_by_person": "",
    "id": "M60",
