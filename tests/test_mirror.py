@@ -593,6 +593,46 @@ class G1(unittest.TestCase):
             finally:
                 mirror.wait_forge = saved
 
+    def test_G1_12_an_older_python_is_told_first_and_nothing_is_made(self):
+        """Rule 11 (the family's): the lowest Python the skill names is checked as its first act; below it the tool
+        stops with the version found and what it needs, and has made nothing; the file stays readable by the older
+        grammar so that line is reached. Whatever floor is named, CI runs it."""
+        import ast
+        src = fread(SCRIPT)
+        tree_ = ast.parse(src, feature_version=(3, 8))         # an older Python reaches the check
+        body = tree_.body
+        self.assertIsInstance(body[0], ast.Expr)                # the module's own description
+        self.assertEqual([a.name for a in body[1].names], ["sys"], "the first act is not the version check")
+        self.assertIsInstance(body[2], ast.If)
+        self.assertEqual(ast.unparse(body[2].test), "sys.version_info < (3, 9)")
+        self.assertEqual(ast.unparse(body[2].body[-1]), "sys.exit(3)")
+        # Below the floor, for every command: the stop line, exit 3, nothing made.
+        with tempfile.TemporaryDirectory() as home:
+            for cmd in (["setup"], ["setup", "--dry-run"], ["sync"], ["status"], ["uninstall"]):
+                code = ("import sys; sys.version_info = (3, 8, 20, 'final', 0); sys.argv = [%r] + %r; "
+                        "exec(compile(open(%r).read(), %r, 'exec'), {'__name__': '__main__'})"
+                        % (SCRIPT, cmd, SCRIPT, SCRIPT))
+                out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=30,
+                                     env=dict(os.environ, HOME=home, WSM_HOME=os.path.join(home, "wsm")))
+                self.assertEqual(out.returncode, 3, (cmd, out.stdout, out.stderr))
+                self.assertTrue(out.stdout.startswith("Stopped: this is Python 3.8.20 ("), out.stdout)
+                self.assertIn("this skill needs Python 3.9 or newer. Nothing was made.", out.stdout)
+                self.assertEqual(os.listdir(home), [], f"{cmd}: something was made below the floor")
+        # Where a real older Python is here (WSM_OLD_PYTHON, or python3.8 on the PATH), it is run for real.
+        old = os.environ.get("WSM_OLD_PYTHON") or shutil.which("python3.8")
+        if old:
+            with tempfile.TemporaryDirectory() as home:
+                out = subprocess.run([old, "-I", SCRIPT, "setup"], capture_output=True, text=True, timeout=30,
+                                     env=dict(os.environ, HOME=home, WSM_HOME=os.path.join(home, "wsm")))
+                self.assertEqual(out.returncode, 3, out.stdout + out.stderr)
+                self.assertIn("this skill needs Python 3.9 or newer. Nothing was made.", out.stdout)
+                self.assertEqual(os.listdir(home), [])
+        # CI runs the floor it names, on runner images it names.
+        wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
+        self.assertIn('{os: ubuntu-24.04, python: "3.9"}', wf)
+        self.assertIn('{os: macos-26, python: "3.9"}', wf)
+        self.assertNotRegex(wf, r"runs-on:.*-latest|os: [a-z]+-latest", "a job runs on an image nobody named")
+
     def test_G1_11_the_first_start_waits_are_measured_and_said(self):
         # The waits come from the figure measured on a slow machine, and the plan says where it was measured.
         self.assertGreaterEqual(mirror.FIRST_START_WAIT, 3 * mirror.FIRST_START_SEEN)
@@ -2773,6 +2813,17 @@ class Promises(unittest.TestCase):
         for d in self.doc.get("declined", []):
             self.assertTrue(d.get("heard") and d.get("why"), "a declined lesson needs what was heard and why it was not taken")
 
+    def test_PROMISES_a_row_names_a_test_only_once_it_is_built(self):
+        """Rule 4 (the family's): a row's test field says one thing only, that this test exists and the runner
+        reports it; at any version, a row still to build included. An empty field is a row not yet built (where
+        its test will come from is in its issue). The gate (join_reports) counts each row's test as a proof."""
+        to_build = set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", self.plan))
+        for r in self.rows:
+            if r.get("test"):
+                self.assertIn(r["test"], self.tests, f"{r['id']} names {r['test']}, which is not a test the runner runs")
+                self.assertNotIn(r["test"], to_build, f"{r['id']} names a test the plan marks (to build)")
+                self.assertIn(f"`{r['test']}`", self.plan, f"{r['id']}: its test is not named in the plan")
+
     def test_PROMISES_no_version_ships_while_a_promise_due_in_it_is_not_built(self):
         for r in self.rows:
             if v(r["ship_in"]) <= self.version:
@@ -3024,9 +3075,15 @@ def gate(outcome, proofs):
     return refused, not_here
 
 
+def row_tests():
+    """Every built row's test (rule 4): the gate counts it as a proof like the plan's own."""
+    rows = jload(os.path.join(ROOT, "PROMISES.json"))["rows"]
+    return {r["test"] for r in rows if r.get("test")}
+
+
 def join_reports(paths, expect):
     reports = [jload(p) for p in paths]
-    proofs = plan_proofs()
+    proofs = plan_proofs() | row_tests()
     passed = set().union(*(set(r["passed"]) for r in reports)) if reports else set()
     refused = [x for r in reports for x in r["refused"]]
     if len(reports) != expect:
@@ -3059,7 +3116,7 @@ def main(argv):
         print("A part of the suite was run, so the gate was not applied.", file=sys.stderr)
         return 0 if result.wasSuccessful() else 1
     problems = shape_problems(os.path.abspath(__file__))
-    refused, not_here = gate(result.outcome, {gate_only} if gate_only else plan_proofs())
+    refused, not_here = gate(result.outcome, {gate_only} if gate_only else plan_proofs() | row_tests())
     refused = problems + refused
     for x in refused:
         print("GATE:", x)

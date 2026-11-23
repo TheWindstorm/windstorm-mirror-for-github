@@ -115,9 +115,9 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "test": "test_G2_3_a_key_that_can_write_is_named_for_what_it_is",
+   "test": "",
    "proven": "",
-   "issue": "",
+   "issue": "#23",
    "moved_why": "",
    "moved_by_person": ""
   },

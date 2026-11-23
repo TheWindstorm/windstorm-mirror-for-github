@@ -5,6 +5,15 @@ One script, Python standard library only. It installs stock Gitea at a pinned ve
 service, reachable from this computer only, and (in later genes) keeps a copy of every repository in it.
 The plan this is built from: DNA-STRAND-MASTER-PLAN.md. Run with `python3 -I mirror.py <command>`.
 """
+# G1.12: the lowest Python this names is checked first, before anything else is read or made. These lines, and the
+# whole file, stay readable by an older Python's grammar, so that an older Python reaches them and stops here.
+import sys
+if sys.version_info < (3, 9):
+    sys.stdout.write(
+        "Stopped: this is Python %d.%d.%d (%s), and this skill needs Python 3.9 or newer. Nothing was made. Run it "
+        "with a python3 of 3.9 or newer (python3 --version says which one runs); its tests pass on 3.9, 3.10 and "
+        "3.13.\n" % (sys.version_info[0], sys.version_info[1], sys.version_info[2], sys.executable or "python3"))
+    sys.exit(3)
 import argparse
 import base64
 import calendar
@@ -23,7 +32,6 @@ import stat
 import subprocess
 import tarfile
 import tempfile
-import sys
 import time
 import urllib.error
 import urllib.request

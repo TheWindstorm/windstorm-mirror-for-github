@@ -8,8 +8,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python: ["3.10", "3.13"]
+        # Named runner images, never "latest": a moved image is a change nobody reviewed. 3.9 is the floor the
+        # script checks first (G1.12; the python3 that comes with Apple's developer tools is 3.9.6 on macOS 13).
+        include:
+          - {os: ubuntu-24.04, python: "3.9"}
+          - {os: ubuntu-24.04, python: "3.10"}
+          - {os: ubuntu-24.04, python: "3.13"}
+          - {os: macos-26, python: "3.9"}
+          - {os: macos-26, python: "3.13"}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,7 +39,7 @@ jobs:
   gate:
     needs: test
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,10 +51,10 @@ jobs:
         with:
           pattern: report-*
           path: reports
-      - name: Every proof the plan names passed on at least one of the four jobs
-        run: python -I tests/test_mirror.py --join --expect 4 reports/*/report.json
+      - name: Every proof the plan names, and every built row's test, passed on at least one of the five jobs
+        run: python -I tests/test_mirror.py --join --expect 5 reports/*/report.json
   skill-spec:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
