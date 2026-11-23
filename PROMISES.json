@@ -372,6 +372,20 @@
    "issue": "#30",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M28",
+   "seen": "2026-11-23: both cold-start agents met `sudo apt install git-lfs` failing on a fresh Ubuntu 24.04 image. Then every line was run as written on fresh systems: on Ubuntu 24.04.5 `sudo apt install git` failed with a 404 on the stale list and `sudo apt install git-lfs` said 'Unable to locate package'; on Debian 13 (no package lists in the image) both said 'Unable to locate package'; the Fedora 45 dnf lines worked; on macOS 13.7.8 (Intel) with Homebrew, `brew install git-lfs` did not install git lfs and Homebrew called the system an unsupported 'Tier 3' configuration; `xcode-select --install` was seen only on Macs that already had the tools.",
+   "promise": "Every install line the tool or the README names was run as written on a fresh system first, and the plan's 'Install lines, as seen' table says where; the apt lines start with `sudo apt update &&`; the Mac's git line says it opens Apple's installer; large files on a Mac point to the project's own site, not brew.",
+   "codon": "G1.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded",
+   "proven": "",
+   "issue": "#32",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

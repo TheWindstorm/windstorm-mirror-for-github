@@ -490,7 +490,7 @@ class G1(unittest.TestCase):
                     rc, out = h.setup(*args)
                     self.assertEqual(rc, 2, out)
                     self.assertIn("git is not installed on this computer", out)
-                    self.assertIn("sudo apt install git", out)
+                    self.assertIn("sudo apt update && sudo apt install git", out)
                     self.assertIn("Nothing was changed", out)
                 self.assertFalse(os.path.exists(mirror.paths()["app_ini"]), "setup wrote settings with no git")
             finally:
@@ -522,6 +522,22 @@ class G1(unittest.TestCase):
             finally:
                 mirror.has_git_lfs = lfs
             self.assertIn("git lfs is not installed here", out)
+
+        # Every install command the tool names was run as written on a fresh system: it is in the plan's table.
+        # (Seen: the plain apt lines fail on fresh Ubuntu and Debian images; brew failed on an older Mac.)
+        plan, readme = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md")), fread(os.path.join(ROOT, "README.md"))
+        table = plan.split("### Install lines, as seen", 1)[1].split("Lines tried and NOT used", 1)[0]
+        cmd = r"(?:sudo apt update && )?sudo (?:apt|dnf) install [^;`)\n]+|xcode-select --install|brew install [^;`)\n]+"
+        for text, where in ((mirror.INSTALL_GIT + "; " + mirror.INSTALL_LFS, "the install lines"),
+                            (fread(SCRIPT), "the script"), (readme, "README.md")):
+            named = {c.strip().rstrip(".,") for c in re.findall(cmd, text)}
+            if where == "the install lines":
+                self.assertEqual(len(named), 5, named)
+            for line in sorted(named):
+                self.assertIn(f"`{line}`", table, f"{where} names a line never seen on a fresh system: {line}")
+            self.assertNotIn("brew install", text, where)
+            self.assertIsNone(re.search(r"(?<!&& )sudo apt install", text), f"an apt line without apt update in {where}")
+        self.assertIn("https://git-lfs.com", mirror.INSTALL_LFS)
 
     def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
         with Home() as h:
@@ -2258,6 +2274,7 @@ class Invariants(unittest.TestCase):
         # computer. The plist's DOCTYPE names Apple's DTD and is never fetched.
         allowed = {"http://127.0.0.1", "https://api.github.com", "https://github.com", "https://dl.gitea.com/gitea",
                    "https://github.com/TheWindstorm/windstorm-mirror-for-github", "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
+                   "https://git-lfs.com",                     # named to the person (M28), never reached
                    "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
         found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
         self.assertEqual(found - allowed, set(), "an address outside the allowed ones")
