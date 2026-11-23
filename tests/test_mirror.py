@@ -2233,14 +2233,43 @@ class Strand(unittest.TestCase):
         self.assertEqual([c for c, n in seen.items() if n > 1], [], "a codon is used for two claims")
 
 
+RELEASE_ONLY = {"README.md", "CHANGELOG.md", ".claude-plugin/plugin.json"}
+
+
+def release_branch():
+    """The branch's name when it is a release branch (release-X.Y.Z): from CI, or from git here; else ''. A pull
+    request into main never gets the exception: there the head is judged by main's own rule."""
+    if os.environ.get("GITHUB_BASE_REF") == "main":
+        return ""
+    name = os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME") or subprocess.run(
+        ["git", "-C", ROOT, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True).stdout.strip()
+    return name if re.fullmatch(r"release-\d+\.\d+\.\d+", name or "") else ""
+
+
 class Package(unittest.TestCase):
     def test_the_script_and_the_plugin_carry_the_same_version(self):
         self.assertEqual(mirror.VERSION, version())
 
     def test_nothing_is_offered_for_install_before_0_1_0(self):
-        """Until the first release the version stays 0.0.0 and the README says nothing can be installed."""
-        if v(version()) < (0, 1, 0):
-            self.assertIn("Nothing here can be installed yet", fread(os.path.join(ROOT, "README.md")))
+        """Until the first release the version stays 0.0.0 and the README says nothing can be installed. The one
+        exception is a release branch (release-X.Y.Z), where a cold start is sent before the tag: it may offer
+        the install, and it is main plus the README, the changelog and the manifest, nothing else."""
+        if v(version()) >= (0, 1, 0):
+            return
+        readme = fread(os.path.join(ROOT, "README.md"))
+        branch = release_branch()
+        if not branch:
+            self.assertIn("Nothing here can be installed yet", readme)
+            return
+        base = subprocess.run(["git", "-C", ROOT, "merge-base", "origin/main", "HEAD"], capture_output=True, text=True)
+        self.assertEqual(base.returncode, 0, f"{branch}: main is not here to compare with: {base.stderr.strip()}")
+        today = subprocess.run(["git", "-C", ROOT, "merge-base", "--is-ancestor", "origin/main", "HEAD"])
+        self.assertEqual(today.returncode, 0, f"{branch} does not hold today's main: merge main into it first")
+        changed = subprocess.run(["git", "-C", ROOT, "diff", "--name-only", base.stdout.strip(), "HEAD"],
+                                 capture_output=True, text=True).stdout.split()
+        self.assertTrue(changed, f"{branch} is main itself")
+        self.assertEqual(sorted(set(changed) - RELEASE_ONLY), [], f"{branch} differs from main outside {RELEASE_ONLY}")
+        self.assertIn("## Set it up", readme)
 
 
 # ------------------------------------------------------------------ the gate: what counts as a proof (M19)

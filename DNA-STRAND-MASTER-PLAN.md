@@ -229,6 +229,8 @@ reaches several owners, and a classic key that can read private repositories can
 | 0.1.x | Fixes from what real machines show. | The same. | Each fix has its row, its test and its proof. |
 | 0.2.0 | Candidates, not promises: wikis, Forgejo as a setting, Windows, a sync at wake (seen on a stock Ubuntu 24.04 VM, 2026-11-23: after a 90 s suspend the timer's next run moved later by exactly the time asleep, because `OnUnitActiveSec` counts on the boot clock, which stops in sleep; so after a night asleep the first sync comes up to one interval after the wake, not at once). | | Planned only after 0.1.0 has been out a while. |
 
+Before 0.1.0 nothing is offered for install: main's README says "Nothing here can be installed yet". The one exception is a release branch (`release-X.Y.Z`), to which a cold start is sent before the tag: it may offer the install only as today's main (main's tip is in it) plus the README, the changelog and the manifest, nothing else; a pull request into main never gets the exception, so the install lines reach main only with a version of 0.1.0 or more; and before every cold start main is merged into the release branch and its checks are read (`test_nothing_is_offered_for_install_before_0_1_0`).
+
 Order of work after this plan: the platform contracts first (written in `docs/CONTRACTS.md`), then one gene per
 pull request, G1 first and G10 last.
 
