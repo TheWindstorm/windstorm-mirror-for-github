@@ -1550,8 +1550,7 @@ def cmd_setup(args):
     elif wait_forge(st["port"], seconds=SETUP_WAIT):
         say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
     else:
-        say(f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{st['port']}/ "
-            f"after {SETUP_WAIT} s; `status` says when it does.")
+        say(not_answering_yet(p, st["port"], SETUP_WAIT))
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -2209,10 +2208,23 @@ def setup_from(p, args):
 
 # ---------------------------------------------------------------- G9 upgrades and uninstall
 
-SETUP_WAIT = 30          # seconds setup waits for the new forge to answer before it says so
+# G1.9: the slowest first answer measured: 25 s, after a restart, on a stock virtual machine with one processor,
+# 512 MB and a disk held to 30 MB/s and 80 operations a second (an old laptop's disk). Every wait for a forge's
+# first answer is more than three times that, and a forge not answering by then is said with its log's place.
+FIRST_START_SEEN = 25
+FIRST_START_WAIT = 90
+SETUP_WAIT = FIRST_START_WAIT   # seconds setup waits for the new forge to answer before it says so
 
 
-def wait_forge(port, up=True, seconds=60):
+def not_answering_yet(p, port, waited):
+    """G1.9: what 'not answering yet' means, and when the person should look again."""
+    return (f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{port}/ after "
+            f"{waited} s. On the slowest computer it was tried on, it answered within {FIRST_START_SEEN} s, so "
+            f"something is holding it up: run `status` in 5 minutes. If it still does not answer then, the forge's "
+            f"own words are the last lines of {os.path.join(p['forge'], 'log', 'gitea.log')}.")
+
+
+def wait_forge(port, up=True, seconds=FIRST_START_WAIT):
     for _ in range(seconds * 2):
         if port_answers(port) == up:
             if not up:
@@ -2278,7 +2290,7 @@ def cmd_upgrade_forge(args):
             why = "Gitea's migration failed: " + last_line(out.stderr or out.stdout)
         else:
             service(p, "start")
-            if not wait_forge(st["port"], up=True, seconds=90):
+            if not wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT):
                 why = "the new forge did not answer within 90 s"
             else:
                 code, ver = Forge(p, st).call("GET", "/version")
@@ -2292,7 +2304,7 @@ def cmd_upgrade_forge(args):
             st["gitea"] = cur
             save_state(p, st)
             service(p, "start")
-            back = wait_forge(st["port"], up=True, seconds=90)
+            back = wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT)
             say(f"The upgrade to Gitea {new} failed: {why}. "
                 + (f"The old forge, Gitea {cur}, is back with its database as it was before."
                    if back else f"The old forge, Gitea {cur}, was put back but does not answer yet; run status.")

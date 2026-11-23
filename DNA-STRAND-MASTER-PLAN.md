@@ -137,6 +137,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.9 | Lingering changes how the person's computer behaves after they log out, so: the dry run says, in plain words, what it means before setup; it asks this computer (polkit, never with a password prompt, with a time limit) whether the person may switch it on themselves, and says one of three things: yes, no (the administrator's one command), or not known (setup will try, without a password, and the command in case it is refused); setup switches it on without a password prompt and records that it did; `uninstall` switches it off only when setup switched it on, and says which; `setup --no-linger` never tries, and says the mirror then syncs only while the person is logged in. The choice is the person's, and the tool carries it: on Linux with lingering off, plain `setup` changes nothing (no download), prints the sentence and the two choices, `--linger` or `--no-linger`, and ends with "Needs you"; where the person may not switch it on themselves, `--linger` ends on the administrator's command. A no is kept, so a later plain `setup` does not ask again. | `test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it` |
 | G1.10 | Setup says the forge runs only once it answers; otherwise it says the service was started and the forge was not answering yet (seen: the first `status` right after setup, on a stock machine, found the forge still starting). | `test_G1_10_setup_says_the_forge_runs_only_once_it_answers` |
 | G1.7 | On a Mac, the forge comes back by itself after a restart only when the system logs the person in by itself (automatic login set to them, FileVault off). Otherwise setup says the copy stands still until they log in, and why. Of the automatic-login setting it keeps only whether it is set and whether it is this person's own account; another account's name is never said or kept. | `test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login` |
+| G1.11 | Every wait for a forge's first answer (setup's, upgrade-forge's, and the tests') is `FIRST_START_WAIT`, more than three times the slowest first answer measured on a slow machine (`FIRST_START_SEEN`, "First start, as measured"). When the forge is not answering by then, setup says what that means, to run `status` in 5 minutes, and where the forge's own log is. A test that waits for the forge and fails carries the forge's last log lines (M33). | `test_G1_11_the_first_start_waits_are_measured_and_said` |
 
 ### G2 The GitHub keys: one read-only key per owner, each in its own file, each watched
 
@@ -354,6 +355,23 @@ Lines tried and NOT used, so that no one puts them back:
 - `brew install git-lfs`: on macOS 13.7.8 (Intel), with Homebrew installed, it did not install git lfs; Homebrew
   called the system an unsupported "Tier 3" configuration. The other test Mac's Homebrew belongs to another
   account and was not touched.
+
+### First start, as measured
+
+Row M33. A stock Ubuntu 24.04.5 virtual machine, a fresh disk each run, the skill's own setup run by a person
+account with no administrator rights, each line time-stamped, and a poller asking the forge's `/api/healthz` twice
+a second (2026-11-23). Seconds from the service's start (its journal)
+to the first answer:
+
+| Machine | First start after setup | Restart | Restart, file cache emptied | After a restart of the machine |
+|---|---|---|---|---|
+| 1 processor, 1 GB | 3.1 | 0.5, 0.5 | 0.9 | 3.6 |
+| 1 processor, 512 MB, disk held to 30 MB/s and 80 operations a second | 4.7 | 1.0, 0.5 | 5.3 | 25 at most (the check began only when SSH let it in) |
+
+Gitea's own preparation of its database and the two accounts, which setup runs before the service and does not
+count in the wait, took 19 s and 78 s. `FIRST_START_SEEN` is 25 and `FIRST_START_WAIT` is 90. The one first
+start seen slower than this was on GitHub's hosted runner (more than 60 s, once, in CI run 45135376324); it is not
+explained by a slow processor, little memory or a slow disk, and a test that waits now fails with the forge's log.
 
 ## Not verified
 
