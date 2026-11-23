@@ -1517,8 +1517,8 @@ class G4(unittest.TestCase):
             self.assertIn("3 GitHub API call(s)", quiet(mirror.main, ["status"])[1])
 
     def test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project(self):
-        """GitHub's allowance is shared with everything else the person runs with their keys (a lane once spent the
-        fleet's in minutes). Both of GitHub's ways of saying "spent" become one line with the reset in the person's
+        """GitHub's allowance is shared with everything else the person runs with their keys (another program on a
+        shared login once spent it in minutes). Both of GitHub's ways of saying "spent" become one line with the reset in the person's
         own time; nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project
         is marked as failed, and every copy is as it was."""
         with World(self) as w:
@@ -2854,6 +2854,25 @@ class G10(unittest.TestCase):
             self.assertRegex(heads[0], "^" + re.escape(ver) + r"(?: \(\d{4}-\d{2}-\d{2}\))?$", "the changelog's heading")
             self.assertNotIn("Unreleased", heads[:1])
 
+    def test_G10_10_public_text_names_roles_never_our_own_labels(self):
+        """The family's rule 18: public text names kinds and roles ('another program sharing the login', 'a sister
+        skill'), never our own labels for how we work. The words are built here so this file does not hold them."""
+        ours = [re.compile(r"\b" + w + r"\b", re.I) for w in ("la" + "nes?", "fl" + "eet", "test-" + "now", "board-" + "say")]
+        files = subprocess.run(["git", "-C", ROOT, "ls-files"], capture_output=True, text=True).stdout.split()
+        self.assertGreater(len(files), 10)
+        found = []
+        for name in files:
+            if name in ("LICENSE", "NOTICE") or not os.path.isfile(os.path.join(ROOT, name)):
+                continue
+            try:
+                text = fread(os.path.join(ROOT, name))
+            except UnicodeDecodeError:
+                continue
+            for n, line in enumerate(text.splitlines(), 1):
+                if any(p.search(line) for p in ours):
+                    found.append(f"{name}:{n}")
+        self.assertEqual(found, [])
+
     def test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step(self):
         """Two cold starts (2026-11-23): the smallest model sent the person to key set before setup, twice. Our
         words gave it room: step 2 made the keys before setup and nothing said the paste waits. Now the order says
@@ -3141,7 +3160,7 @@ class Strand(unittest.TestCase):
                          ["pull_request:", "push:", "branches: [main, 'release-*']"])
 
     def test_the_gate_refuses_every_way_a_test_can_hide(self):
-        """M19: one real test, hidden each way a sister lane found, in a throwaway copy of the suite. The gate
+        """M19: one real test, hidden each way a sister skill found, in a throwaway copy of the suite. The gate
         (`--gate-only`) must refuse each one, and accept the copy left as it is."""
         name = "test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login"
         src = fread(os.path.abspath(__file__))
