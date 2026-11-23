@@ -732,22 +732,35 @@ def read_key_from_stdin():
     return sys.stdin.readline().strip()
 
 
+def gh_unread(code):
+    """G5.5 (M52): a read of GitHub that got no answer is said as that, never as an answer of 0 (a real machine with
+    its road cut was told "GitHub answered 0")."""
+    return "GitHub could not be reached" if not code else f"GitHub did not answer as expected ({code})"
+
+
 def check_key(key, owner):
-    """(kind, message): kind is 'user' or 'org' when the key reaches that owner's repositories, else None."""
+    """(kind, message): kind is 'user' or 'org' when the key reaches that owner's repositories, else None. No
+    answer, or GitHub's own failure (5xx), is "could not be read", never "this key cannot see" (G5.4, G5.5)."""
     code, _, body = gh_get(key, "/user")
     if code == 401:
         return None, "GitHub refused this key (401). Make a new one; nothing was kept."
     if code != 200:
-        return None, f"GitHub did not answer as expected ({code}); nothing was kept. Run key set again in a few minutes."
+        return None, gh_unread(code) + "; nothing was kept. Run key set again in a few minutes."
     if (body or {}).get("login", "").lower() == owner.lower():
         kind, listing = "user", "/user/repos?affiliation=owner&per_page=1"
     else:
         code, _, _ = gh_get(key, f"/orgs/{urllib.parse.quote(owner)}")
+        if not code or code >= 500:
+            return None, (f"{gh_unread(code)} when asked about '{owner}'; nothing was kept. Run key set again in "
+                          "a few minutes.")
         if code != 200:
             return None, (f"This key cannot see '{owner}' (GitHub answered {code}). A key belongs to one owner: "
                           "make one for this owner. Nothing was kept.")
         kind, listing = "org", f"/orgs/{urllib.parse.quote(owner)}/repos?per_page=1"
     code, _, _ = gh_get(key, listing)
+    if not code or code >= 500:
+        return None, (f"{gh_unread(code)} when asked for the repositories of '{owner}'; nothing was kept. Run key "
+                      "set again in a few minutes.")
     if code != 200:
         return None, (f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). Nothing was "
                       "kept. Check the key's resource owner and repository access on GitHub's key page, then run key "
@@ -850,7 +863,8 @@ def list_owner(owner, kind, key, floor=0, info=None):
             return None, (f"GitHub refused the key for {owner} (401): the key stopped working (it may have expired, "
                           f"been narrowed or lost an organisation's approval). Make a new one and run key set {owner}"), calls
         if code != 200 or not isinstance(body, list):
-            return None, f"the listing of {owner} failed at page {page} (GitHub answered {code})", calls
+            return None, (f"the listing of {owner} failed at page {page} ("
+                          + (f"GitHub answered {code})" if code else "GitHub could not be reached)")), calls
         repos.extend(r for r in body if r.get("owner", {}).get("login", "").lower() == owner.lower())
         url = next_link(headers)
     return repos, None, calls

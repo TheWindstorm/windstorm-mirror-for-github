@@ -793,6 +793,22 @@
    "issue": "#81",
    "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine: status | head -3 ended in a Python traceback (a broken pipe).",
    "promise": "A reader that stops reading never gets a traceback: the tool does the whole of its work, ends with its own code, and the rest of its words go nowhere."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M52",
+   "codon": "G5.5",
+   "test": "test_G5_5_github_out_of_reach_is_said_so_never_a_code_or_a_no",
+   "stand_in": "GitHub (a closed port, and a stand-in that fails one read)",
+   "exception": "",
+   "issue": "#85",
+   "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine with its road to GitHub cut: sync said 'GitHub answered 0'. Reading the code then found key set saying 'this key cannot see' on no answer or a 5xx.",
+   "promise": "A read of GitHub that got no answer is said as 'GitHub could not be reached', never as an answer of 0; in key set, no answer or GitHub's own failure is never 'this key cannot see': nothing is kept, and the step is to run key set again."
   }
  ],
  "declined": []

@@ -858,6 +858,37 @@ class G2(unittest.TestCase):
             sys.stdin = saved
         return rc, out.getvalue()
 
+    def test_G5_5_github_out_of_reach_is_said_so_never_a_code_or_a_no(self):
+        """A real machine with its road to GitHub cut (2026-11-23) was told "GitHub answered 0". No answer is said
+        as "could not be reached"; and in key set, no answer or GitHub's own failure (5xx) is never "this key
+        cannot see": nothing is kept, and the step is to run key set again."""
+        api = os.environ["WSM_GITHUB_API"]
+        os.environ["WSM_GITHUB_API"] = f"http://127.0.0.1:{mirror.free_port()}"      # nothing listens there
+        try:
+            repos, why, _ = mirror.list_owner("someone", "user", self.gh.key)
+            self.assertIsNone(repos)
+            self.assertEqual(why, "the listing of someone failed at page 1 (GitHub could not be reached)")
+            rc, out = self.key_set("acme", self.gh.key)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("GitHub could not be reached; nothing was kept. Run key set again in a few minutes.", out)
+        finally:
+            os.environ["WSM_GITHUB_API"] = api
+        real = mirror.gh_get
+        for step in ("/orgs/", "/repos?"):
+            for code in (0, 502):
+                def gh_get(key, path, step=step, code=code):
+                    return (code, {}, {"message": "x"}) if step in path else real(key, path)
+                mirror.gh_get = gh_get
+                try:
+                    rc, out = self.key_set("acme", self.gh.key)
+                finally:
+                    mirror.gh_get = real
+                self.assertNotEqual(rc, 0, out)
+                self.assertNotIn("cannot", out, f"{step} answered {code}: said as a no")
+                self.assertNotIn("answered 0", out)
+                self.assertIn("nothing was kept. Run key set again in a few minutes.", out)
+                self.assertFalse(os.path.exists(mirror.key_path(mirror.paths(), "acme")))
+
     def test_G2_6_a_key_is_never_taken_before_setup(self):
         """The cold start's run B told the person to run key set before setup. Setup comes first: before it, key set
         reads no key and keeps nothing, so every key lands where uninstall and the key scan already look."""
