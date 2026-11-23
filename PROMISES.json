@@ -552,7 +552,7 @@
    "codon": "T4",
    "test": "test_T4_mac_jobs_are_shared_so_a_pull_request_runs_one",
    "issue": "#96",
-   "seen": "2026-11-23: one afternoon had 34 runs queued and none running, Mac runners being shared by the family's five repositories; two lanes waited about an hour each.",
+   "seen": "2026-11-23: one afternoon had 34 runs queued and none running, Mac runners being shared by the family's five repositories; changes in two of them waited about an hour each.",
    "promise": "A pull request runs one Mac job, the floor's Python; the full Mac matrix runs on main and release-*; the gate expects the reports of the event it runs on; a newer push to a pull request cancels its older runs, never a run on main or a release branch."
   }
  ],
