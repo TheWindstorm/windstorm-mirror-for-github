@@ -107,7 +107,12 @@ def say(msg=""):
     msg = str(msg)
     for s in SECRETS:
         msg = msg.replace(s, "<a key>")
-    print(msg, flush=True)
+    try:
+        print(msg, flush=True)
+    except BrokenPipeError:
+        # G6.11 (M49): the reader stopped reading (`status | head`). The work goes on to its end; the rest of its
+        # words go nowhere, rather than a traceback, or a sync stopped halfway through by a closed pipe.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def tell(lines):
