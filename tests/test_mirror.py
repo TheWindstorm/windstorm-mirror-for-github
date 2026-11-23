@@ -209,7 +209,10 @@ class Home:
         os.chmod(p["bin"], 0o755)
         return p
 
-    def setup(self, *args):
+    def setup(self, *args, choose=True):
+        """choose: the person already said yes to lingering (--linger), unless the test says otherwise."""
+        if choose and not {"--dry-run", "--linger", "--no-linger"} & set(args):
+            args = (*args, "--linger")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = mirror.main(["setup", *args])
@@ -422,7 +425,8 @@ class G1(unittest.TestCase):
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
             reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"],
                      ["pkcheck", "--action-id"])                                                  # read-only checks
-            self.assertFalse([c for c in h.calls if c[:2] not in reads], "the dry run ran a command that changes something")
+            changed = [c for c in h.calls if c[:2] not in reads and c[:3] != ["systemctl", "--user", "show-environment"]]
+            self.assertFalse(changed, "the dry run ran a command that changes something")
             p = h.place_gitea()
             self.assertEqual(h.setup()[0], 0)
             first = (fread(p["app_ini"]), fread(p["password"]), fread(p["mirror_key"]), mirror.forge_users(p))
@@ -491,6 +495,22 @@ class G1(unittest.TestCase):
                 self.assertFalse(os.path.exists(mirror.paths()["app_ini"]), "setup wrote settings with no git")
             finally:
                 mirror.shutil.which, mirror.fetch_forge = which, fetch
+        with Home() as h:                                             # git only where the service never looks
+            which, fetch = mirror.shutil.which, mirror.fetch_forge
+            mirror.shutil.which = (lambda c, *a, **k: (None if k.get("path") else "/home/someone/bin/git")
+                                   if c == "git" else which(c, *a, **k))
+            mirror.fetch_forge = lambda *a, **k: (_ for _ in ()).throw(AssertionError("setup downloaded Gitea"))
+            try:
+                for args in (["--dry-run"], []):
+                    rc, out = h.setup(*args)
+                    self.assertEqual(rc, 2, out)
+                    self.assertIn("git is at /home/someone/bin/git, in a folder the mirror's service does not look in",
+                                  out)
+                    self.assertIn("Nothing was changed", out)
+                self.assertIn(["systemctl", "--user", "show-environment"], h.calls)
+                self.assertFalse(os.path.exists(mirror.paths()["app_ini"]))
+            finally:
+                mirror.shutil.which, mirror.fetch_forge = which, fetch
         r = mirror.run(["wsm-a-program-that-is-not-here"])            # never a traceback
         self.assertEqual((r.returncode, "not installed" in r.stderr), (127, True))
         with Home() as h:
@@ -524,8 +544,8 @@ class G1(unittest.TestCase):
         try:
             # (a, b) The dry run says what lingering means, from this computer's own three answers.
             for code, said in ((0, "this computer lets you do that yourself"), (1, "administrator runs one command"),
-                               (2, "administrator runs one command"), (127, "Setup will try"),
-                               (None, "Setup will try"), ("timeout", "Setup will try")):
+                               (2, "administrator runs one command"), (127, "setup --linger tries"),
+                               (None, "setup --linger tries"), ("timeout", "setup --linger tries")):
                 with Home(linger="no") as h:
                     h.pkcheck = code
                     rc, out = h.setup("--dry-run")
@@ -575,6 +595,33 @@ class G1(unittest.TestCase):
                 back, note = mirror.linger_step({})
                 self.assertFalse(back)
                 self.assertIn(f"administrator runs one command: sudo loginctl enable-linger {me}", note)
+            # (e) Plain setup, lingering off: nothing changes until the person has said yes or no (--linger or
+            # --no-linger); not even a download. With lingering already on, there is nothing to choose.
+            for may in (0, 1):
+                with Home(linger="no", enable_linger_ok=True) as h:
+                    h.pkcheck = may
+                    fetch = mirror.fetch_forge
+                    mirror.fetch_forge = lambda *a, **k: (_ for _ in ()).throw(AssertionError("setup downloaded"))
+                    try:
+                        rc, out = h.setup(choose=False)
+                    finally:
+                        mirror.fetch_forge = fetch
+                    self.assertEqual(rc, 2, out)
+                    self.assertIn(mirror.LINGER_MEANS, out)
+                    self.assertIn("Needs you: lingering is the person's choice", out)
+                    self.assertIn("--linger", out)
+                    self.assertIn("--no-linger", out)
+                    self.assertFalse([c for c in h.calls if "enable-linger" in c], "plain setup switched lingering on")
+                    self.assertFalse(os.path.exists(mirror.paths()["app_ini"]), "plain setup changed something")
+                    if may == 1:
+                        self.assertIn(f"sudo loginctl enable-linger {me}", out)
+            ns = mirror.argparse.Namespace
+            with Home(linger="no") as h:
+                self.assertTrue(mirror.linger_unchosen(ns(), {}))
+                self.assertFalse(mirror.linger_unchosen(ns(), {"linger_said": "no"}))   # a no is kept for next time
+                self.assertFalse(mirror.linger_unchosen(ns(linger=True), {}))
+            with Home(linger="yes") as h:
+                self.assertFalse(mirror.linger_unchosen(ns(), {}))
             # (d) The person says no: setup still works, and says what that costs.
             with Home(linger="no", enable_linger_ok=True) as h:
                 st = {}
@@ -1894,13 +1941,22 @@ class G9(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(repos)), ["someone--alpha.git", "someone--beta.git"])
             self.assertIn(f"Left: the folder of copies, {p['data']} (2 copies).", out)
             saved = sys.stdin
+
+            class AtTerminal(io.StringIO):
+                def isatty(self):
+                    return True
             try:
-                sys.stdin = io.StringIO("1\n")
+                sys.stdin = io.StringIO("2\n")                         # piped in, even the right number: refused
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                self.assertEqual(rc, 2, out)
+                self.assertIn("in a terminal window of their own", out)
+                self.assertTrue(os.path.exists(repos))
+                sys.stdin = AtTerminal("1\n")
                 rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
                 self.assertEqual(rc, 1)
                 self.assertIn("That is not 2. The copies were not deleted.", out)
                 self.assertTrue(os.path.exists(repos))
-                sys.stdin = io.StringIO("2\n")
+                sys.stdin = AtTerminal("2\n")
                 rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
             finally:
                 sys.stdin = saved
@@ -1955,7 +2011,7 @@ class G10(unittest.TestCase):
         order = section(body, "The order")
         steps = re.findall(r"^(\d+)\. (.+?)(?=^\d+\. |\Z)", order, re.M | re.S)
         self.assertEqual([int(n) for n, _ in steps], list(range(1, 9)))
-        want = ["`M setup --dry-run`", "the keys to make", "`M setup`", "`key set`", "`M sync --announce`",
+        want = ["`M setup --dry-run`", "the keys to make", "`M setup --linger`", "`key set`", "`M sync --announce`",
                 "`M sync`", "`M status`", "`M restore --check`"]
         for (n, text), w in zip(steps, want):
             self.assertTrue(text.startswith(w) or text.startswith("**Person**: " + w.strip("`")) or w in text.split(".")[0],
@@ -1969,7 +2025,7 @@ class G10(unittest.TestCase):
     def test_G10_3_every_step_that_is_the_persons_is_named_with_what_to_say(self):
         _, _, body = skill_front()
         steps = section(body, "The person's steps")
-        for name in ("Logging in to GitHub.", "Making each key.", "An organisation's approval.",
+        for name in ("Logging in to GitHub.", "Making each key.", "An organisation's approval.", "Lingering.",
                      "The go for the first copy.", "The administrator's command."):
             m = re.search(rf"\*\*{re.escape(name)}\*\*(.*?)(?=\n\n|\Z)", steps, re.S)
             self.assertTrue(m, name)
@@ -1978,7 +2034,10 @@ class G10(unittest.TestCase):
         self.assertRegex(steps, r"Agree, Accept or\s+Continue, never press it")
         order = section(body, "The order")
         marked = [n for n, text in re.findall(r"^(\d+)\. (.+?)(?=^\d+\. |\Z)", order, re.M | re.S) if "**Person**" in text]
-        self.assertEqual(marked, ["2", "3", "4", "5"], "the person's steps in the order are not the ones named")
+        self.assertEqual(marked, ["1", "2", "3", "4", "5"], "the person's steps in the order are not the ones named")
+        # The key is typed in a terminal of the person's own, never behind `!` (what runs there is shown to the agent).
+        self.assertIn("in a terminal window of their own", order)
+        self.assertNotIn("`! ", body)
         # What the skill says about lingering matches what setup itself prints (G1.6).
         self.assertIn("sudo loginctl enable-linger", steps)
         self.assertIn("sudo loginctl enable-linger", fread(SCRIPT))
