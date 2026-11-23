@@ -414,6 +414,20 @@
    "issue": "#35",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M32",
+   "seen": "2026-11-23, the cold start's run B: a second owner's key was held back until the include list stood, and only the person's care did that; had the agent announced before `config include`, the person's yes would have copied every project of the owner.",
+   "promise": "The announcement names the projects (20 by name, then 'and N more', the whole list in a file only the person can read), and the first copy copies exactly the list last announced; if the list changed, nothing is copied, it is said again, and a new go is asked.",
+   "codon": "G3.9",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G3_9_the_go_copies_only_what_the_last_announcement_named",
+   "proven": "",
+   "issue": "#36",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

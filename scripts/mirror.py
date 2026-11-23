@@ -74,6 +74,7 @@ def paths():
         "app_ini": os.path.join(forge, "custom", "conf", "app.ini"),
         "script": os.path.join(data, "mirror.py"),
         "state": os.path.join(data, "state.json"),
+        "first_copy_list": os.path.join(data, "first-copy-list.txt"),
         "password": os.path.join(conf, "forge-password"),
         "mirror_key": os.path.join(conf, "forge-mirror-key"),
         "keys": os.path.join(conf, "keys"),
@@ -1221,6 +1222,34 @@ def epoch_of(stamp):
         return 0
 
 
+
+ANNOUNCE_NAMES = 20
+
+
+def first_copy_names(picked):
+    return sorted((r["full_name"] for _, _, r in picked.values()), key=str.lower)
+
+
+def announce_first_copy(p, st, picked, complete):
+    """G3.7, G3.9: what the person says yes to, named: how many, which (the first ANNOUNCE_NAMES by name, the whole
+    list in a file of the person's own), how big, where they go, what is not copied, how private. It is kept, and the
+    go copies exactly this list."""
+    names = first_copy_names(picked)
+    size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
+    write_file(p["first_copy_list"], "".join(n + "\n" for n in names), 0o600)
+    more = len(names) - ANNOUNCE_NAMES
+    tell([f"The first copy: {len(names)} repositories from {len(complete)} owner(s), "
+          f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).",
+          ("They are: " + ", ".join(names[:ANNOUNCE_NAMES])
+           + (f", and {more} more; the whole list is in {p['first_copy_list']}." if more > 0 else ".")) if names
+          else "There are none to copy yet.",
+          f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
+          f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
+          NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
+    st["announced"] = st.get("announced") or now_utc()
+    st["announced_list"] = names
+    save_state(p, st)
+
 def sync(p, args):
     st = load_json(p["state"], {})
     s = load_json(p["settings"], {})
@@ -1286,19 +1315,29 @@ def sync(p, args):
             say("The first copy is not announced: the list of projects could not be read for "
                 + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
             return 1
-        size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
-        tell([f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
-              f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).",
-              f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
-              f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
-              NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
-        st["announced"] = st.get("announced") or now_utc()
-        save_state(p, st)
+        announce_first_copy(p, st, picked, complete)
         say("Nothing was copied. When the person says go, run: sync")
         return 0
     if not st.get("announced"):
         say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
         return 2
+    if not st.get("go"):
+        # G3.9: the go covers exactly what the person was last told. If the list changed since (the include list,
+        # a key for another owner, a project that appeared or went), nothing is copied: it is said again, and the
+        # person's go is asked again. Only for the first copy; afterwards new projects join by themselves.
+        names = first_copy_names(picked)
+        if names != st.get("announced_list"):
+            if len(complete) < len(owners):
+                say("The first copy did not start: the list of projects could not be read for " + "; ".join(problems)
+                    + ". Nothing was changed. Run sync again when GitHub answers.")
+                return 1
+            told = set(st.get("announced_list") or [])
+            more, fewer = len([n for n in names if n not in told]), len([n for n in told if n not in names])
+            say(f"Needs you: the first copy would not be what the person was told ({more} more and {fewer} fewer "
+                "than the last announcement). Nothing was copied. It is said again here:")
+            announce_first_copy(p, st, picked, complete)
+            say("Give the person the block above; when they say go to this list, run: sync")
+            return 2
     st["go"] = st.get("go") or now_utc()
     forge = Forge(p, st)
     done, unchanged, started = 0, 0, time.time()

@@ -74,6 +74,8 @@ mirror to keep running when you are logged out and after a restart?" Their yes i
 
 **The go for the first copy.** After step 5, say: "That is what will be copied. Shall I start the first copy?"
 Only a clear yes from the person is the go. Do not take silence, or an earlier yes to something else, as the go.
+The go covers the list the person was told. If `sync` says the first copy would not be what they were told, it
+copies nothing and prints the new block: give it whole, and ask for the go again.
 
 **The administrator's command.** If setup says the copy stands still after a restart until the person logs in,
 and prints a command such as `sudo loginctl enable-linger <user>`, say: "To keep the copy current after a restart
