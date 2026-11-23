@@ -1180,6 +1180,12 @@ def save_state(p, st):
     write_file(p["state"], json.dumps(st, indent=1) + "\n", 0o600)
 
 
+def local_time(stamp):
+    """A recorded UTC time, said in this computer's own time zone, the way the person reads a clock."""
+    t = epoch_of(stamp)
+    return time.strftime("%a %Y-%m-%d %H:%M %Z", time.localtime(t)) if t else str(stamp)
+
+
 def epoch_of(stamp):
     try:
         return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
@@ -1192,7 +1198,7 @@ def sync(p, args):
     s = load_json(p["settings"], {})
     owners = s.get("owners") or {}
     if getattr(args, "from_timer", False) and not st.get("go"):
-        say("waiting for the person's go: the first copy starts with a sync they ask for")
+        say("waiting for the person's go: nothing is copied until they say go and a sync is run on their word")
         return 0
     if not st.get("port") or not os.path.exists(p["mirror_key"]):
         say("Run setup first.")
@@ -1239,23 +1245,28 @@ def sync(p, args):
     if s.get("include") and not picked and found:
         say("The include list matches no repository GitHub shows; the sync stops rather than copy everything.")
         return 2
-    if not st.get("announced") and not args.announce:
-        say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
-        return 2
-    if args.announce and not st.get("announced") and len(complete) < len(owners):
-        say("The first copy is not announced: the list of projects could not be read for "
-            + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
-        return 1
-    if args.announce and not st.get("announced"):
+    if args.announce:
+        # G3.7: the announcement never copies, the first time or any time after; only a plain sync is the go.
+        if st.get("go"):
+            say(f"The first copy was made on {local_time(st['go'])}, on the person's go; there is nothing to "
+                "announce, and nothing was copied now. The timer keeps the copies current.")
+            return 0
+        if len(complete) < len(owners):
+            say("The first copy is not announced: the list of projects could not be read for "
+                + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
+            return 1
         size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
         say(f"The first copy: {len(picked)} repositories from {len(complete)} owner(s), "
             f"{size / 1024:.1f} MB as GitHub reports it (GitHub can show 0 for a new repository).")
         say(NOT_COPIED)
         say(PRIVATE_AS_THIS_COMPUTER)
-        st["announced"] = now_utc()
+        st["announced"] = st.get("announced") or now_utc()
         save_state(p, st)
-        say("When the person says go, run: sync")
+        say("Nothing was copied. When the person says go, run: sync")
         return 0
+    if not st.get("announced"):
+        say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
+        return 2
     st["go"] = st.get("go") or now_utc()
     forge = Forge(p, st)
     done, unchanged, started = 0, 0, time.time()
@@ -1689,6 +1700,8 @@ def cmd_status(args):
     for x in problems:
         say(f"problem: {x}")
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable")
+    say(f"first copy: made on {local_time(st['go'])}, on your go" if st.get("go") else
+        "first copy: waiting for your go (sync --announce says what will be copied; a sync on your word starts it)")
     for x in notes:
         say(x)
     say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "

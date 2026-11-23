@@ -994,13 +994,41 @@ class G3(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("The first copy: 5 repositories from 1 owner(s), 2.0 MB as GitHub reports it", out)
             self.assertIn("as private as this computer", out)
-            self.assertIn("When the person says go, run: sync", out)
+            self.assertIn("Nothing was copied. When the person says go, run: sync", out)
             self.assertEqual(w.forge_get("/user/repos")[1], [], "the announcement copied something")
+            # Seen in a cold start (P1a run B, 2026-11-23): an agent ran --announce again "to re-check", and the
+            # tool made the first copy without the go. Every later announcement says it all again, copies nothing.
+            for again in (2, 3):
+                rc, out = w.sync("--announce")
+                self.assertEqual(rc, 0, out)
+                self.assertIn("The first copy: 5 repositories", out)
+                self.assertIn("Nothing was copied.", out)
+                self.assertEqual(w.forge_get("/user/repos")[1], [], f"announcement {again} copied something")
+            rc, out = w.sync("--from-timer")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("waiting for the person's go", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "the timer copied before the go")
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(st.get("announced"))
+            self.assertNotIn("go", st)
+            self.assertIn("first copy: waiting for your go", quiet(mirror.main, ["status"])[1])
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertRegex(out, r"first copy: 3 of 5 done; about \d+ min left at this pace")
+            go = mirror.load_json(w.p["state"], {})["go"]
+            self.assertRegex(go, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertIn(f"first copy: made on {mirror.local_time(go)}, on your go",
+                          quiet(mirror.main, ["status"])[1])
             rc, out = w.sync()
             self.assertNotIn("first copy:", out)
+            before = w.forge_refs("someone--r1")
+            w.gh.commit("someone/r1", {"b": b"2"})
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("The first copy was made on", out)
+            self.assertNotIn("The first copy: 5", out)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["go"], go, "an announcement moved the go")
+            self.assertEqual(w.forge_refs("someone--r1"), before, "an announcement after the go copied")
 
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():
@@ -1451,7 +1479,7 @@ class G5(unittest.TestCase):
             self.assertGreater(tried, 20, "too few reads were failed to call this a proof")
             # Before the first copy: a list that could not be read is never announced as 0 repositories.
             st = mirror.load_json(w.p["state"], {})
-            saved = st.pop("announced"), st.pop("first_copy_done", None)
+            saved = st.pop("announced"), st.pop("first_copy_done", None), st.pop("go", None)
             mirror.save_state(w.p, st)
             rc, out, _ = under(["sync", "--announce"], "github api", 0, "outage")
             self.assertNotEqual(rc, 0, out)
@@ -1459,7 +1487,7 @@ class G5(unittest.TestCase):
             self.assertIn("could not be read", out)
             self.assertFalse(mirror.load_json(w.p["state"], {}).get("announced"), "an announcement made on a failed read")
             st = mirror.load_json(w.p["state"], {})
-            st["announced"], st["first_copy_done"] = saved
+            st["announced"], st["first_copy_done"], st["go"] = saved
             mirror.save_state(w.p, st)
             # GitHub answers 404 for a private repository both when it was deleted and when the key can no longer see
             # it. So "gone" is earned only when a list read that SUCCEEDED, with the same key, no longer names the

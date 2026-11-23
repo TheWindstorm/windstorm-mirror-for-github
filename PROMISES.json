@@ -344,6 +344,20 @@
    "issue": "#26",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M26",
+   "seen": "2026-11-23, a cold start on a stock Ubuntu 24.04 virtual machine (a fresh agent, the smallest model, given one sentence): after the announcement and the question for the go, the agent ran `sync --announce` again to re-check, and the tool made the first copy without the go.",
+   "promise": "`sync --announce` never copies, the first time or any time after; the go is a sync run on the person's word, recorded with its time, and `status` says whether the first copy was made on the person's go or still waits for it.",
+   "codon": "G3.7",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts",
+   "proven": "",
+   "issue": "#28",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

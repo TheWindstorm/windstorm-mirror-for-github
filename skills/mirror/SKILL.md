@@ -38,6 +38,7 @@ what the tool printed and wait; do not install, change or work around anything y
    on a command line, in a file you write or in your own output, and never ask for one.
 5. `M sync --announce`. Read its lines to the person: how many repositories, how big, what is not copied, and
    that the copy is as private as this computer. Then the **Person** step: the go for the first copy.
+   Running `--announce` again copies nothing; it says it all again.
 6. `M sync`, only after the person said go. The first copy can take a while; it says how far it is.
 7. `M status`. Show the person its `copies:` line and every `problem:` line.
 8. `M restore --check`. Show the person its total. It proves every copy from the forge alone.
