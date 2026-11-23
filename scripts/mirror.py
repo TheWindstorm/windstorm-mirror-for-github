@@ -130,8 +130,12 @@ def write_file(path, text, mode=0o644):
 
 
 def run(cmd, **kw):
-    """Every outside command goes through here, so tests can stand in for the ones a CI machine lacks."""
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    """Every outside command goes through here, so tests can stand in for the ones a CI machine lacks. A program
+    that is not installed answers 127 with a plain sentence, never a traceback (seen: a computer with no git)."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]} is not installed on this computer")
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -392,9 +396,8 @@ def sync_timer_text(minutes):
 Description=Windstorm Mirror for GitHub: a sync every {minutes} minutes
 
 [Timer]
-OnBootSec=5min
+OnStartupSec=2min
 OnUnitActiveSec={minutes}min
-Persistent=true
 
 [Install]
 WantedBy=timers.target
@@ -440,14 +443,33 @@ def next_sync():
             return "", "the sync timer is not loaded"
         m = re.search(r"run interval = (\d+) seconds", out.stdout)
         return (f"every {int(m.group(1)) // 60} min (launchd keeps no next-run time)" if m else "loaded"), ""
-    out = run(["systemctl", "--user", "show", SYNC_UNIT + ".timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime"])
+    out = run(["systemctl", "--user", "show", SYNC_UNIT + ".timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime",
+               "-p", "NextElapseUSecMonotonic"])
     vals = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
     if vals.get("ActiveState") != "active":
         return "", "the sync timer is not running"
     nxt = vals.get("NextElapseUSecRealtime", "").strip()
-    if not nxt or nxt in ("n/a", "0"):
-        return "", "the sync timer is on but has no next run (after a restart, check it with: systemctl --user list-timers)"
-    return nxt, ""
+    if nxt and nxt not in ("n/a", "0"):
+        return nxt, ""
+    # Seen on a stock Ubuntu 24.04: a next run kept on the boot clock has an empty wall-clock field.
+    mono = span_seconds(vals.get("NextElapseUSecMonotonic", ""))
+    if mono is not None:
+        return time.strftime("%a %Y-%m-%d %H:%M:%S %Z", time.localtime(time.time() + mono - time.monotonic())), ""
+    return "", "the sync timer is on but has no next run (after a restart, check it with: systemctl --user list-timers)"
+
+
+SPAN_UNITS = {"us": 1e-6, "ms": 1e-3, "s": 1, "min": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def span_seconds(text):
+    """systemd's time span ('7min 35.596695s', '2h', '0') in seconds; None for empty, 'infinity' or unreadable."""
+    text = (text or "").strip()
+    if not text or text in ("infinity", "0", "n/a"):
+        return None
+    parts = re.findall(r"([0-9.]+)\s*(us|ms|min|s|h|d|w)\b", text)
+    if not parts or "".join(a + b for a, b in parts) != text.replace(" ", ""):
+        return None
+    return sum(float(a) * SPAN_UNITS[b] for a, b in parts)
 
 
 def linger_state():
@@ -476,14 +498,122 @@ def comes_back_by_itself(dry=False):
                else "this Mac does not log you in by itself after a restart")
         return False, (f"On a Mac, {NO_LOGIN_NOTE}: a launch agent runs only in a login session, and {why}"
                        + (" (FileVault is on)" if "FileVault is On" in vault.stdout else "") + ".")
+    return linger_step(None, dry=dry)
+
+
+LINGER_MEANS = ("the mirror keeps running when you are logged out and after a restart, because your account's "
+                "background services are allowed to start without you")
+LINGER_COMMAND = "sudo loginctl enable-linger {user}"
+
+
+def own_process_for_polkit():
+    """pid,pid-start-time,uid: the form pkcheck's manual asks for (the bare pid, and pid,start-time, are racy)."""
+    with open(f"/proc/{os.getpid()}/stat", encoding="ascii") as f:
+        start = f.read().rsplit(")", 1)[1].split()[19]          # field 22, starttime, counted after the name
+    return f"{os.getpid()},{start},{os.getuid()}"
+
+
+def may_self_linger():
+    """'yes', 'no' or 'unknown': asked of this computer, never guessed from its name, may this person switch on
+    their own lingering? Seen on a stock Ubuntu 24.04: polkit allows it to any user. pkcheck is read-only, is
+    never given --allow-user-interaction (so no password prompt can appear), and has 10 s to answer. Its manual:
+    0 allowed; 1 not allowed; 2 only with an authentication, which is never asked for, so not allowed here;
+    anything else, a missing pkcheck, or no answer in time: not known."""
+    try:
+        code = run(["pkcheck", "--action-id", "org.freedesktop.login1.set-self-linger",
+                    "--process", own_process_for_polkit()], timeout=10).returncode
+    except (subprocess.TimeoutExpired, OSError, IndexError, ValueError):
+        return "unknown"
+    return {0: "yes", 1: "no", 2: "no"}.get(code, "unknown")
+
+
+def linger_step(st, dry=False, allow=True):
+    """G1.6 on Linux: (True, what to say) when the forge will start after a restart with no one logged in, else
+    (False, what to say). Lingering changes how the person's computer behaves after they log out, so it is said
+    before setup, switched on only by setup's own run and only if the person did not say no, and recorded in
+    the state (st["linger_by_setup"]) so that uninstall switches off only what setup switched on."""
+    user = getpass.getuser()
+    admin = (f"On this computer {NO_LOGIN_NOTE}. To have it start at boot, the computer's administrator runs one "
+             f"command: {LINGER_COMMAND.format(user=user)} ({LINGER_MEANS}).")
     state = linger_state()
     if state == "yes":
-        return True, ""
-    if not dry:
-        if run(["loginctl", "enable-linger", getpass.getuser()]).returncode == 0 and linger_state() == "yes":
-            return True, ""
-    return False, (f"On this computer {NO_LOGIN_NOTE}. To have it start at boot, the computer's administrator "
-                   f"runs one command: sudo loginctl enable-linger {getpass.getuser()}")
+        if st is not None and "linger_by_setup" not in st:
+            st["linger_by_setup"] = False
+        return True, f"Lingering is already on for your account: {LINGER_MEANS}."
+    if not allow:
+        return False, (f"Lingering stays off, as you chose: the mirror syncs only while you are logged in, and "
+                       f"after a restart it waits until you log in. To change that later, run setup --linger.")
+    say_no = ("To say yes, run setup --linger; to say no, setup --no-linger, and then the mirror syncs only while "
+              "you are logged in.")
+    if dry:
+        may = may_self_linger()
+        if may == "yes":
+            return False, (f"setup --linger switches on lingering for your account (this computer lets you do "
+                           f"that yourself): {LINGER_MEANS}. {say_no}")
+        if may == "unknown":
+            return False, (f"setup --linger tries to switch on lingering for your account, without asking for a "
+                           f"password: {LINGER_MEANS}. If this computer refuses, its administrator runs one "
+                           f"command: {LINGER_COMMAND.format(user=user)}. {say_no}")
+        return False, f"{admin} {say_no}"
+    # Never a password prompt the person did not expect: refused means the administrator's one command.
+    if run(["loginctl", "--no-ask-password", "enable-linger", user]).returncode == 0 and linger_state() == "yes":
+        if st is not None:
+            st["linger_by_setup"] = True
+        return True, f"Lingering is now on for your account: {LINGER_MEANS}. uninstall switches it off again."
+    return False, admin
+
+
+LINGER_CHOICE = ("Needs you: lingering is the person's choice. Ask them, then run setup again with --linger (yes) or "
+                 "--no-linger (no). Nothing was changed.")
+
+
+def linger_unchosen(args, st):
+    """G1.9: on Linux, with lingering off, setup changes nothing until the person has said yes or no to it."""
+    if system()[0] == "darwin" or getattr(args, "linger", False) or getattr(args, "no_linger", False):
+        return False
+    return st.get("linger_said") != "no" and linger_state() != "yes"
+
+
+SERVICE_PATHS = {"linux": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                 "darwin": "/usr/bin:/bin:/usr/sbin:/sbin"}
+
+
+def service_path():
+    """G1.8: the PATH the forge's service and the sync timer run with: on Linux the person's own service
+    manager's (read-only), on a Mac launchd's own for a launch agent."""
+    kind = system()[0]
+    if kind == "linux":
+        try:
+            out = run(["systemctl", "--user", "show-environment"], timeout=10)
+            for line in (out.stdout or "").splitlines() if out.returncode == 0 else []:
+                if line.startswith("PATH="):
+                    return line[5:]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return SERVICE_PATHS.get(kind, SERVICE_PATHS["linux"])
+
+
+def git_out_of_service_reach():
+    """The sentence when git is here only in a folder the service does not look in, else ''."""
+    here = shutil.which("git")
+    where = service_path()
+    if not here or shutil.which("git", path=where):
+        return ""
+    return (f"git is at {here}, in a folder the mirror's service does not look in ({where}), so the forge and the "
+            f"sync would not find it. Install git for the whole computer (on Ubuntu or Debian: sudo apt install "
+            f"git; on Fedora: sudo dnf install git; on a Mac: xcode-select --install); that is the person's step, "
+            f"or their administrator's. Nothing was changed.")
+
+
+def git_missing_sentence():
+    return ("git is not installed on this computer. The skill and the forge both need it. Install it (on Ubuntu "
+            "or Debian: sudo apt install git; on Fedora: sudo dnf install git; on a Mac: xcode-select --install), "
+            "then run setup again.")
+
+
+LFS_MISSING = ("git lfs is not installed here, so projects with large files are copied without them until it is "
+               "(on Ubuntu or Debian: sudo apt install git-lfs; on Fedora: sudo dnf install git-lfs; on a Mac with "
+               "Homebrew: brew install git-lfs).")
 
 
 def install_service(p):
@@ -1195,15 +1325,29 @@ def cmd_setup(args):
             "the forge: run upgrade-forge, which makes a backup first. Nothing was changed.")
         return 2
     st = load_json(p["state"], {})
+    allow = not getattr(args, "no_linger", False)
+    if not shutil.which("git"):
+        say(git_missing_sentence() + " Nothing was changed.")
+        return 2
+    far = git_out_of_service_reach()
+    if far:
+        say(far)
+        return 2
     plan = setup_plan(p, st)
-    back, note = comes_back_by_itself(dry=True)
     if args.dry_run:
+        back, note = (comes_back_by_itself(dry=True) if system()[0] == "darwin"
+                      else linger_step(None, dry=True, allow=allow))
         say("setup --dry-run: nothing is changed. Setup would:")
         for i, step in enumerate(plan, 1):
             say(f"  {i}. {step}")
-        if not back:
-            say(f"Note: {note}")
+        say(f"After a restart: {note}" if note else "After a restart it starts by itself.")
+        if not has_git_lfs():
+            say(f"Note: {LFS_MISSING}")
         return 0
+    if linger_unchosen(args, st):
+        say(f"After a restart: {linger_step(None, dry=True)[1]}")
+        say(LINGER_CHOICE)
+        return 2
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
     if fetch_forge(p, os.environ.get("WSM_GITEA_BASE")):
@@ -1246,10 +1390,28 @@ def cmd_setup(args):
     ok, why = install_service(p)
     if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
         ok, why = False, "the sync timer could not be switched on"
-    say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only)."
-        if ok else f"The forge's service did not start: {why}")
-    back, note = comes_back_by_itself()
-    say("After a restart it starts by itself." if back else note)
+    if not ok:
+        say(f"The forge's service did not start: {why}")
+    elif wait_forge(st["port"], seconds=SETUP_WAIT):
+        say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
+    else:
+        say(f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{st['port']}/ "
+            f"after {SETUP_WAIT} s; `status` says when it does.")
+    if system()[0] == "darwin":
+        back, note = comes_back_by_itself()
+    else:
+        back, note = linger_step(st, allow=allow)
+        if not allow:
+            st["linger_said"] = "no"
+        elif getattr(args, "linger", False):
+            st.pop("linger_said", None)
+        save_state(p, st)
+    if back:
+        say("After a restart it starts by itself.")
+    if note:
+        say(note)
+    if not has_git_lfs():
+        say(f"Note: {LFS_MISSING}")
     say(PRIVATE_AS_THIS_COMPUTER)
     return 0 if ok else 1
 
@@ -1431,6 +1593,8 @@ def cmd_status(args):
         return 2
     forge = Forge(p, st)
     problems, notes = [], []
+    if not shutil.which("git"):
+        problems.append("git is not installed on this computer, so no copy can refresh until it is")
     code, ver = forge.call("GET", "/version")
     up = code == 200
     if not up:
@@ -1773,6 +1937,10 @@ def setup_from(p, args):
     if load_json(p["state"], {}).get("port"):
         say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed.")
         return 2
+    if linger_unchosen(args, {}):
+        say(f"After a restart: {linger_step(None, dry=True)[1]}")
+        say(LINGER_CHOICE)
+        return 2
     src = os.path.abspath(os.path.expanduser(args.from_file))
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
@@ -1840,12 +2008,24 @@ def setup_from(p, args):
         f"each owner: {owners}. Until then, `status` shows them behind.")
     say("Your Gitea password is the one it had on the old computer.")
     say(f"The forge runs as your own service." if ok else f"The forge's service did not start: {why}")
-    back, note = comes_back_by_itself()
-    say("After a restart it starts by itself." if back else note)
+    if system()[0] == "darwin":
+        back, note = comes_back_by_itself()
+    else:
+        st = load_json(p["state"], {})
+        st.pop("linger_by_setup", None)              # the old computer's record means nothing here
+        back, note = linger_step(st, allow=not getattr(args, "no_linger", False))
+        save_state(p, st)
+    if back:
+        say("After a restart it starts by itself.")
+    if note:
+        say(note)
     return 0 if ok else 1
 
 
 # ---------------------------------------------------------------- G9 upgrades and uninstall
+
+SETUP_WAIT = 30          # seconds setup waits for the new forge to answer before it says so
+
 
 def wait_forge(port, up=True, seconds=60):
     for _ in range(seconds * 2):
@@ -1990,14 +2170,19 @@ def cmd_self_update(args):
 
 
 def cmd_uninstall(args):
-    """G9.3: everything but the folder of copies goes; that folder goes only on the person's typed word."""
+    """G9.3: everything but the folder of copies goes; that folder goes only on the person's typed word, typed
+    at a terminal (it cannot be undone, so nothing piped in counts)."""
     p = paths()
+    if args.delete_copies and not sys.stdin.isatty():
+        say("Needs you: deleting the copies cannot be undone, so the person runs this themselves, in a terminal "
+            f"window of their own: python3 -I {p['script']} uninstall --delete-copies. Nothing was changed.")
+        return 2
     st = load_json(p["state"], {})
     ok, why = take_lock(p)
     if not ok:
         say(f"Not now: {why}.")
         return 3
-    removed = []
+    removed, linger_said = [], ""
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
@@ -2015,6 +2200,17 @@ def cmd_uninstall(args):
                     os.remove(f)
                     removed.append(f)
             run(["systemctl", "--user", "daemon-reload"])
+            if st.get("linger_by_setup"):
+                if run(["loginctl", "disable-linger", getpass.getuser()]).returncode == 0:
+                    linger_said = "Lingering was switched on by setup, and is switched off again."
+                else:
+                    linger_said = ("Lingering was switched on by setup, and could not be switched off: run "
+                                   f"loginctl disable-linger {getpass.getuser()}")
+            elif st.get("linger_by_setup") is False:
+                linger_said = "Lingering was already on before setup, so it is left on."
+            st.pop("linger_by_setup", None)
+            if os.path.exists(p["state"]):
+                save_state(p, st)
         for d in (os.path.dirname(p["bin"]), p["cache"], p["conf"]):
             if os.path.exists(d):
                 shutil.rmtree(d)
@@ -2028,6 +2224,8 @@ def cmd_uninstall(args):
     say("uninstall: the service, the sync timer, the forge's binary, the settings and every key are removed:")
     for r in removed:
         say(f"  removed {r}")
+    if linger_said:
+        say(linger_said)
     n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
     if not os.path.exists(p["forge"]):
         return 0
@@ -2036,7 +2234,7 @@ def cmd_uninstall(args):
             "with: uninstall --delete-copies")
         return 0
     say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds:")
-    answer = sys.stdin.readline().strip() if not sys.stdin.isatty() else input("> ").strip()
+    answer = input("> ").strip()
     if answer != str(n):
         say(f"That is not {n}. The copies were not deleted.")
         return 1
@@ -2068,6 +2266,11 @@ def main(argv=None):
     s = sub.add_parser("setup", help="install the forge as your own service")
     s.add_argument("--dry-run", action="store_true", help="say what setup would do and change nothing")
     s.add_argument("--from", dest="from_file", metavar="BACKUP", help="on a new computer: bring every copy back from a backup")
+    s.add_argument("--linger", action="store_true",
+                   help="on Linux: the person said yes to lingering, so the mirror runs after a restart with no one "
+                        "logged in")
+    s.add_argument("--no-linger", action="store_true",
+                   help="on Linux: do not switch on lingering; the mirror then syncs only while you are logged in")
     s.set_defaults(fn=cmd_setup)
     k = sub.add_parser("key", help="the GitHub keys, one per owner")
     ks = k.add_subparsers(dest="key_cmd", required=True)

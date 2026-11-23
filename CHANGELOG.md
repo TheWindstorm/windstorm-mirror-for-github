@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- From a stock Ubuntu 24.04 virtual machine (rows M20 to M23):
+  - G4.7: the sync timer counts from the start of the person's own service manager (`OnStartupSec=2min`). With `OnBootSec`, as every build so far wrote it, a person who logged in more than 5 minutes after boot had a timer with no next run, so the sync never ran again in that boot.
+  - G6.7: `status` reads a next run kept on the boot clock, instead of reporting "no next run" while one was due.
+  - G1.8: setup checks for git before anything else and says how to install it, with nothing downloaded; a missing git lfs is named up front; a missing program is an answer, never a traceback.
+  - G1.9: lingering is said in plain words before setup, asked of this computer through polkit with three answers and never a password prompt, recorded when setup switches it on, and switched off by `uninstall` only then. `setup --no-linger` leaves it off and says the mirror then syncs only while the person is logged in.
+  - G1.10: setup says the forge runs only once it answers.
+  - INV6 names pkcheck, added for G1.9's dry run.
+- Where only the skill's words stood, the tool now carries the person's step (the plan owner's ruling before the first cold-start proof):
+  - G1.9: on Linux with lingering off, plain `setup` changes nothing until the person has chosen, `setup --linger` or `setup --no-linger`. A no is kept.
+  - G9.3: `uninstall --delete-copies` reads the number of copies only at a terminal; piped in, even the right number is refused, before anything is removed.
+  - G1.8: setup checks that git is where the forge's service and the sync timer look, not only in the shell's PATH.
+  - SKILL.md: the key is typed in a terminal window of the person's own, outside the conversation, because what runs behind `!` is shown to the agent. A person's step is never done another way.
 - Tests, T1 (row M19): a proof counts only when the suite's own runner saw it pass. The runner refuses a name defined twice, a test unittest cannot collect, and any skip mark; a skip raised inside a test is "not run here", never a pass, and only on a true condition of that machine. A last CI job needs every proof the plan names to have passed on at least one of the four jobs. A self-test hides one real test eight ways and must see each refused.
 - G1.7, from a restart of a real Mac: on a Mac, the skill says the copy comes back by itself after a restart when the system logs the person in by itself (FileVault off), and otherwise that it stands still until they log in. Before, it said the second on every Mac.
 - A key's expiry is shown only from a date GitHub sent that reads cleanly; otherwise `status` says "expiry not known" and warns of nothing (the header is not seen yet).

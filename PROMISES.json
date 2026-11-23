@@ -274,6 +274,62 @@
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M20",
+   "seen": "2026-11-22, a stock Ubuntu 24.04 virtual machine (the cloud image, nothing of ours on it), with a person account that has no administrator rights: with lingering off and the person logging in more than 5 minutes after boot, the sync timer was 'active' with no next run, so the sync never ran again in that boot. Every build so far wrote OnBootSec=5min, so every build so far had this. Seen fixed with OnStartupSec=2min across two restarts, both ways: with lingering and no one logged in, the sync ran 2 min 16 s after boot; without lingering and a login 5.5 minutes after boot, the next run was 2 minutes after the login.",
+   "promise": "After a restart the sync timer always has a next run: 2 minutes after the person's own service manager starts, at boot with lingering or at login without.",
+   "codon": "G4.7",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G4_7_after_a_restart_the_timer_always_has_a_next_run",
+   "proven": "",
+   "issue": "#18",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
+   "id": "M21",
+   "seen": "2026-11-22, a stock Ubuntu 24.04 virtual machine (the cloud image, nothing of ours on it), with a person account that has no administrator rights: systemd kept the timer's next run on the boot clock only (an empty wall-clock field), and status said 'the sync timer is on but has no next run' while one was 2 minutes away.",
+   "promise": "status reads the timer's next run on either clock, and says there is none only when there is none.",
+   "codon": "G6.7",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G6_7_a_next_run_on_the_boot_clock_is_a_next_run",
+   "proven": "",
+   "issue": "#19",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
+   "id": "M22",
+   "seen": "2026-11-22, a stock Ubuntu 24.04 virtual machine (the cloud image, nothing of ours on it), with a person account that has no administrator rights, git removed: the dry run said nothing; setup downloaded the whole Gitea binary, then stopped on Gitea's own message ('git not found: exec: \"git\": executable file not found in $PATH'). A stock machine also has no git lfs, and nothing said so before a sync.",
+   "promise": "A computer without git is told so, with how to install it, before anything is downloaded or changed; a missing git lfs is named up front.",
+   "codon": "G1.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded",
+   "proven": "",
+   "issue": "#20",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
+   "id": "M23",
+   "seen": "2026-11-22, a stock Ubuntu 24.04 virtual machine (the cloud image, nothing of ours on it), with a person account that has no administrator rights: polkit lets any user switch on their own lingering, and setup did it by itself, while the dry run said an administrator had to. The person was never told what lingering changes. Also: the first status right after setup said the forge did not answer, because it was still starting.",
+   "promise": "Lingering is said in plain words before setup, asked of this computer with three answers and never a password prompt, recorded when setup switches it on, undone by uninstall only then, and the person may say no and still have a working mirror.",
+   "codon": "G1.9",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it",
+   "proven": "",
+   "issue": "#21",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

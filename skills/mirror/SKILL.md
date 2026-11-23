@@ -18,16 +18,24 @@ The whole tool is one script: `scripts/mirror.py`, two levels above this skill's
 ## The order
 
 Follow these steps in this order. Do not skip one, and do not change the order. Each step that is the person's is
-marked **Person** and is described under "The person's steps": say what is written there, then wait.
+marked **Person** and is described under "The person's steps": say what is written there, then wait. A step
+that is the person's is never done another way: if a program is missing, or the computer refuses something, say
+what the tool printed and wait; do not install, change or work around anything yourself.
 
 1. `M setup --dry-run`. Show the person its whole output: it says what setup would do and changes nothing.
+   On Linux it also says, in plain words, what lingering means: the mirror keeps running when they are logged
+   out and after a restart. That is a **Person** step: see "Lingering".
 2. **Person**: the keys to make. One read-only key for each owner whose projects are to be copied: their own
    account, and each organisation they name. See "Making each key".
-3. `M setup`. It installs the forge as the person's own service. If it prints a command for an administrator
-   (lingering), that is a **Person** step: see "The administrator's command".
-4. **Person**: `key set` for each owner. The person runs it themselves, so the key never passes through you:
-   ask them to type `! python3 -I <the script> key set <owner>` and paste the key when it asks. Run nothing that
-   would put a key on a command line, in a file you write, or in your own output.
+3. `M setup --linger` if the person said yes to lingering, `M setup --no-linger` if they said no. (On a Mac,
+   `M setup`.) Plain `setup` on Linux changes nothing until one of the two is given. It installs the forge as
+   the person's own service. If it prints a command for an administrator (lingering), that is a **Person**
+   step: see "The administrator's command".
+4. **Person**: `key set` for each owner. The person runs it themselves, in a terminal window of their own,
+   outside this conversation, because whatever runs here, even a command they start with `!`, is shown to
+   you. Say: "In a terminal window of your own, run `python3 -I <the script> key set <owner>` and paste the
+   key when it asks. Tell me when it says the key is kept." Never read a key, run nothing that would put a key
+   on a command line, in a file you write or in your own output, and never ask for one.
 5. `M sync --announce`. Read its lines to the person: how many repositories, how big, what is not copied, and
    that the copy is as private as this computer. Then the **Person** step: the go for the first copy.
 6. `M sync`, only after the person said go. The first copy can take a while; it says how far it is.
@@ -54,13 +62,18 @@ may ask one of its owners to approve this key. Until they do, the key waits as p
 cannot see the organisation's repositories. Please ask an owner of <organisation> to approve it." Then wait; do
 not work around it.
 
+**Lingering.** After step 1, read the dry run's lingering sentence to the person, then say: "Do you want the
+mirror to keep running when you are logged out and after a restart?" Their yes is `setup --linger`, their no is
+`setup --no-linger`. Do not choose for them.
+
 **The go for the first copy.** After step 5, say: "That is what will be copied. Shall I start the first copy?"
 Only a clear yes from the person is the go. Do not take silence, or an earlier yes to something else, as the go.
 
 **The administrator's command.** If setup says the copy stands still after a restart until the person logs in,
 and prints a command such as `sudo loginctl enable-linger <user>`, say: "To keep the copy current after a restart
 without your logging in, an administrator of this computer can run: <the command>. It is your choice; without it,
-the copy catches up when you log in." Never run it yourself.
+the copy catches up when you log in." Never run it yourself. Setup itself never asks for a password; when the
+computer refuses, this command is the only way, and it is the administrator's.
 
 **Terms screens.** If anything shows a terms, licence or privacy screen whose only way on is Agree, Accept or
 Continue, never press it. Stop, and tell the person it is theirs to read and decide.
@@ -70,7 +83,8 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 - `M status`: one line per problem, then `copies: N on GitHub, N copied, M behind, U unreadable`, the forge's
   version, each key's expiry, the free disk, the last good sync and the next. A copy is never shown as current
   unless it was seen current.
-- A key expires or is refused: the person makes a new one (same page) and runs `key set <owner>` again.
+- A key expires or is refused: the person makes a new one (same page) and runs `key set <owner>` again, in a
+  terminal window of their own, as in step 4.
 - `M backup <folder>`: the forge's own backup in one file only the person can read. It holds the forge's secrets;
   say so. On a new computer: `M setup --from <that file>`, then new keys.
 - `M restore --to <url> <owner/name>`: one copy into a new, empty home the person names. It refuses GitHub: to put
@@ -79,7 +93,8 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
   person's choice; ask first. Upgrade-forge makes a backup before it changes anything.
 - `M expose` says what opening the forge to other computers would mean. The skill never does it.
 - `M uninstall` removes everything but the folder of copies. Deleting the copies needs
-  `M uninstall --delete-copies` and the person typing the number of copies; never type it for them.
+  `uninstall --delete-copies`, which the person runs themselves in a terminal window of their own and answers
+  with the number of copies; the tool refuses it from anywhere else.
 
 ## Never
 
