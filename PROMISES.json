@@ -456,6 +456,34 @@
    "issue": "#38",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M33",
+   "seen": "2026-11-23 at 3:10 AM ET, on GitHub's own hosted runner (Ubuntu, Python 3.10, CI run 45135376324): the test G8.1 failed with 'the forge did not answer in 60 s' at the forge's first start; the push run on the same commit passed. Setup waits 30 s and the tests 60 s, and neither figure was measured.",
+   "promise": "The waits around a first start, setup's and the tests', come from a figure measured on a slow machine (a stock virtual machine with one processor and little memory), not a guess; setup says what 'not answering yet' means and after how long the person should look again; a test that waits for the forge fails with the forge's own last log lines, not only with 'did not answer'.",
+   "codon": "G1.11",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_11_the_first_start_waits_are_measured_and_said",
+   "proven": "",
+   "issue": "#44",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
+   "id": "M34",
+   "seen": "2026-11-23, a cold start on a stock virtual machine with the release branch: the smallest model (claude-haiku-5-5) gave setup's numbered block 0 of 3 (lingering in its own words, 'after a restart it starts by itself' and the privacy line not said at setup), while it gave the dry run's block 9 of 9 and the announcement's 5 of 5; after setup it went straight on to the next commands and spoke from the newest output.",
+   "promise": "What the person must hear before the go is in the block they say go to: the announcement's block says what happens after a restart, whether large files are copied when git lfs is missing, what is not copied and how private the copy is; setup prints no block of its own, so there is none to lose. Lingering may be said in the agent's own words only because the tool already holds the choice: on Linux setup changes nothing until the person's own --linger or --no-linger. This closes M29's promise of a block in setup: that block is gone, and M29's dry-run and announcement blocks stand.",
+   "codon": "G10.6",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G10_6_what_the_person_must_hear_before_the_go_is_in_the_block_they_say_go_to",
+   "proven": "",
+   "issue": "#47",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

@@ -1255,6 +1255,20 @@ def first_copy_names(picked):
     return sorted((r["full_name"] for _, _, r in picked.values()), key=str.lower)
 
 
+def restart_line(st):
+    """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to."""
+    if system()[0] == "darwin":
+        back, note = comes_back_by_itself()
+        return "After a restart it starts by itself." if back else f"After a restart: {note}"
+    if linger_state() == "yes":
+        return f"After a restart it starts by itself: lingering is on for your account, so {LINGER_MEANS}."
+    if st.get("linger_said") == "no":
+        return ("After a restart it waits until you log in: lingering is off, as you chose, so the mirror syncs only "
+                "while you are logged in. To change that, run setup --linger.")
+    return (f"After a restart: lingering is off, so {NO_LOGIN_NOTE}. The computer's administrator can switch it on "
+            f"with one command: {LINGER_COMMAND.format(user=getpass.getuser())} ({LINGER_MEANS}).")
+
+
 def announce_first_copy(p, st, picked, complete):
     """G3.7, G3.9: what the person says yes to, named: how many, which (the first ANNOUNCE_NAMES by name, the whole
     list in a file of the person's own), how big, where they go, what is not copied, how private. It is kept, and the
@@ -1270,6 +1284,7 @@ def announce_first_copy(p, st, picked, complete):
           else "There are none to copy yet.",
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
+          restart_line(st), LFS_MISSING if not has_git_lfs() else "",
           NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
     st["announced"] = st.get("announced") or now_utc()
     st["announced_list"] = names
@@ -1550,8 +1565,7 @@ def cmd_setup(args):
     elif wait_forge(st["port"], seconds=SETUP_WAIT):
         say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
     else:
-        say(f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{st['port']}/ "
-            f"after {SETUP_WAIT} s; `status` says when it does.")
+        say(not_answering_yet(p, st["port"], SETUP_WAIT))
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -1561,8 +1575,12 @@ def cmd_setup(args):
         elif getattr(args, "linger", False):
             st.pop("linger_said", None)
         save_state(p, st)
-    tell(["After a restart it starts by itself." if back else "", note,
-          LFS_MISSING if not has_git_lfs() else "", PRIVATE_AS_THIS_COMPUTER])
+    # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
+    # person must hear before the go is in the announcement's block, the one they say go to.
+    for line in ("After a restart it starts by itself." if back else "", note, LFS_MISSING if not has_git_lfs() else "",
+                 PRIVATE_AS_THIS_COMPUTER):
+        if line:
+            say(line)
     return 0 if ok else 1
 
 
@@ -2209,10 +2227,23 @@ def setup_from(p, args):
 
 # ---------------------------------------------------------------- G9 upgrades and uninstall
 
-SETUP_WAIT = 30          # seconds setup waits for the new forge to answer before it says so
+# G1.9: the slowest first answer measured: 25 s, after a restart, on a stock virtual machine with one processor,
+# 512 MB and a disk held to 30 MB/s and 80 operations a second (an old laptop's disk). Every wait for a forge's
+# first answer is more than three times that, and a forge not answering by then is said with its log's place.
+FIRST_START_SEEN = 25
+FIRST_START_WAIT = 90
+SETUP_WAIT = FIRST_START_WAIT   # seconds setup waits for the new forge to answer before it says so
 
 
-def wait_forge(port, up=True, seconds=60):
+def not_answering_yet(p, port, waited):
+    """G1.9: what 'not answering yet' means, and when the person should look again."""
+    return (f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{port}/ after "
+            f"{waited} s. On the slowest computer it was tried on, it answered within {FIRST_START_SEEN} s, so "
+            f"something is holding it up: run `status` in 5 minutes. If it still does not answer then, the forge's "
+            f"own words are the last lines of {os.path.join(p['forge'], 'log', 'gitea.log')}.")
+
+
+def wait_forge(port, up=True, seconds=FIRST_START_WAIT):
     for _ in range(seconds * 2):
         if port_answers(port) == up:
             if not up:
@@ -2278,7 +2309,7 @@ def cmd_upgrade_forge(args):
             why = "Gitea's migration failed: " + last_line(out.stderr or out.stdout)
         else:
             service(p, "start")
-            if not wait_forge(st["port"], up=True, seconds=90):
+            if not wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT):
                 why = "the new forge did not answer within 90 s"
             else:
                 code, ver = Forge(p, st).call("GET", "/version")
@@ -2292,7 +2323,7 @@ def cmd_upgrade_forge(args):
             st["gitea"] = cur
             save_state(p, st)
             service(p, "start")
-            back = wait_forge(st["port"], up=True, seconds=90)
+            back = wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT)
             say(f"The upgrade to Gitea {new} failed: {why}. "
                 + (f"The old forge, Gitea {cur}, is back with its database as it was before."
                    if back else f"The old forge, Gitea {cur}, was put back but does not answer yet; run status.")

@@ -151,7 +151,11 @@ Seen:
   and the host reached the VM's own address through its network. The forge's port there reset the connection,
   while SSH's port on the same path answered with its banner (the control). Inside the VM the forge answered on
   127.0.0.1, and `ss` showed it listening on 127.0.0.1 only.
-- Not seen yet: Actions off for the whole forge.
+- Seen on 2026-11-23, Actions off for the whole forge, in Gitea 28.4.0 after the tool's own setup: the runner
+  service under `/api/actions/` answered 404 to a ping and to a runner's registration, and a project's Actions
+  stayed off when asked to turn on. The control, the same steps with only `[actions] ENABLED=true`: the ping
+  answered, a runner registered, and the project's Actions turned on. The API still hands out a runner
+  registration token with Actions off; with no runner service to give it to, nothing can use it.
 
 ## C11 The skill's latest release, read with no key
 

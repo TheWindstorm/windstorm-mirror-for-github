@@ -218,22 +218,39 @@ class Home:
             rc = mirror.main(["setup", *args])
         return rc, out.getvalue()
 
-    def start_forge(self):
+    def start_forge(self, seconds=None):
+        """Start the forge and wait for its first answer, as long as setup itself waits (G1.9). If it stops or does
+        not answer, the failure carries the forge's own last log lines, not only that it did not answer."""
+        seconds = mirror.FIRST_START_WAIT if seconds is None else seconds
         p = mirror.paths()
-        pr = subprocess.Popen([sys.executable, "-I", p["script"], "run-forge"], env=dict(os.environ),
+        script = p["script"] if os.path.exists(p["script"]) else SCRIPT
+        pr = subprocess.Popen([sys.executable, "-I", script, "run-forge"], env=dict(os.environ),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.procs.append(pr)
         STARTED.append(pr)
         port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
-        for _ in range(120):
+        end = time.monotonic() + seconds
+        while True:
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/api/healthz", timeout=2)
                 return port, pr
             except (urllib.error.URLError, OSError):
                 if pr.poll() is not None:
-                    raise AssertionError("the forge stopped: " + pr.stdout.read()[-400:])
+                    raise AssertionError("the forge stopped: " + pr.stdout.read()[-400:] + forge_log_tail(p))
+                if time.monotonic() > end:
+                    raise AssertionError(f"the forge did not answer in {seconds} s" + forge_log_tail(p))
                 time.sleep(0.5)
-        raise AssertionError("the forge did not answer in 60 s")
+
+
+def forge_log_tail(p, n=8):
+    """The forge's own last log lines, for a failure message (G1.9)."""
+    f = os.path.join(p["forge"], "log", "gitea.log")
+    try:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()[-n:]
+    except OSError:
+        return f"\n(the forge's log {f} is not there)"
+    return f"\nthe forge's own last log lines ({f}):\n" + "\n".join(lines)
 
 
 def http_get(url, key=None):
@@ -377,6 +394,28 @@ class G1(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(req, timeout=10)
             self.assertEqual(e.exception.code, 403)
+            # Actions are off for the whole forge (C10). A project's Actions cannot be turned on, even when asked,
+            # and the runner service is not served at all, so no runner can join, even holding a registration
+            # token (this Gitea still hands one out). With only [actions] ENABLED=true, the same Ping answers 200,
+            # a runner registers and has_actions turns on (research log of 2026-11-23).
+            def send(method, path, data, auth=True):
+                r = urllib.request.Request(base + path, method=method, data=json.dumps(data).encode(),
+                                           headers={"Content-Type": "application/json",
+                                                    **({"Authorization": f"token {key}"} if auth else {})})
+                try:
+                    with urllib.request.urlopen(r, timeout=10) as resp:
+                        return resp.status, json.loads(resp.read().decode() or "null")
+                except urllib.error.HTTPError as err:
+                    return err.code, None
+            user = json.loads(http_get(base + "/api/v1/user", key)[2])["login"]
+            self.assertEqual(send("POST", "/api/v1/user/repos", {"name": "c10", "private": True})[0], 201)
+            code, repo = send("PATCH", f"/api/v1/repos/{user}/c10", {"has_actions": True})
+            self.assertEqual(code, 200)
+            self.assertFalse(repo["has_actions"], "a project's Actions could be turned on")
+            for svc, body in (("ping.v1.PingService/Ping", {"data": "x"}),
+                              ("runner.v1.RunnerService/Register", {"name": "r", "token": "x", "labels": ["x"]})):
+                self.assertEqual(send("POST", "/api/actions/" + svc, body, auth=False)[0], 404,
+                                 f"the forge serves the runner service ({svc})")
             # Every start checks the port: a taken port is said, and the forge does not start.
             out = subprocess.run([sys.executable, "-I", p["script"], "run-forge"], env=dict(os.environ),
                                  capture_output=True, text=True, timeout=30)
@@ -553,6 +592,52 @@ class G1(unittest.TestCase):
                 self.assertIn("The forge runs as your own service", out)
             finally:
                 mirror.wait_forge = saved
+
+    def test_G1_11_the_first_start_waits_are_measured_and_said(self):
+        # The waits come from the figure measured on a slow machine, and the plan says where it was measured.
+        self.assertGreaterEqual(mirror.FIRST_START_WAIT, 3 * mirror.FIRST_START_SEEN)
+        plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
+        notes = plan.split("### First start, as measured", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("1 processor, 512 MB", notes)
+        self.assertIn(f"`FIRST_START_SEEN` is {mirror.FIRST_START_SEEN} and `FIRST_START_WAIT` is "
+                      f"{mirror.FIRST_START_WAIT}", notes)
+        self.assertIn(f"| {mirror.FIRST_START_SEEN} at most", notes)
+        src = fread(SCRIPT)
+        self.assertEqual(mirror.SETUP_WAIT, mirror.FIRST_START_WAIT)
+        self.assertNotRegex(src, r"wait_forge\([^)]*up=True, seconds=\d", "a first-start wait that is not the measured one")
+        self.assertEqual(inspect.signature(Home.start_forge).parameters["seconds"].default, None)
+        self.assertIn("seconds = mirror.FIRST_START_WAIT if seconds is None", inspect.getsource(Home.start_forge))
+        # A test that waits for a forge that never answers fails with the forge's own last log lines.
+        with Home() as h:
+            p = mirror.paths()
+            os.makedirs(os.path.dirname(p["app_ini"]), exist_ok=True)
+            os.makedirs(os.path.join(p["forge"], "log"), exist_ok=True)
+            mirror.write_file(p["app_ini"], f"[server]\nHTTP_PORT = {mirror.free_port()}\n", 0o600)
+            os.makedirs(os.path.dirname(p["bin"]), exist_ok=True)
+            log = os.path.join(p["forge"], "log", "gitea.log")
+            with open(p["bin"], "w") as f:
+                f.write(f"#!/bin/sh\necho 'PING DATABASE sqlite3: held up by the stand-in' >> '{log}'\nexec sleep 30\n")
+            os.chmod(p["bin"], 0o755)
+            with self.assertRaises(AssertionError) as e:
+                h.start_forge(seconds=3)
+            self.assertIn("the forge did not answer in 3 s", str(e.exception))
+            self.assertIn("PING DATABASE sqlite3: held up by the stand-in", str(e.exception))
+        # (needs the real Gitea: setup prepares its database)
+        # Setup says what "not answering yet" means, when to look again, and where the forge's own words are.
+        with Home() as h:
+            h.place_gitea()
+            saved = mirror.wait_forge
+            try:
+                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                rc, out = h.setup()
+            finally:
+                mirror.wait_forge = saved
+            p = mirror.paths()
+            self.assertIn(f"not answering yet on http://127.0.0.1:{mirror.load_json(p['state'], {})['port']}/ after "
+                          f"{mirror.SETUP_WAIT} s", out)
+            self.assertIn(f"it answered within {mirror.FIRST_START_SEEN} s", out)
+            self.assertIn("run `status` in 5 minutes", out)
+            self.assertIn(os.path.join(p["forge"], "log", "gitea.log"), out)
 
     def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
         saved, saved_proc = mirror.system, mirror.own_process_for_polkit
@@ -2455,20 +2540,24 @@ class G10(unittest.TestCase):
             self.assertTrue(any(x.startswith("After a restart") for x in said), said)
             self.assertIn(mirror.LFS_MISSING, said)
         with World(self) as w:
-            said = block(w.setup_out, "setup")
-            self.assertIn(mirror.PRIVATE_AS_THIS_COMPUTER, said)
             w.gh.add_repo("someone", "alpha")
             w.gh.commit("someone/alpha", {"a": b"1"})
             w.key_set()
-            rc, out = w.sync("--announce")
+            saved = mirror.has_git_lfs
+            mirror.has_git_lfs = lambda: True
+            try:
+                rc, out = w.sync("--announce")
+            finally:
+                mirror.has_git_lfs = saved
             self.assertEqual(rc, 0, out)
             said = block(out, "sync --announce")
-            self.assertEqual(len(said), 5, said)
+            self.assertEqual(len(said), 6, said)
             self.assertTrue(said[0].startswith("The first copy: 1 repositories from 1 owner(s)"), said)
             self.assertEqual(said[1], "They are: someone/alpha.")
             self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[2])
             self.assertIn("Nothing is ever written to GitHub.", said[2])
-            self.assertEqual(said[3:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
+            self.assertTrue(said[3].startswith("After a restart"), said)
+            self.assertEqual(said[4:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
             self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
         _, _, body = skill_front()
         self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
@@ -2479,6 +2568,51 @@ class G10(unittest.TestCase):
                      "5. `M sync --announce`. Give the person its `tell the person` block whole"):
             self.assertIn(step, order)
 
+
+    def test_G10_6_what_the_person_must_hear_before_the_go_is_in_the_block_they_say_go_to(self):
+        """A cold start (2026-11-23, run 2): the smallest model gave setup's block 0 of 3, because it went straight on
+        to the next commands, while the announcement's block, the last thing before the go, came 5 of 5 on both
+        models. So setup prints no block; what happens after a restart, a missing git lfs and how private the copy
+        is are in the announcement's block. Lingering itself is chosen at setup by the person's own yes or no
+        (--linger, --no-linger), which the tool holds, so an agent may say that part in its own words."""
+        tell = re.compile(r"^tell the person (\d+) of (\d+): (.*)$", re.M)
+        with World(self) as w:
+            self.assertEqual(tell.findall(w.setup_out), [], "setup printed a block an agent can lose")
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            for lfs, linger, said_no in ((False, "yes", None), (True, "no", "no"), (True, "no", None)):
+                saved_lfs, saved_linger = mirror.has_git_lfs, mirror.linger_state
+                mirror.has_git_lfs, mirror.linger_state = (lambda v=lfs: v), (lambda v=linger: v)
+                st = mirror.load_json(mirror.paths()["state"], {})
+                st.pop("linger_said", None)
+                if said_no:
+                    st["linger_said"] = said_no
+                mirror.save_state(mirror.paths(), st)
+                try:
+                    rc, out = w.sync("--announce")
+                finally:
+                    mirror.has_git_lfs, mirror.linger_state = saved_lfs, saved_linger
+                self.assertEqual(rc, 0, out)
+                said = [t for _, _, t in tell.findall(out)]
+                self.assertEqual(said[-1], mirror.PRIVATE_AS_THIS_COMPUTER)
+                restart = [x for x in said if x.startswith("After a restart")]
+                self.assertEqual(len(restart), 1, said)
+                if mirror.system()[0] == "darwin":
+                    pass                                      # a Mac says its own case (G1.6); one line is enough
+                elif linger == "yes":
+                    self.assertIn("it starts by itself: lingering is on", restart[0])
+                elif said_no:
+                    self.assertIn("lingering is off, as you chose", restart[0])
+                    self.assertIn("run setup --linger", restart[0])
+                else:
+                    self.assertIn("administrator", restart[0])
+                    self.assertIn("sudo loginctl enable-linger", restart[0])
+                self.assertEqual(mirror.LFS_MISSING in said, not lfs, said)
+                self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
+        _, _, body = skill_front()
+        order = section(body, "The order")
+        self.assertIn("what happens after a restart", order)
 
 class G6Words(unittest.TestCase):
     NEXT = re.compile(r"\b(run|again|install|make|ask|try|wait|free|name|check|open an issue)\b|`|python3 -I", re.I)
