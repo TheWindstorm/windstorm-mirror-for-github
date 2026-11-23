@@ -1855,9 +1855,12 @@ def cmd_setup(args):
     if plugin_registry_for(here):
         st["plugin_registry"] = plugin_registry_for(here)
     if os.path.abspath(p["script"]) != here:
-        # G9.8 (M63): the folder the skill was downloaded into (a copy of its repository, or Claude Code's plugin
-        # folder), so that uninstall can name it as still here. Setup run again from its own copy keeps the record.
-        st["setup_from"] = os.path.dirname(os.path.dirname(here))
+        # G9.8 (M63): where the skill was downloaded to, so that uninstall can name it as still here. Setup run again
+        # from its own copy keeps the record.
+        kind, where = downloaded_from(here)
+        st.pop("setup_from", None)
+        st.pop("setup_from_file", None)
+        st["setup_from" if kind == "folder" else "setup_from_file"] = where
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
     ok, why = install_service(p)
@@ -2801,6 +2804,17 @@ def cmd_uninstall(args):
     return rc
 
 
+def downloaded_from(here):
+    """G9.8 (M63): ("folder", the skill's own folder) when `here` is <folder>/scripts/mirror.py in a copy of the skill's
+    repository or Claude Code's plugin folder (it holds skills/mirror/SKILL.md); otherwise ("file", `here`): a script
+    run on its own is named as the one file it is, never the folder around it (a home, a downloads folder)."""
+    root = os.path.dirname(os.path.dirname(here))
+    if (os.path.basename(os.path.dirname(here)) == "scripts"
+            and os.path.isfile(os.path.join(root, "skills", "mirror", "SKILL.md"))):
+        return "folder", root
+    return "file", here
+
+
 def still_here(p, st):
     """G9.8 (M63, the family's rule 8, 2026-11-23: an agent invents where the tool is silent): everything still on
     this computer because of the skill that uninstall does not take, with where it is and whose it is to delete."""
@@ -2815,6 +2829,9 @@ def still_here(p, st):
         else:
             lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
                          "delete it like any folder when you want. Nothing runs from it now.")
+    elif st.get("setup_from_file") and os.path.isfile(st["setup_from_file"]):
+        lines.append(f"{st['setup_from_file']}: the copy of the script setup was run from. It is yours; delete it "
+                     "when you want. Nothing runs from it now.")
     elif not root and not os.path.exists(p["state"]):
         lines.append("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
                      "Claude Code's plugin folder): no record of where it is is left on this computer. It is yours, "

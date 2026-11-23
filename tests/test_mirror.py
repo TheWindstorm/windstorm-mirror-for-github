@@ -3051,6 +3051,22 @@ class G9(unittest.TestCase):
                           "are Claude Code's; it removes both with its own plugin uninstall", out)
             if mirror.system()[0] != "darwin":
                 self.assertIn(f"claude plugin uninstall {mirror.PLUGIN}@{mirror.PLUGIN}. Nothing runs from them now.", out)
+            # A script run on its own (from a downloads folder, say) is named as that one file, never the folder
+            # around it: a census must never call a person's home "the folder the skill was downloaded into".
+            lone = os.path.join(w.home.tmp, "home", "Downloads", "mirror.py")
+            os.makedirs(os.path.dirname(lone))
+            shutil.copyfile(SCRIPT, lone)
+            self.assertEqual(mirror.downloaded_from(lone), ("file", lone))
+            self.assertEqual(mirror.downloaded_from(SCRIPT), ("folder", ROOT))
+            os.makedirs(os.path.join(w.home.tmp, "home", "scripts"))
+            self.assertEqual(mirror.downloaded_from(os.path.join(w.home.tmp, "home", "scripts", "mirror.py"))[0], "file")
+            st = mirror.load_json(p["state"], {})
+            st.pop("setup_from")
+            st["setup_from_file"] = lone
+            mirror.save_state(p, st)
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertIn(f"  {lone}: the copy of the script setup was run from. It is yours; delete it when you want.", out)
+            self.assertNotIn("the folder the skill was downloaded into", out)
             # The record deleted with the copies: what was downloaded is still named, with no place to guess at.
             shutil.rmtree(p["data"])
             out = quiet(mirror.main, ["uninstall"])[1]
