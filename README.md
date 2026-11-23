@@ -66,18 +66,22 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
 
 - **Install git and Python 3.10 or newer, if your computer lacks them.** Setup checks for git first, and says how
   to install it. git lfs is optional: without it, projects with large files are copied without those files, and
-  setup and `status` say so. On Ubuntu or Debian: `sudo apt install git git-lfs`. On Fedora:
-  `sudo dnf install git git-lfs`. On a Mac: `xcode-select --install`, then `brew install git-lfs`.
+  setup and `status` say so. On Ubuntu or Debian: `sudo apt update && sudo apt install git`, and for large
+  files `sudo apt update && sudo apt install git-lfs`. On Fedora: `sudo dnf install git`, and for large files
+  `sudo dnf install git-lfs`. On a Mac: `xcode-select --install` opens Apple's own installer for the command-line tools, which needs
+  you at the screen; git lfs comes from its own site, https://git-lfs.com, and setup and sync find it by
+  themselves once it is installed.
 - **Make one read-only key for each owner whose projects are to be copied**: your own account, and each
   organisation you name. Each one is a fine-grained key with read-only access to Contents and Metadata. An
   organisation may have to approve a key before it works. The agent shows you the page and the settings. It never
   logs in to GitHub for you.
-- **Give each key to the skill yourself, in a terminal window of your own**, with `key set`, not through your
+- **Give each key to the skill yourself, after setup, in a terminal window of your own**, with `key set`, not through your
   agent: whatever runs inside an agent's session, even a command you start yourself, is shown to the agent. The
   key is then kept in a file only your account can read. An agent that runs as you could read that file; the
   skill tells it never to, and never to put a key in its output.
-- **Say yes to the first copy.** You say it after you have heard how many projects there are, how big they are, and
-  what is not copied.
+- **Say yes to the first copy.** You say it after you have heard which projects they are (by name, the first 20,
+  with the whole list in a file), how big they are, where they go and what is not copied. Your yes covers that
+  list only: if it changes before the copy starts, nothing is copied and you are asked again.
 - **Say yes or no to lingering** (see "After a restart"). Setup does not choose for you.
 - **Delete the copies, if you ever want to**, yourself, in a terminal window of your own:
   `uninstall --delete-copies` asks you to type how many copies there are, and refuses an answer from anywhere
