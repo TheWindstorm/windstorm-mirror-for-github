@@ -3,6 +3,7 @@
 import atexit
 import contextlib
 import hashlib
+import shlex
 import signal
 import tarfile
 import http.server
@@ -2244,6 +2245,31 @@ class G6(unittest.TestCase):
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
 
+    def test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space(self):
+        """M60 (a Mac test account, 2026-11-23): the tool printed `python3 -I /Users/.../Application Support/
+        windstorm-mirror/mirror.py uninstall --delete-copies`, which a shell splits at the space. Every command the
+        tool prints with its own copy's path runs as printed: the path is quoted."""
+        with Home() as h:
+            root = os.path.join(h.tmp, "Application Support")
+            os.environ["WSM_HOME"] = root
+            p = mirror.paths()
+            self.assertIn(" ", p["script"])
+            for args in (("uninstall",), ("uninstall", "--delete-copies"), ("status",)):
+                argv = shlex.split(mirror.own_command(p, *args))
+                self.assertEqual(argv, ["python3", "-I", p["script"], *args])
+            saved = sys.stdin
+            sys.stdin = io.StringIO("")
+            try:
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 2, out)
+            cmd = out.split("in a terminal window of their own, they run ", 1)[1].split(" and type the number")[0]
+            self.assertEqual(shlex.split(cmd), ["python3", "-I", p["script"], "uninstall", "--delete-copies"])
+            self.assertIn("command=own_command(p, \"uninstall\")", inspect.getsource(mirror.cmd_status))
+            self.assertIn("own_command(paths(), a.cmd)", inspect.getsource(mirror.main))
+            self.assertNotIn("{script}", mirror.PLUGIN_GONE)
+
     def test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback(self):
         """A real machine (2026-11-23): `status | head -3` ended in a Python traceback (a broken pipe). The tool is
         run with its output going to a pipe nobody reads: it ends with its own code, says nothing on stderr, and
@@ -2896,14 +2922,16 @@ class G9(unittest.TestCase):
             r = subprocess.run([sys.executable, "-I", here, *cmd], env=env, capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
             self.assertIn(f"in a folder Claude Code set aside when its plugin was removed or updated ({ver})", r.stdout)
-            self.assertIn("Nothing was done. Nothing of the skill's is set up on this computer.", r.stdout)
+            self.assertIn("Nothing was done. Nothing of the skill's is set up on this computer; to use it, install "
+                          "the plugin again and run setup.", r.stdout)
             self.assertFalse(os.path.exists(env["WSM_HOME"]), "nothing made")
         own = os.path.join(env["WSM_HOME"], "data", "mirror.py")
         os.makedirs(os.path.dirname(own))
         shutil.copyfile(mirror.__file__, own)
         r = subprocess.run([sys.executable, "-I", here, "uninstall"], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 3, r.stdout)
-        self.assertIn(f"The skill set up on this computer is {own}: python3 -I {own} uninstall", r.stdout)
+        self.assertIn(f"The skill set up on this computer is {own}; run it there: python3 -I {own} uninstall",
+                      r.stdout)
         self.assertTrue(os.path.exists(own), "nothing removed")
         os.remove(os.path.join(ver, ".orphaned_at"))
         r = subprocess.run([sys.executable, "-I", here, "status"], env=env, capture_output=True, text=True, timeout=60)
@@ -2917,7 +2945,7 @@ class G9(unittest.TestCase):
             st = mirror.load_json(w.p["state"], {})
             st["plugin_registry"] = reg
             mirror.save_state(w.p, st)
-            said = "plugin: " + mirror.PLUGIN_GONE.format(script=w.p["script"])
+            said = "plugin: " + mirror.PLUGIN_GONE.format(command=mirror.own_command(w.p, "uninstall"))
             self.assertIn("To take it off: python3 -I " + w.p["script"] + " uninstall", said)
             registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [row]}})
             rc, out = status()

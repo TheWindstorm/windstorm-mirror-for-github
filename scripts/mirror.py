@@ -18,6 +18,7 @@ import argparse
 import base64
 import calendar
 import fnmatch
+import shlex
 import getpass
 import urllib.parse
 import hashlib
@@ -1648,7 +1649,8 @@ def sync(p, args):
            if lfs_missing else ""))
     say(NOT_COPIED)
     if plugin_removed(st):
-        say(PLUGIN_GONE.format(script=p["script"]))
+        gone = PLUGIN_GONE.format(command=own_command(p, "uninstall"))
+        say(gone)
     return 0 if not problems else 1
 
 
@@ -1656,7 +1658,13 @@ def sync(p, args):
 
 PLUGIN = "windstorm-mirror-for-github"
 PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes on as your own service on this "
-               "computer and keeps every copy current. To take it off: python3 -I {script} uninstall")
+               "computer and keeps every copy current. To take it off: {command}")
+
+
+def own_command(p, *args):
+    """G6.12 (M60): a command for the person to run, with this skill's own copy, as it runs when pasted whole into a
+    shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
+    return " ".join(["python3", "-I", shlex.quote(p["script"]), *args])
 
 
 def plugin_registry_for(here):
@@ -2070,7 +2078,7 @@ def cmd_status(args):
     if epoch_of(st.get("github_wait_until")) > time.time():
         notes.append(f"github: {spent_line(st)}")
     if plugin_removed(st):
-        notes.append("plugin: " + PLUGIN_GONE.format(script=p["script"]))
+        notes.append("plugin: " + PLUGIN_GONE.format(command=own_command(p, "uninstall")))
     for x in problems:
         say(f"problem: {x}")
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
@@ -2656,8 +2664,9 @@ def cmd_uninstall(args):
     at a terminal (it cannot be undone, so nothing piped in counts)."""
     p = paths()
     if args.delete_copies and not sys.stdin.isatty():
-        say("Needs you: deleting the copies cannot be undone, so the person runs this themselves, in a terminal "
-            f"window of their own: python3 -I {p['script']} uninstall --delete-copies. Nothing was changed.")
+        line = own_command(p, "uninstall", "--delete-copies")
+        say("Needs you: deleting the copies cannot be undone, so the person does it themselves: in a terminal "
+            f"window of their own, they run {line} and type the number of copies. Nothing was changed.")
         return 2
     st = load_json(p["state"], {})
     # Rule 8: a sync that is running is a wait, said with what holds it, never a refusal of a person who wants to
@@ -2823,11 +2832,12 @@ def main(argv=None):
     a = ap.parse_args(argv)
     aside = set_aside_folder(__file__)
     if aside:
-        own = paths()["script"]
+        own, line = paths()["script"], own_command(paths(), a.cmd)
         say(f"Stopped: this copy of the skill is in a folder Claude Code set aside when its plugin was removed or "
             f"updated ({aside}), and nothing runs from there. Nothing was done. "
-            + (f"The skill set up on this computer is {own}: python3 -I {own} {a.cmd}" if os.path.exists(own) else
-               "Nothing of the skill's is set up on this computer."))
+            + (f"The skill set up on this computer is {own}; run it there: {line}" if os.path.exists(own) else
+               "Nothing of the skill's is set up on this computer; to use it, install the plugin again and run "
+               "setup."))
         return 3
     return a.fn(a)
 

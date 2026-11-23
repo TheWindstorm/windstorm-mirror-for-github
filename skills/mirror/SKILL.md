@@ -13,7 +13,7 @@ written to GitHub.
 The whole tool is one script: `scripts/mirror.py`, two levels above this skill's base directory. Below, `M` means
 `python3 -I <that path>`. After `setup`, the same script is also installed at
 `~/.local/share/windstorm-mirror/mirror.py` (Linux) or `~/Library/Application Support/windstorm-mirror/mirror.py`
-(macOS); the timer runs that copy.
+(macOS; that path holds a space, so in a command it is quoted, as the tool prints it); the timer runs that copy.
 
 ## The order
 

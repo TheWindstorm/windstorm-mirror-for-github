@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G6.12 (row M60): every command the tool prints with its own path is quoted, so it runs as printed where the path holds a space (a Mac's `Application Support`).
 - G3.12 (row M59): `sync --announce` asks the forge first; when it does not answer, nothing is announced and GitHub is not asked.
 - G1.16 (row M58): on a Mac, setup in an account not logged in at the screen says so in the person's words, with the next step, never launchctl's.
 - G10.13 (row M57): this repository's own catalog entry stays `./` only until the first release; after it, an https url pinned to a released version with its full sha.

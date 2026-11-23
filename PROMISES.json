@@ -953,6 +953,22 @@
    "issue": "",
    "seen": "2026-11-23, the same Mac test account: with the forge's service not started, `sync --announce` announced a first copy into a forge that was not answering; the sync after it then said the forge does not answer.",
    "promise": "Nothing is announced that cannot then be done: the announcement asks the forge first, as the sync does; when the forge does not answer it says so with its next step, asks GitHub nothing and records no announcement."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M60",
+   "codon": "G6.12",
+   "test": "test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "",
+   "seen": "2026-11-23, a Mac test account (macOS 13.7.8): the tool printed `python3 -I /Users/<account>/Library/Application Support/windstorm-mirror/mirror.py uninstall --delete-copies` for the person to run, which a shell splits at the space in 'Application Support'.",
+   "promise": "Every command the tool prints with its own copy's path runs as printed when pasted whole into a shell: the path is quoted. The skill's instructions say the Mac path holds a space."
   }
  ],
  "declined": []
