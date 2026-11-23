@@ -2486,6 +2486,37 @@ class G9(unittest.TestCase):
             self.assertEqual(w.gh.release_calls.count(True), 0, "a release or file was asked for with a key")
             self.assertIn("os.replace(tmp, target)", inspect.getsource(mirror.cmd_self_update))
 
+    def test_G9_5_self_update_on_the_latest_release_says_so_with_the_checksum_it_read(self):
+        """The owner's ruling on M13 (2026-11-23): before 0.1.1 there is no newer release to move to, so what is
+        seen at the 0.1.0 release is the read: self-update on the latest release reads it with no key and says
+        there is nothing newer, with the checksum the release names, checked against this very file."""
+        own = hashlib.sha256(fread_bytes(SCRIPT)).hexdigest()
+        with World(self) as w:
+            target = w.p["script"]
+            before = fread_bytes(target)
+            w.gh.release = {"tag_name": f"v{mirror.VERSION}", "body": "Notes.\nmirror.py SHA-256 " + own}
+            rc, out = quiet(mirror.main, ["self-update"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"This is the latest release ({mirror.VERSION}). Its notes name mirror.py SHA-256 {own}, "
+                          "and this file matches it. Nothing was changed.", out)
+            w.gh.release["body"] = "mirror.py SHA-256 " + "0" * 64
+            rc, out = quiet(mirror.main, ["self-update"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"the release says mirror.py SHA-256 {'0' * 64}, and this file's is {own}. Nothing was "
+                          "changed. To put the released file back, update the plugin with Claude Code's own plugin "
+                          "update, then run setup.", out)
+            w.gh.release["body"] = "Notes with no checksum."
+            rc, out = quiet(mirror.main, ["self-update"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("Its notes name no checksum of mirror.py, so this file could not be checked against it.", out)
+            if mirror.vt(mirror.VERSION) > (0, 0, 0):            # a release branch: an older release is said so
+                w.gh.release = {"tag_name": "v0.0.0", "body": ""}
+                rc, out = quiet(mirror.main, ["self-update"])
+                self.assertIn(f"This is {mirror.VERSION}, newer than the latest release (v0.0.0).", out)
+            self.assertEqual(fread_bytes(target), before)
+            self.assertEqual(w.gh.release_calls.count(True), 0, "the release was read with a key")
+            self.assertGreater(len(w.gh.release_calls), 0)
+
     def test_G9_3_uninstall_leaves_only_the_copies_and_deletes_them_only_on_the_persons_word(self):
         with World(self) as w:
             for n in ("alpha", "beta"):
@@ -2909,7 +2940,7 @@ class G6Words(unittest.TestCase):
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
         data = {"SKILL_REPO", "GITEA_VERSION", "last_line",          # facts inside a line, not its words
-                "lock_holder", "UNINSTALL_WAIT"}                     # (which process; how long uninstall waits)
+                "lock_holder", "UNINSTALL_WAIT", "VERSION"}                     # (which process; how long uninstall waits)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop"},
                          set(),
                          "a stop line is built from something this test does not check")
@@ -2985,7 +3016,7 @@ time.sleep(600)
 def stand_ins_unproven(rows, at):
     """T2: the rows due at version `at` whose test leans on a stand-in and that no real machine has proven."""
     return [r["id"] for r in rows if v(r["ship_in"]) <= at and r.get("stand_in", "none") != "none"
-            and not r.get("proven")]
+            and not r.get("proven") and not r.get("exception")]
 
 class Promises(unittest.TestCase):
     """PROMISES.json holds what real machines, and the people using them, showed must change, and the version
@@ -3005,7 +3036,7 @@ class Promises(unittest.TestCase):
         for r in self.rows:
             for k in ("id", "seen", "promise", "codon", "owner", "first_ship_in", "ship_in"):
                 self.assertTrue(r.get(k), f"{r.get('id')}: '{k}' is empty")
-            for k in ("test", "stand_in", "proven", "issue", "moved_why", "moved_by_person"):
+            for k in ("test", "stand_in", "proven", "exception", "issue", "moved_why", "moved_by_person"):
                 self.assertIn(k, r, f"{r['id']}: the column '{k}' is missing")
             self.assertIn(r["owner"], ("person", "maintainer"), r["id"])
             self.assertIn(f"| {r['codon']} |", self.plan, f"{r['id']}: codon {r['codon']} is not in the plan")
@@ -3050,6 +3081,11 @@ class Promises(unittest.TestCase):
         self.assertEqual(stand_ins_unproven([made_up], v("0.0.0")), [])
         self.assertEqual(stand_ins_unproven([dict(made_up, proven="2026-11-23, a stock VM")], v("0.1.0")), [])
         self.assertEqual(stand_ins_unproven([dict(made_up, stand_in="none")], v("0.1.0")), [])
+        # A named exception, by the owner's word only, lets the tag go before the real sighting.
+        self.assertEqual(stand_ins_unproven([dict(made_up, exception="By the owner's word, ...")], v("0.1.0")), [])
+        for r in self.rows:
+            if r.get("exception"):
+                self.assertTrue(r["exception"].startswith("By the owner's word, "), f"{r['id']}: an exception is the owner's")
         unproven = stand_ins_unproven(self.rows, self.version)
         self.assertEqual(unproven, [], f"{version()} cannot be tagged: these rows lean on a stand-in and no real "
                                        "machine has proven them yet (see each row's stand_in)")
