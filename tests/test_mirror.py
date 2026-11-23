@@ -686,7 +686,9 @@ class G2(unittest.TestCase):
         os.environ.pop("WSM_GITHUB_API", None)
         shutil.rmtree(self.gh_root, ignore_errors=True)
 
-    def key_set(self, owner, key):
+    def key_set(self, owner, key, after_setup=True):
+        if after_setup and not mirror.load_json(mirror.paths()["state"], {}).get("port"):
+            mirror.save_state(mirror.paths(), {"port": 1})    # what setup leaves; these tests are about the keys
         out, saved = io.StringIO(), sys.stdin
         sys.stdin = io.StringIO(key + "\n")
         try:
@@ -695,6 +697,29 @@ class G2(unittest.TestCase):
         finally:
             sys.stdin = saved
         return rc, out.getvalue()
+
+    def test_G2_6_a_key_is_never_taken_before_setup(self):
+        """The cold start's run B told the person to run key set before setup. Setup comes first: before it, key set
+        reads no key and keeps nothing, so every key lands where uninstall and the key scan already look."""
+        with Home():
+            p = mirror.paths()
+            saved = sys.stdin
+            sys.stdin = io.StringIO(self.gh.key + "\n")
+            try:
+                rc, out = quiet(mirror.main, ["key", "set", "someone"])
+                left = sys.stdin.read()
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 2, out)
+            self.assertIn("Setup comes first: run setup, then key set someone. No key was read, and nothing was kept.",
+                          out)
+            self.assertEqual(left, self.gh.key + "\n", "the key was read before the refusal")
+            self.assertFalse(os.path.exists(mirror.key_path(p, "someone")))
+            self.assertNotIn("owners", mirror.load_json(p["settings"], {}))
+            self.assertEqual(self.gh.log, [], "GitHub was asked before setup")
+            rc, out = self.key_set("someone", self.gh.key)       # after setup, the same step keeps it
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.exists(mirror.key_path(p, "someone")))
 
     def test_G2_2_each_key_is_kept_in_its_own_file_and_nowhere_else(self):
         key = self.gh.key
