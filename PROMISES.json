@@ -141,7 +141,7 @@
   {
    "id": "M9",
    "seen": "a Git mirror of about 140 repositories that an AI agent ran every day from August to November 2026 on a shared Linux workstation, on stock Gitea beside GitHub: the hourly GitHub API allowance ran out (about 3,900 of 5,000 calls an hour used), and a partial answer was once read as complete.",
-   "promise": "A sync counts its API calls and stops listing, and says so, below a floor of GitHub's remaining allowance.",
+   "promise": "A sync counts its API calls and stops listing below a floor of GitHub's remaining allowance, and says so: how much is left and the floor, never \"spent\".",
    "codon": "G4.4",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
@@ -509,7 +509,7 @@
   {
    "id": "M25",
    "seen": "2026-11-23 (about 12:00 AM ET): another program sharing one GitHub login polled every 3 s, spent the hour's allowance, and everything using that login was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
-   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time; the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
+   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time (\"spent\" only when GitHub said so; under the floor, how much is left and the floor); the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
    "codon": "G4.8",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",

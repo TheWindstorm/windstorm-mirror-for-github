@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G4.4 and G4.8 (rows M9 and M25, #83): under the floor the sync keeps, it says how much is left and the floor, and "spent" only when GitHub says so. A real machine was told "spent" with 4755 calls left.
 - G6.11 (row M49, #81): piping the tool's words into `head` no longer ends in a traceback, and a sync whose reader goes away still finishes.
 - G6.10 (row M48, #79): `sync` says when the forge does not answer, with what to do, even when nothing changed on GitHub. A real machine saw a stopped forge and a sync that said `0 problem(s)`.
 - G3.11 (row M47, #76): `sync` no longer prints the name of every project your include list or exclude patterns leave out, only how many; `left-out` names them when you ask. Five cold starts saw every left-out name land in every agent's transcript.
