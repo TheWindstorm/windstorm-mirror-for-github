@@ -2098,6 +2098,45 @@ class G6(unittest.TestCase):
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
 
+    def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
+        """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said
+        "0 problem(s)" and ended with 0, though no copy had been read. The sync asks the forge first. A forge that
+        does not answer is a problem line with its next step and a failing code; nothing is copied, changed or used
+        up (not the person's go either); once the forge answers again, the next sync is clean."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            port = w.port
+
+            def stop():
+                pr = w.home.procs[-1]
+                pr.terminate()
+                pr.wait(60)
+            stop()
+            rc, out = w.sync()
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{port}, so no copy was read", out)
+            self.assertIn("run status", out)
+            self.assertNotIn("go", mirror.load_json(w.p["state"], {}))
+            w.home.start_forge()
+            self.assertEqual(w.sync()[0], 0)
+            before = w.forge_refs("someone--alpha")
+            self.assertTrue(before)
+            stop()
+            rc, out = w.sync()
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: the forge does not answer", out)
+            self.assertNotIn("0 problem(s)", out)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["last_sync"]["problems"], 1)
+            self.assertIn("the forge does not answer", status()[1])
+            w.home.start_forge()
+            self.assertEqual(w.forge_refs("someone--alpha"), before)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("0 problem(s)", out)
+
     def test_G6_9_a_keys_end_date_is_a_date_or_said_unread_and_no_warning_is_promised_without_it(self):
         """A cold start (2026-11-23): the smallest model told the person the mirror warns two weeks before the key
         ends while its end date could not be read, and SKILL.md itself promised the warning. Each key's end has

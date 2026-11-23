@@ -1497,8 +1497,19 @@ def sync(p, args):
             announce_first_copy(p, st, picked, complete)
             say("Give the person the block above; when they say go to this list, run: sync")
             return 2
-    st["go"] = st.get("go") or now_utc()
     forge = Forge(p, st)
+    # G6.10 (M48): a forge that does not answer is said by the sync itself, even when nothing changed on GitHub, so
+    # a sync never reads as clean while no copy could be read or moved. Nothing is copied, changed or used up: the
+    # go is recorded only by a sync that reached the forge.
+    if forge.call("GET", "/version")[0] != 200:
+        st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": 0, "problems": 1,
+                           "stopped": "the forge does not answer"}
+        save_state(p, st)
+        say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so no copy was read, copied or changed. It "
+            "is your own service on this computer: run status; if it still does not answer, run setup, which starts "
+            "it again and keeps every copy.")
+        return 1
+    st["go"] = st.get("go") or now_utc()
     done, unchanged, started = 0, 0, time.time()
     full_due = time.time() - epoch_of(st.get("last_full_pass")) >= setting(s, "full_pass_hours") * 3600
     limit = setting(s, "git_timeout_s")
