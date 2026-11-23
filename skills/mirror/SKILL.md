@@ -41,8 +41,8 @@ words of your own. Never shorten, merge, reword or leave one out; your own words
    key when it asks. Tell me when it says the key is kept." Never read a key, run nothing that would put a key
    on a command line, in a file you write or in your own output, and never ask for one.
 5. `M sync --announce`. Give the person its `tell the person` block whole: how many repositories, how big, where
-   they go, what is not copied, and that the copy is as private as this computer. Then the **Person** step: the
-   go for the first copy.
+   they go, what happens after a restart, whether large files are copied, what is not copied, and that the copy is
+   as private as this computer. Then the **Person** step: the go for the first copy.
    Running `--announce` again copies nothing; it says it all again.
 6. `M sync`, only after the person said go. The first copy can take a while; it says how far it is.
 7. `M status`. Show the person its `copies:` line and every `problem:` line.

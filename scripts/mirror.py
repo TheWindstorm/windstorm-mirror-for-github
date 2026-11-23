@@ -1255,6 +1255,20 @@ def first_copy_names(picked):
     return sorted((r["full_name"] for _, _, r in picked.values()), key=str.lower)
 
 
+def restart_line(st):
+    """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to."""
+    if system()[0] == "darwin":
+        back, note = comes_back_by_itself()
+        return "After a restart it starts by itself." if back else f"After a restart: {note}"
+    if linger_state() == "yes":
+        return f"After a restart it starts by itself: lingering is on for your account, so {LINGER_MEANS}."
+    if st.get("linger_said") == "no":
+        return ("After a restart it waits until you log in: lingering is off, as you chose, so the mirror syncs only "
+                "while you are logged in. To change that, run setup --linger.")
+    return (f"After a restart: lingering is off, so {NO_LOGIN_NOTE}. The computer's administrator can switch it on "
+            f"with one command: {LINGER_COMMAND.format(user=getpass.getuser())} ({LINGER_MEANS}).")
+
+
 def announce_first_copy(p, st, picked, complete):
     """G3.7, G3.9: what the person says yes to, named: how many, which (the first ANNOUNCE_NAMES by name, the whole
     list in a file of the person's own), how big, where they go, what is not copied, how private. It is kept, and the
@@ -1270,6 +1284,7 @@ def announce_first_copy(p, st, picked, complete):
           else "There are none to copy yet.",
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
+          restart_line(st), LFS_MISSING if not has_git_lfs() else "",
           NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
     st["announced"] = st.get("announced") or now_utc()
     st["announced_list"] = names
@@ -1560,8 +1575,12 @@ def cmd_setup(args):
         elif getattr(args, "linger", False):
             st.pop("linger_said", None)
         save_state(p, st)
-    tell(["After a restart it starts by itself." if back else "", note,
-          LFS_MISSING if not has_git_lfs() else "", PRIVATE_AS_THIS_COMPUTER])
+    # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
+    # person must hear before the go is in the announcement's block, the one they say go to.
+    for line in ("After a restart it starts by itself." if back else "", note, LFS_MISSING if not has_git_lfs() else "",
+                 PRIVATE_AS_THIS_COMPUTER):
+        if line:
+            say(line)
     return 0 if ok else 1
 
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.6 (row M34, #47): what you must hear before you say go is in the announcement you say go to: what happens after a restart, whether large files are copied, what is not copied and how private the copy is. Setup prints no block of its own any more; a cold start saw the smallest model lose it by going straight on.
 - G1.11 (row M33, #44): every wait for the forge's first answer (setup's, upgrade-forge's and the tests') is 90 s, more than three times the slowest first answer measured on a slow machine: 25 s after a restart, on one processor with 512 MB and an old laptop's disk. If the forge is not answering by then, setup says what that means, to run `status` in 5 minutes, and where the forge's own log is. A test that waits for the forge and fails now shows the forge's last log lines. Seen first on GitHub's own runner, where one first start took more than 60 s.
 - G1.3 (C10): the test now shows Actions are off for the whole forge, not only set off: the runner service is not served, so no runner can join, and a project's Actions cannot be turned on. Checked against the same forge with Actions on, where a runner registers.
 - G4.8 (row M25, #38): when GitHub says the allowance is spent (or it falls below the floor), the sync says one line with the reset in your own time, asks GitHub nothing before it, even after a restart, and marks no project failed. The plan counts the calls a sync makes.
