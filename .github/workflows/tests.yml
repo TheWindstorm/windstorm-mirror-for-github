@@ -20,9 +20,36 @@ jobs:
           - {os: ubuntu-24.04, python: "3.10"}
           - {os: ubuntu-24.04, python: "3.13"}
           - {os: macos-26, python: "3.9"}
+        # T4: a pull request runs ONE Mac job, the floor's Python; the rest of the Mac matrix is test-mac below.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # a release branch is compared with main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: The tests, with the real pinned Gitea (downloaded and checked against its pin by the tests)
+        env:
+          WSM_REQUIRE_GITEA: "1"
+          WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
+          WSM_TEST_REPORT: ${{ runner.temp }}/report.json
+        run: python -I tests/test_mirror.py -v
+      - name: Keep what this job saw pass, for the join
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.os }}-${{ matrix.python }}
+          path: ${{ runner.temp }}/report.json
+          if-no-files-found: error
+  test-mac:
+    # T4: Mac jobs are shared by the whole family (rule 17): the full Mac matrix runs on main and release-* only.
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - {os: macos-26, python: "3.13"}
-        # T4: a pull request runs ONE Mac job, the floor's Python; the full Mac matrix runs on main and release-*.
-        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"macos-26","python":"3.13"}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,7 +71,7 @@ jobs:
           path: ${{ runner.temp }}/report.json
           if-no-files-found: error
   gate:
-    needs: test
+    needs: [test, test-mac]
     if: always()
     runs-on: ubuntu-24.04
     steps:

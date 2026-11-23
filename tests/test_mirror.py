@@ -2908,9 +2908,15 @@ class Strand(unittest.TestCase):
         branch."""
         wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
         pr = "github.event_name == 'pull_request'"
-        self.assertIn(f"""exclude: ${{{{ {pr} && fromJSON('[{{"os":"macos-26","python":"3.13"}}]') || fromJSON('[]') }}}}""", wf)
-        macs = re.findall(r'\{os: (macos-[0-9]+), python: "([0-9.]+)"\}', wf)
-        self.assertEqual(macs, [("macos-26", "3.9"), ("macos-26", "3.13")], "the Mac jobs on main and release-*")
+        jobs = re.split(r"^  (?=[a-z-]+:\n)", wf.split("\njobs:\n", 1)[1], flags=re.M)
+        job = {j.split(":", 1)[0]: j for j in jobs if j.strip()}
+        macs = lambda j: re.findall(r'\{os: (macos-[0-9]+), python: "([0-9.]+)"\}', job[j])
+        self.assertEqual(macs("test"), [("macos-26", "3.9")], "a pull request runs one Mac job, the floor's Python")
+        self.assertNotIn("if:", job["test"].split("steps:")[0])
+        self.assertEqual(macs("test-mac"), [("macos-26", "3.13")])
+        self.assertIn("    if: github.event_name != 'pull_request'\n", job["test-mac"])
+        self.assertEqual(job["test"].split("steps:", 1)[1], job["test-mac"].split("steps:", 1)[1], "the same steps")
+        self.assertIn("needs: [test, test-mac]", job["gate"])
         self.assertIn(f"--expect ${{{{ {pr} && 4 || 5 }}}}", wf)
         self.assertIn(f"group: ${{{{ {pr} && format('pr-{{0}}', github.event.pull_request.number) || "
                       "format('run-{0}', github.run_id) }}", wf)
