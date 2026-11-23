@@ -974,7 +974,8 @@ class Forge:
 
     @staticmethod
     def why(code, body):
-        return f"it answered {code}" if code else f"no answer: {(body or {}).get('message', '')}"[:160]
+        # M53: no raw text from the library in a line for a person; no answer is said as that
+        return f"it answered {code}" if code else "it did not answer"
 
     def rename(self, rid, cur, new):
         code, body = self.call("PATCH", f"/repos/{self.user}/{urllib.parse.quote(cur)}", {"name": new})
@@ -2065,8 +2066,15 @@ def cmd_restore(args):
     if not args.check:
         say("Say what to do: restore --check, or restore --to <url> <owner/name>.")
         return 2
+    # G7.5 (M53): a forge that does not answer is said as that, with its next step; it is not a finding about any
+    # copy (a real machine was told "1 difference(s)" and a raw connection error, with no step).
+    if forge.call("GET", "/version")[0] != 200:
+        say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so no copy could be checked; this says "
+            "nothing about the copies themselves. It is your own service on this computer: run status; if it still "
+            "does not answer, run setup, which starts it again and keeps every copy, then run restore --check again.")
+        return 1
     work = scratch(p, "restore-check")
-    diffs, whole, total = [], 0, 0
+    diffs, unread, whole, total = [], [], 0, 0
     try:
         for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
             if not rec.get("forge_id"):
@@ -2076,7 +2084,7 @@ def cmd_restore(args):
             try:
                 cur = forge.by_id(rec["forge_id"])
             except CouldNotRead as e:
-                diffs.append(f"{name}: its copy could not be read: {e}")
+                unread.append(f"{name}: its copy could not be read: {e}")   # rule 6: not a difference
                 continue
             if not cur:
                 diffs.append(f"{name}: its copy is not in the forge")
@@ -2105,11 +2113,11 @@ def cmd_restore(args):
                 whole += 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    for d in diffs:
+    for d in diffs + unread:
         say(d)
-    say(f"restore check: {total} copies, {whole} whole, {len(diffs)} difference(s); "
-        "nothing outside this computer was asked")
-    return 0 if not diffs and total else 1
+    say(f"restore check: {total} copies, {whole} whole, {len(diffs)} difference(s), {len(unread)} could not be read; "
+        "nothing outside this computer was asked" + ("; run restore --check again when the forge answers" if unread else ""))
+    return 0 if not diffs and not unread and total else 1
 
 
 def github_hosts():

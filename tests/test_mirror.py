@@ -2427,7 +2427,7 @@ class G7(unittest.TestCase):
             before = set(os.listdir(w.p["data"]))
             rc, out = quiet(mirror.main, ["restore", "--check"])
             self.assertEqual(rc, 0, out)
-            self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s); nothing outside this computer was asked", out)
+            self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s), 0 could not be read; nothing outside this computer was asked", out)
             self.assertEqual(set(os.listdir(w.p["data"])), before, "the scratch folder was left behind")
             # A copy that no longer holds what GitHub last showed is named, ref by ref.
             cache = os.path.join(w.p["cache"], str(w.gh.repos["someone/alpha"]["id"]) + ".git")
@@ -2446,6 +2446,45 @@ class G7(unittest.TestCase):
             self.assertIn("someone/beta: ", out)
             self.assertIn("2 copies, 0 whole", out)
             self.assertEqual(w.gh.writes(), [])
+
+    def test_G7_5_restore_check_says_when_the_forge_does_not_answer(self):
+        """A real machine (2026-11-23): with the forge's service stopped, restore --check printed a raw connection
+        error and "0 whole, 1 difference(s)", with no next step. A forge that does not answer is said as that, with
+        its next step and a failing code, and is never counted as a difference in a copy."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            pr = w.home.procs[-1]
+            pr.terminate()
+            pr.wait(60)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{w.port}, so no copy could be checked", out)
+            self.assertIn("run status", out)
+            for word in ("difference", "whole", "urlopen", "Errno"):
+                self.assertNotIn(word, out)
+            w.home.start_forge()
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 whole, 0 difference(s), 0 could not be read", out)
+            # One copy that cannot be read, with the forge answering: a third number, never a difference, and no
+            # raw text from the library.
+            real = mirror.Forge.call
+
+            def call(forge, method, path, body=None):
+                return (0, {"message": "<urlopen error [Errno 111] Connection refused>"}) if "/repositories/" in path \
+                    else real(forge, method, path, body)
+            mirror.Forge.call = call
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--check"])
+            finally:
+                mirror.Forge.call = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn("someone/alpha: its copy could not be read: the forge could not be read (it did not answer)", out)
+            self.assertIn("0 whole, 0 difference(s), 1 could not be read", out)
+            self.assertNotIn("urlopen", out)
 
     def test_G7_3_a_copy_is_restored_to_a_new_empty_home(self):
         with World(self) as w:
