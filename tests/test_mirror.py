@@ -2927,6 +2927,9 @@ class G10(unittest.TestCase):
         skill'), never our own labels for how we work. The words are built here so this file does not hold them."""
         ours = [re.compile(r"\b" + w + r"\b", re.I) for w in ("la" + "nes?", "fl" + "eet", "test-" + "now", "board-" + "say")]
         files = subprocess.run(["git", "-C", ROOT, "ls-files"], capture_output=True, text=True).stdout.split()
+        if not files:                                  # a copy with no .git (a test box): every file but caches
+            files = [os.path.relpath(os.path.join(d, n), ROOT) for d, ds, ns in os.walk(ROOT)
+                     for n in ns if "__pycache__" not in d and not n.endswith(".pyc")]
         self.assertGreater(len(files), 10)
         found = []
         for name in files:
