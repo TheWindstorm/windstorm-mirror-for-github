@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G3.7 (row M26, #28): `sync --announce` never copies, the first time or any time after; a cold start saw an agent run it twice and get the first copy without the go. The go is recorded with its time, and `status` says whether the first copy was made on the person's go or waits for it.
 - G5.4 (row M24, #26): a read that failed is "could not be read", never a no. A test fails every read of GitHub and of the forge in turn, once and from then on, under sync, status and restore (42 failures), and holds that the forge is left exactly as it was. It found that one failed forge read made sync move a live copy aside and make a new one; that restore said a copy was missing when its read had only failed; and that an unreadable list could be announced as 0 repositories. All three are fixed. GitHub's 404 on a private project is held apart from "gone": it is said gone only when a list read that succeeded no longer names it, and the copy is kept; a key GitHub refuses is said as a key that stopped working, with the step to make a new one.
 - The dry run's lingering sentence says the choice once (`setup --linger` is yes, `setup --no-linger` is no), where it said `setup --linger` twice.
 - From a stock Ubuntu 24.04 virtual machine (rows M20 to M23):
