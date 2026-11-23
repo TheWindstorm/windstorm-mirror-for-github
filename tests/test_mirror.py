@@ -2098,6 +2098,23 @@ class G6(unittest.TestCase):
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
 
+    def test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback(self):
+        """A real machine (2026-11-23): `status | head -3` ended in a Python traceback (a broken pipe). The tool is
+        run with its output going to a pipe nobody reads: it ends with its own code, says nothing on stderr, and
+        does the whole of its work (setup --dry-run reads this computer to its end and changes nothing)."""
+        home = tempfile.mkdtemp(prefix="wsm-pipe-")
+        TEMPS.append(home)
+        r, w = os.pipe()
+        os.close(r)                                   # the reader is gone before the first word
+        try:
+            pr = subprocess.run([sys.executable, "-I", SCRIPT, "setup", "--dry-run"], stdout=w, stderr=subprocess.PIPE,
+                                text=True, timeout=120, env=dict(os.environ, WSM_HOME=home))
+        finally:
+            os.close(w)
+        self.assertEqual(pr.returncode, 0, pr.stderr)
+        self.assertEqual(pr.stderr, "")
+        self.assertEqual(os.listdir(home), [])
+
     def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
         """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said
         "0 problem(s)" and ended with 0, though no copy had been read. The sync asks the forge first. A forge that
