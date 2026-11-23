@@ -878,7 +878,7 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "proven": "",
+   "proven": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine, with real Claude Code 2.1.330 installed by its own installer and no sign-in of any kind, the skill installed through this repository's own catalog file (a local copy of the branch under test), and a stand-in for GitHub (no key of anyone's): setup run from the plugin's folder recorded Claude Code's list of installed plugins; after Claude Code's own plugin uninstall (its row emptied, the plugin's folder marked set aside), status said the plugin was removed, with the one command that takes the mirror off, and after a real restart the timer's own sync said the same; status and uninstall run from the set-aside folder each stopped with code 3, named the copy setup made and changed nothing; then that copy's own uninstall took the mirror off with Claude Code's plugin gone.",
    "moved_why": "",
    "moved_by_person": "",
    "id": "M55",
