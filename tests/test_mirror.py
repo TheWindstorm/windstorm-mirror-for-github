@@ -2806,6 +2806,38 @@ class G8(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("problem: the forge answers on 192.0.2.7, not only on 127.0.0.1", out)
 
+    def test_G8_4_the_forge_never_writes_what_may_log_in_to_this_computer(self):
+        """M64 (seen 2026-11-23 with the real pinned Gitea): stock Gitea writes the account's ~/.ssh/authorized_keys
+        when it starts, even with SSH off: an empty one made where there was none, the person's own rewritten. With
+        the forge's settings it is never touched, and nothing is made in ~/.ssh."""
+        for had_one in (True, False):
+            with Home(linger="yes") as h:
+                ssh = os.path.join(os.environ["HOME"], ".ssh")
+                ak = os.path.join(ssh, "authorized_keys")
+                if had_one:
+                    os.makedirs(ssh, mode=0o700)
+                    with open(ak, "w") as f:
+                        f.write("ssh-ed25519 AAAAC3NzaPERSONSOWNKEY person@laptop\n")
+                    os.chmod(ak, 0o600)
+                    before = os.stat(ak)
+                h.place_gitea()
+                rc, out = h.setup()
+                self.assertEqual(rc, 0, out)
+                h.start_forge()
+                time.sleep(2)                                     # past the forge's own start-up writes
+                if had_one:
+                    after = os.stat(ak)
+                    self.assertEqual((after.st_ino, after.st_mtime_ns, after.st_size),
+                                     (before.st_ino, before.st_mtime_ns, before.st_size),
+                                     "the forge rewrote the person's authorized_keys")
+                    self.assertEqual(fread(ak), "ssh-ed25519 AAAAC3NzaPERSONSOWNKEY person@laptop\n")
+                else:
+                    self.assertFalse(os.path.exists(ssh), "the forge made ~/.ssh in the person's home")
+                ini = fread(mirror.paths()["app_ini"])
+                for line in ("SSH_CREATE_AUTHORIZED_KEYS_FILE = false", "SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE = false",
+                             f"SSH_ROOT_PATH = {mirror.paths()['forge']}/ssh"):
+                    self.assertIn(line, ini)
+
     def test_G8_2_exposing_the_forge_is_left_to_the_person(self):
         src = fread(SCRIPT)
         self.assertNotIn("0.0.0.0", src)
@@ -2983,6 +3015,50 @@ class G9(unittest.TestCase):
             self.assertEqual(w.gh.release_calls.count(True), 0, "the release was read with a key")
             self.assertGreater(len(w.gh.release_calls), 0)
 
+    def test_G9_8_the_census_names_everything_still_here_and_whose_it_is(self):
+        """M63, the family's rule 8 (2026-11-23: an agent invents where the tool is silent): the census names
+        everything still on this computer because of the skill, kept on purpose or simply left, with where it is and
+        whose it is to delete: the folder the skill was downloaded into (a copy of its repository, or Claude Code's
+        plugin folder and entry), and the service's journal lines. After uninstall, no file of the skill's is left
+        in the person's home outside the folder it names as kept."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            self.assertEqual(mirror.load_json(p["state"], {})["setup_from"], ROOT)
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            lines = out.strip().splitlines()
+            self.assertIn(f"  {ROOT}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
+                          "delete it like any folder when you want. Nothing runs from it now.", lines)
+            if mirror.system()[0] != "darwin":
+                self.assertEqual(lines[-1], "  Any lines of the service in this computer's journal (journalctl --user): "
+                                            "the system ages them out by itself.")
+            self.assertNotIn("Nothing of the skill's is left", out)
+            left = [os.path.join(d, f) for d, _, fs in os.walk(w.home.tmp) for f in fs]
+            self.assertEqual([x for x in left if not x.startswith(p["data"] + os.sep)], [],
+                             "a file of the skill's is left that the census does not name as kept")
+            # A plugin: Claude Code's folder and entry are Claude Code's, with its own command where it was seen.
+            st = mirror.load_json(p["state"], {})
+            plug = os.path.join(w.home.tmp, "cc", "plugins", "cache", mirror.PLUGIN, mirror.PLUGIN, "0.1.0")
+            os.makedirs(os.path.join(plug, "scripts"))
+            st["setup_from"] = plug
+            mirror.save_state(p, st)
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertIn(f"  {plug}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
+                          "are Claude Code's; it removes both with its own plugin uninstall", out)
+            if mirror.system()[0] != "darwin":
+                self.assertIn(f"claude plugin uninstall {mirror.PLUGIN}@{mirror.PLUGIN}. Nothing runs from them now.", out)
+            # The record deleted with the copies: what was downloaded is still named, with no place to guess at.
+            shutil.rmtree(p["data"])
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertIn("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
+                          "Claude Code's plugin folder): no record of where it is is left on this computer.", out)
+            self.assertIn("Kept: nothing; there is no folder of copies and no record of the skill's on this computer "
+                          "now.", out)
+
     def test_G9_7_the_agent_never_deletes_or_offers_to_delete_what_uninstall_kept(self):
         """M62, the family's rule 8 (2026-11-23: a small model offered, unasked, to delete what an uninstall kept):
         the skill's text tells the agent never to delete it, and never to offer to, unless the person asks in their
@@ -3134,7 +3210,8 @@ class G9(unittest.TestCase):
                 lines = out.strip().splitlines()
                 self.assertIn("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and "
                               "the keys were already gone.", lines)
-                self.assertEqual(lines[-1], "Kept: nothing. Nothing of the skill's is left on this computer.")
+                self.assertIn("Kept: nothing; there is no folder of copies and no record of the skill's on this "
+                              "computer now.", lines)
                 self.assertFalse(os.path.exists(mirror.paths()["data"]))
         with World(self) as w:
             for n in ("alpha", "beta"):
@@ -3156,15 +3233,16 @@ class G9(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn(f"Waiting: a sync is running (process {os.getpid()}); uninstall goes on as soon as it ends", out)
             lines = out.strip().splitlines()
-            self.assertEqual(lines[-1], f"Kept: the folder of copies, {p['data']} (2 copies), with the record of what "
-                                        "the skill did here. It is yours; delete it only when you are sure, with: "
-                                        "uninstall --delete-copies")
+            kept = lines.index(f"Kept: the folder of copies, {p['data']} (2 copies), with the record of what the skill "
+                               "did here. It is yours; delete it only when you are sure, with: uninstall --delete-copies")
+            self.assertEqual(lines[kept + 1], "Still on this computer, and not uninstall's to take:")
+            self.assertTrue(all(x.startswith("  ") for x in lines[kept + 2:]), lines[kept:])
             self.assertIn("Gone now:", lines)
             # Twice: nothing more goes, the copies and the record stay, and it says so last.
             rc, out = quiet(mirror.main, ["uninstall"])
             self.assertEqual(rc, 0, out)
             self.assertIn("Gone now: nothing;", out)
-            self.assertTrue(out.strip().splitlines()[-1].startswith("Kept: the folder of copies"))
+            self.assertTrue(any(x.startswith("Kept: the folder of copies") for x in out.strip().splitlines()))
             self.assertTrue(os.path.exists(p["state"]))
             # A sync that does not end: the line names what runs and the one next step, and nothing is removed.
             with open(lock, "w") as f:

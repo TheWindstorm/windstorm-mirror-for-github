@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- G8.4 (row M64): the forge no longer writes the account's `~/.ssh/authorized_keys` (stock Gitea did, at each start, even with SSH off): it is never touched, and nothing is made in `~/.ssh`.
+- G9.8 (row M63): uninstall's census names everything still on the computer because of the skill: the folder it was downloaded into and whose it is to delete, and the service's journal lines; it no longer says nothing is left when the downloaded folder is still there.
 - G3.13 (row M61): the go for the first copy is the person's own Enter, in their own terminal: `go` prints there the same block the agent is given, copies nothing, and keeps the go for exactly that list; the first copy refuses without it, so a yes in a conversation is not the go.
 - G9.7 (row M62): the skill tells the agent never to delete, or offer to delete, what uninstall kept, unless the person asks in their own words.
 - G6.12 (row M60): every command the tool prints with its own path is quoted, so it runs as printed where the path holds a space (a Mac's `Application Support`).

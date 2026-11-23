@@ -247,6 +247,12 @@ DOMAIN = 127.0.0.1
 ROOT_URL = http://127.0.0.1:{port}/
 DISABLE_SSH = true
 START_SSH_SERVER = false
+; G8.4 (M64): stock Gitea writes the account's ~/.ssh/authorized_keys when it starts, even with SSH off (seen
+; 2026-11-23: an empty file made where there was none, and the person's own file rewritten). Never: what may log in
+; to this computer is not the forge's to touch, and any SSH file of its own stays in its own folder.
+SSH_CREATE_AUTHORIZED_KEYS_FILE = false
+SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE = false
+SSH_ROOT_PATH = {f}/ssh
 LFS_START_SERVER = true
 OFFLINE_MODE = true
 
@@ -1848,6 +1854,10 @@ def cmd_setup(args):
         os.replace(p["script"] + ".tmp", p["script"])
     if plugin_registry_for(here):
         st["plugin_registry"] = plugin_registry_for(here)
+    if os.path.abspath(p["script"]) != here:
+        # G9.8 (M63): the folder the skill was downloaded into (a copy of its repository, or Claude Code's plugin
+        # folder), so that uninstall can name it as still here. Setup run again from its own copy keeps the record.
+        st["setup_from"] = os.path.dirname(os.path.dirname(here))
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
     ok, why = install_service(p)
@@ -2787,12 +2797,37 @@ def cmd_uninstall(args):
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
             rc = 1
-    uninstall_census(p, removed, linger_said, n)
+    uninstall_census(p, removed, linger_said, n, st)
     return rc
 
 
-def uninstall_census(p, removed, linger_said, n):
-    """Rule 8: the last thing uninstall prints says what is gone now and what is kept. Run twice, it says so."""
+def still_here(p, st):
+    """G9.8 (M63, the family's rule 8, 2026-11-23: an agent invents where the tool is silent): everything still on
+    this computer because of the skill that uninstall does not take, with where it is and whose it is to delete."""
+    lines = []
+    root = st.get("setup_from")
+    if root and os.path.isdir(root):
+        if plugin_registry_for(os.path.join(root, "scripts", "mirror.py")):
+            how = (f"with its own plugin uninstall: claude plugin uninstall {PLUGIN}@{PLUGIN}" if system()[0] != "darwin"
+                   else "with its own plugin uninstall")
+            lines.append(f"{root}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
+                         f"are Claude Code's; it removes both {how}. Nothing runs from them now.")
+        else:
+            lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
+                         "delete it like any folder when you want. Nothing runs from it now.")
+    elif not root and not os.path.exists(p["state"]):
+        lines.append("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
+                     "Claude Code's plugin folder): no record of where it is is left on this computer. It is yours, "
+                     "or Claude Code's for a plugin; nothing runs from it now.")
+    if system()[0] != "darwin":
+        lines.append("Any lines of the service in this computer's journal (journalctl --user): the system ages them "
+                     "out by itself.")
+    return lines
+
+
+def uninstall_census(p, removed, linger_said, n, st=None):
+    """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
+    computer because of the skill that uninstall does not take. Run twice, it says so."""
     say("uninstall: what is gone, and what is kept.")
     if removed:
         say("Gone now:")
@@ -2809,7 +2844,12 @@ def uninstall_census(p, removed, linger_said, n):
     elif os.path.exists(p["data"]):
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
     else:
-        say("Kept: nothing. Nothing of the skill's is left on this computer.")
+        say("Kept: nothing; there is no folder of copies and no record of the skill's on this computer now.")
+    left = still_here(p, st or {})
+    if left:
+        say("Still on this computer, and not uninstall's to take:")
+        for x in left:
+            say(f"  {x}")
 
 
 def cmd_run_forge(args):

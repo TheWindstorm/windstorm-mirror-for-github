@@ -1001,6 +1001,38 @@
    "stand_in": "none",
    "seen": "2026-11-23, a sister skill's cold start with the smallest model: after an uninstall, the agent offered, unasked, to delete what the uninstall had kept. This skill's text said deleting the copies is the person's own command, but not that the agent never offers it.",
    "promise": "The skill's text tells the agent never to delete, and never to offer to delete, the folder of copies or the record that uninstall kept, unless the person asks in their own words in that conversation; even then, the deletion is the person's own command in a terminal window of their own."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "",
+   "id": "M63",
+   "codon": "G9.8",
+   "test": "test_G9_8_the_census_names_everything_still_here_and_whose_it_is",
+   "stand_in": "the service manager (stand-ins for systemctl and launchctl) and Claude Code's plugin folder (a folder of the same shape)",
+   "seen": "2026-11-23, read against the family's rule 8 (an agent invents where the tool is silent): uninstall's census named what it removed and the folder of copies it kept, but not the folder the skill was downloaded into, nor Claude Code's plugin folder and entry, nor the service's journal lines; with the copies deleted it said 'Nothing of the skill's is left on this computer', which was false whenever the downloaded folder stayed.",
+   "promise": "The census names everything still on this computer because of the skill, kept on purpose or simply left, with where it is and whose it is to delete: the folder the skill was downloaded into (setup records it: a copy of its repository is the person's; Claude Code's plugin folder and entry are Claude Code's, removed by its own plugin uninstall, whose line is printed where it was run), and the service's journal lines; with no record left, it says so. It never says nothing is left when something is."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "",
+   "id": "M64",
+   "codon": "G8.4",
+   "test": "test_G8_4_the_forge_never_writes_what_may_log_in_to_this_computer",
+   "stand_in": "a person's home in a temporary folder (the real pinned Gitea, started as the service starts it)",
+   "seen": "2026-11-23, while the census of rule 8 was built, every file left in a test home after uninstall was listed: ~/.ssh/authorized_keys was there, and nothing of ours writes it. Stock Gitea 28.4.0 writes it when it starts, even with SSH off (its default, SSH_CREATE_AUTHORIZED_KEYS_FILE): with none, it made ~/.ssh and an empty authorized_keys; with the person's own, it rewrote it as a new file, the content kept.",
+   "promise": "Every program the skill starts counts as the skill. The forge never writes what may log in to this computer: its settings turn off Gitea's authorized_keys and principals files and keep any SSH file of its own inside its own folder. The person's authorized_keys is the same file (inode, time and checksum) after setup, a sync and uninstall, and with none, nothing is made in ~/.ssh."
   }
  ],
  "declined": []
