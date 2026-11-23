@@ -58,10 +58,11 @@ their password, and never type into a login page. Say: "Please log in to GitHub 
 your password."
 
 **Making each key.** Say, for each owner: "Open https://github.com/settings/personal-access-tokens/new and make a
-fine-grained key. Name: windstorm-mirror-<owner>. Expiration: your choice (I will warn you
-two weeks before it ends). Resource owner: <owner>. Repository access: All repositories. Permissions, Repository
+fine-grained key. Name: windstorm-mirror-<owner>. Expiration: your choice. Resource owner: <owner>. Repository access: All repositories. Permissions, Repository
 permissions: Contents, Read-only (Metadata, Read-only, comes with it). Nothing else. Then copy the key; you will
-paste it in a moment, not to me." A key has one owner: an organisation needs a key of its own.
+paste it in a moment, not to me." A key has one owner: an organisation needs a key of its own. Never promise a
+warning before a key ends: the announcement says, for each key, whether its end date was read and so whether a
+warning can be promised.
 
 **An organisation's approval.** An organisation can require its owners to approve a key. Say: "<organisation>
 may ask one of its owners to approve this key. Until they do, the key waits as pending and `key set` will say it
