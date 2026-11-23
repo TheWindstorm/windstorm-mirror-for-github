@@ -2318,6 +2318,72 @@ class G10(unittest.TestCase):
                      "5. `M sync --announce`. Give the person its `tell the person` block whole"):
             self.assertIn(step, order)
 
+
+class G6Words(unittest.TestCase):
+    NEXT = re.compile(r"\b(run|again|install|make|ask|try|wait|free|name|check|open an issue)\b|`|python3 -I", re.I)
+
+    def test_G6_8_every_stop_and_needs_you_line_names_what_happened_and_the_next_step(self):
+        """A cold start (2026-11-23): restore --check stopped on a git error with no next step, and the agent opened
+        the script's source four times to find one. Every line the tool says just before it stops with a failing
+        code, and every message it stops with, names the one next step. A line built elsewhere is checked where it
+        is built."""
+        import ast
+        tree = ast.parse(fread(SCRIPT))
+
+        def words(n):
+            return " ".join(x.value for x in ast.walk(n) if isinstance(x, ast.Constant) and isinstance(x.value, str))
+
+        funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        lacking, built, seen = [], set(), 0
+        for node in ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                b = getattr(node, field, None)
+                if not isinstance(b, list):
+                    continue
+                for a, nxt in zip(b, b[1:]):
+                    if not (isinstance(a, ast.Expr) and isinstance(a.value, ast.Call)
+                            and getattr(a.value.func, "id", None) == "say" and isinstance(nxt, ast.Return)
+                            and isinstance(nxt.value, ast.Constant) and nxt.value.value not in (0, None)):
+                        continue
+                    seen += 1
+                    arg, mine = a.value.args[0], set()
+                    for x in ast.walk(arg):                   # names and calls the words are built from
+                        if isinstance(x, ast.Name) and x.id.isupper():
+                            mine.add(x.id)
+                        elif isinstance(x, ast.Call) and getattr(x.func, "id", None) in funcs:
+                            mine.add(x.func.id)
+                        elif (isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr == "replace"
+                              and isinstance(x.func.value, ast.Name) and x.func.value.id == "why"):
+                            mine.add("check_key")             # say(why.replace(key, ...)): the key check's words
+                    if isinstance(arg, ast.Name) and not arg.id.isupper():
+                        mine.add(f"<{arg.id}>")
+                    if words(arg).strip() == "STOPPED:":
+                        mine.add("HardStop")                  # says a HardStop's words: every raise is checked
+                    built |= mine
+                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop"}:
+                        continue                              # checked below, where the words are built
+                    if not self.NEXT.search(words(arg)):
+                        lacking.append((a.lineno, words(arg)[:90]))
+            if (isinstance(node, ast.Raise) and isinstance(getattr(node, "exc", None), ast.Call)
+                    and getattr(node.exc.func, "id", None) in ("SystemExit", "HardStop")):
+                seen += 1
+                if not self.NEXT.search(words(node.exc)):
+                    lacking.append((node.lineno, words(node.exc)[:90]))
+        self.assertGreater(seen, 50, "too few stop lines found to call this a proof")
+        self.assertEqual(lacking, [])
+        # Built elsewhere: each is checked where it is built.
+        self.assertTrue(self.NEXT.search(mirror.LINGER_CHOICE))
+        self.assertTrue(self.NEXT.search(mirror.git_missing_sentence()))
+        self.assertTrue(self.NEXT.search(words(funcs["git_out_of_service_reach"])))
+        for r in ast.walk(funcs["check_key"]):
+            if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
+                    isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
+                self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
+        data = {"SKILL_REPO", "GITEA_VERSION", "last_line"}          # facts inside a line, not its words
+        self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop"},
+                         set(),
+                         "a stop line is built from something this test does not check")
+
 class Invariants(unittest.TestCase):
     def test_INV6_standard_library_only_and_no_other_network(self):
         import ast

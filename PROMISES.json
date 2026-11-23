@@ -400,6 +400,20 @@
    "issue": "#34",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M30",
+   "seen": "2026-11-23, a cold start on a stock Ubuntu 24.04 virtual machine (a fresh agent, the strongest model): restore --check stopped on a git error with no next step, and the agent opened the script's source four times. Read with the sister skill's method, 39 of the tool's 63 stop lines named no next step.",
+   "promise": "Every stop and needs-you line names what happened and the one next step; a line built elsewhere is checked where it is built.",
+   "codon": "G6.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G6_8_every_stop_and_needs_you_line_names_what_happened_and_the_next_step",
+   "proven": "",
+   "issue": "#35",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []
