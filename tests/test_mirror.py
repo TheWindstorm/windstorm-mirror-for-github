@@ -117,6 +117,7 @@ class Home:
         self.pkcheck = 1             # polkit's exit for "may this person switch on their own lingering"; None: no pkcheck
         self.timer_mono = ""         # the timer's next run on the boot clock (systemd's NextElapseUSecMonotonic)
         self.kws = []                # the keyword arguments of each command the stand-in answered
+        self.mac_session = True      # a Mac: is this account logged in at the screen (its gui/<uid> domain there)
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -159,6 +160,9 @@ class Home:
                     return subprocess.CompletedProcess(cmd, 0, "ActiveState=inactive\nNextElapseUSecRealtime=\n", "")
                 return subprocess.CompletedProcess(cmd, 0, f"ActiveState=active\nNextElapseUSecRealtime={self.timer_next}\n"
                                                             f"NextElapseUSecMonotonic={self.timer_mono}\n", "")
+            if cmd == ["launchctl", "print", f"gui/{os.getuid()}"]:
+                return subprocess.CompletedProcess(cmd, 0 if self.mac_session else 113, "", "" if self.mac_session
+                                                   else "Could not find domain for user gui: " + str(os.getuid()))
             if cmd[:2] == ["launchctl", "print"]:
                 if self.timer_next is None:
                     return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
@@ -524,6 +528,39 @@ class G1(unittest.TestCase):
                 self.assertFalse([c for c in h.calls if c[0] not in ("defaults", "fdesetup")], "it changed something")
         finally:
             mirror.system = saved
+
+    def test_G1_16_on_a_mac_with_no_login_session_setup_says_so_in_the_persons_words(self):
+        """M58 (a Mac test account, 2026-11-23): setup over ssh into an account that is not logged in at the Mac's
+        screen could not load the forge's launch agent, and said launchctl's own words ("Bootstrap failed: 125:
+        Domain does not support specified action"). It says three things in the person's words: this account is not
+        logged in at this Mac's screen; the forge starts once it is; log in there, then run setup again. No line for
+        a person carries launchctl's words, and nothing is loaded into a session that is not there."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                h.mac_session = False
+                ok, why = mirror.install_service(p)
+                self.assertFalse(ok)
+                self.assertEqual(why, mirror.MAC_NO_SESSION)
+                for said in ("not logged in at this Mac's screen", "it starts once this account is",
+                             "Log in to this account at this Mac's screen, then run setup again"):
+                    self.assertIn(said, why)
+                self.assertFalse([c for c in h.calls if c[:2] == ["launchctl", "bootstrap"]], "nothing loaded")
+                h.mac_session, h.service_ok = True, False         # a session, and launchctl refuses anyway
+                ok, why = mirror.install_service(p)
+                self.assertFalse(ok)
+                self.assertIn("this Mac did not load the forge's launch agent (code 1); run setup again", why)
+                self.assertNotIn("Failed to connect", why)
+                h.service_ok = True
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertTrue([c for c in h.calls if c[:2] == ["launchctl", "bootstrap"]])
+        finally:
+            mirror.system = saved
+        for fn in (mirror.cmd_setup, mirror.setup_from):      # both say `why` whole, after the same words
+            self.assertIn("did not start: {why}", inspect.getsource(fn))
 
     def test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded(self):
         """Seen on a stock Ubuntu 24.04 with git removed: setup downloaded Gitea, then stopped on Gitea's own words."""
@@ -2223,6 +2260,33 @@ class G6(unittest.TestCase):
         self.assertEqual(pr.returncode, 0, pr.stderr)
         self.assertEqual(pr.stderr, "")
         self.assertEqual(os.listdir(home), [])
+
+    def test_G3_12_the_announcement_asks_the_forge_first(self):
+        """M59 (a Mac test account, 2026-11-23): with the forge's service not started, `sync --announce` announced a
+        first copy that could not then be made. Nothing is announced that cannot then be done: the announcement asks
+        the forge first, as the sync does; when it does not answer, it says so with its next step, asks GitHub
+        nothing and records nothing; once the forge answers, the announcement is made as before."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            pr = w.home.procs[-1]
+            pr.terminate()
+            pr.wait(60)
+            asked = len(w.gh.log)
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{w.port}, so the first copy is not "
+                          "announced: it could not be made now. Nothing was changed, and GitHub was not asked.", out)
+            self.assertIn("run status", out)
+            self.assertNotIn("tell the person", out)
+            self.assertEqual(len(w.gh.log), asked, "GitHub was asked")
+            st = mirror.load_json(w.p["state"], {})
+            self.assertFalse(st.get("announced") or st.get("announced_list"), "an announcement was recorded")
+            w.home.start_forge()
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("tell the person 1 of", out)
 
     def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
         """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said

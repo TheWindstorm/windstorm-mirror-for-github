@@ -684,13 +684,24 @@ def lfs_missing():
             f"({install_words('git-lfs')}; setup and sync find it by themselves once it is installed).")
 
 
+MAC_NO_SESSION = ("this account is not logged in at this Mac's screen, and on a Mac the forge starts only in a "
+                  "login session at the screen; it starts once this account is. Log in to this account at this "
+                  "Mac's screen, then run setup again")
+
+
 def install_service(p):
     if system()[0] == "darwin":
         write_file(p["plist"], plist_text(p))
         uid = str(os.getuid())
+        # G1.16 (M58): a launch agent loads only into a login session at the screen. Over ssh into an account that
+        # is not logged in there, nothing can start: said in the person's words, never launchctl's.
+        if run(["launchctl", "print", f"gui/{uid}"]).returncode != 0:
+            return False, MAC_NO_SESSION
         run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"])
         out = run(["launchctl", "bootstrap", f"gui/{uid}", p["plist"]])
-        return out.returncode == 0, last_line(out.stderr)
+        return out.returncode == 0, ("" if out.returncode == 0 else
+                                     f"this Mac did not load the forge's launch agent (code {out.returncode}); run "
+                                     "setup again, and if it stops here again, run status")
     write_file(p["unit"], unit_text(p))
     run(["systemctl", "--user", "daemon-reload"])
     out = run(["systemctl", "--user", "enable", "--now", SERVICE])
@@ -1469,6 +1480,14 @@ def sync(p, args):
     if not owners:
         say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
         return 2
+    # G3.12 (M59): nothing is announced that cannot then be done. The announcement asks the forge first, as the sync
+    # does, and asks GitHub nothing when the forge does not answer.
+    if args.announce and not st.get("go") and Forge(p, st).call("GET", "/version")[0] != 200:
+        say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so the first copy is not announced: it "
+            "could not be made now. Nothing was changed, and GitHub was not asked. It is your own service on this "
+            "computer: run status; if it still does not answer, run setup, which starts it again, then run sync "
+            "--announce again.")
+        return 1
     floor_mb = setting(s, "disk_floor_mb")
     free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
     if free_mb < floor_mb:

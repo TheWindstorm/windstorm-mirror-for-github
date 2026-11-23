@@ -921,6 +921,38 @@
    "issue": "",
    "seen": "2026-11-23: the family's rule 16, corrected the same afternoon: a skill's own catalog file with a './' source hands out whatever main holds, and the road every cold start of this skill walked is that file. Pinning, not removing, keeps unreleased code from going out under a released label.",
    "promise": "This repository's own catalog entry is './' only while no version older than the current one is released; otherwise it is an https url source pinned to a released version no newer than the current one (ref v<version>, a full sha). The pin is a text-only commit on main right after each tag; the one commit between the tag and the pin is the release step's to hold."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M58",
+   "codon": "G1.16",
+   "test": "test_G1_16_on_a_mac_with_no_login_session_setup_says_so_in_the_persons_words",
+   "stand_in": "a Mac's launchctl (a stand-in's answer for a login session that is there or not)",
+   "exception": "",
+   "issue": "",
+   "seen": "2026-11-23, a Mac test account (macOS 13.7, Intel) reached over ssh and not logged in at the Mac's screen: setup could not load the forge's launch agent and said launchctl's own words, \"Bootstrap failed: 125: Domain does not support specified action\", with no next step.",
+   "promise": "On a Mac, setup in an account that is not logged in at the Mac's screen loads nothing and says, in the person's words, that this account is not logged in at this Mac's screen, that the forge starts once it is, and to log in there and run setup again; no line for a person carries launchctl's words. The README says that on a Mac setup is run from a session logged in at the screen."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M59",
+   "codon": "G3.12",
+   "test": "test_G3_12_the_announcement_asks_the_forge_first",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "",
+   "seen": "2026-11-23, the same Mac test account: with the forge's service not started, `sync --announce` announced a first copy into a forge that was not answering; the sync after it then said the forge does not answer.",
+   "promise": "Nothing is announced that cannot then be done: the announcement asks the forge first, as the sync does; when the forge does not answer it says so with its next step, asks GitHub nothing and records no announcement."
   }
  ],
  "declined": []
