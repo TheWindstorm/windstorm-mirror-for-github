@@ -1369,6 +1369,148 @@ class G5(unittest.TestCase):
                 self.assertNotEqual(out.returncode, 0)
             self.assertEqual(w.gh.writes(), [])
 
+    def test_G5_4_a_read_that_failed_is_never_taken_for_a_no(self):
+        """A read that failed is a third answer, "could not be read", never a no (the family's rule, after a
+        sister skill read GitHub's 502 as "not listed"). Every read of GitHub and of the forge is failed in turn,
+        once (a blip) and from then on (an outage), under sync, status and restore. After each, the forge holds
+        exactly what it held: no copy deleted, renamed, made, or given a kept/ ref; no copy marked or said gone;
+        and an owner whose list could not be read is never announced as having 0 repositories."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.git("someone/alpha", "branch", "side", one)
+            w.gh.git("someone/alpha", "tag", "v1", one)
+            w.gh.add_repo("someone", "beta")
+            w.gh.commit("someone/beta", {"b": b"1"})
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+
+            def forge_now():
+                code, body = w.forge_get("/user/repos?limit=50")
+                self.assertEqual(code, 200, body)
+                return sorted((r["id"], r["name"]) for r in body), {r["name"]: w.forge_refs(r["name"]) for r in body}
+            before = forge_now()
+            self.assertEqual(len(before[0]), 2)
+            ids = {g: r["forge_id"] for g, r in mirror.load_json(w.p["state"], {})["repos"].items()}
+            said_no = ("gone from GitHub", "not in the forge", "There is no copy", "0 repositories", "moved aside",
+                       "renamed on GitHub", "is kept as kept/")
+            real = (mirror.gh_get, mirror.Forge.call, mirror.git)
+
+            def under(cmd, kind=None, n=None, mode=None):
+                seen = {"github api": 0, "forge api": 0, "git read": 0}
+
+                def fails(k):
+                    i = seen[k]
+                    seen[k] += 1
+                    return k == kind and (i == n or (mode == "outage" and i > n))
+
+                def gh_get(key, path):
+                    return (502, {}, {"message": "Bad Gateway"}) if fails("github api") else real[0](key, path)
+
+                def call(forge, method, path, body=None):
+                    if method == "GET" and fails("forge api"):
+                        return 500, None
+                    return real[1](forge, method, path, body)
+
+                def git(cache, *args, **kw):
+                    if any(a in ("fetch", "ls-remote", "clone") for a in args) and fails("git read"):
+                        return subprocess.CompletedProcess(["git", *args], 128, "",
+                                                           "fatal: unable to access: The requested URL returned error: 502")
+                    return real[2](cache, *args, **kw)
+                st = mirror.load_json(w.p["state"], {})
+                st["last_full_pass"] = ""                    # a full pass, so that every copy is read every time
+                mirror.save_state(w.p, st)
+                mirror.gh_get, mirror.Forge.call, mirror.git = gh_get, call, git
+                try:
+                    rc, out = quiet(mirror.main, cmd)
+                finally:
+                    mirror.gh_get, mirror.Forge.call, mirror.git = real
+                return rc, out, seen
+
+            def unchanged(label, out):
+                for word in said_no:
+                    self.assertNotIn(word, out, f"{label}: said '{word}' on a failed read\n{out}")
+                self.assertEqual(forge_now(), before, f"{label}: the forge changed on a failed read\n{out}")
+                st = mirror.load_json(w.p["state"], {})
+                self.assertEqual({g: r["forge_id"] for g, r in st["repos"].items()}, ids, label)
+                self.assertEqual([r["full_name"] for r in st["repos"].values() if r.get("gone_since")], [], label)
+
+            commands = (["sync"], ["status"], ["restore", "--check"],
+                        ["restore", "--to", "file:///nonexistent-wsm-home.git", "someone/alpha"])
+            tried = 0
+            for cmd in commands:
+                rc, out, counts = under(cmd)
+                unchanged(f"{' '.join(cmd)}, nothing failed", out)
+                for kind, total in counts.items():
+                    for n in range(total):
+                        for mode in ("blip", "outage"):
+                            rc, out, _ = under(cmd, kind, n, mode)
+                            unchanged(f"{' '.join(cmd)}: {kind} read {n + 1} of {total} failed ({mode})", out)
+                            tried += 1
+            self.assertGreater(tried, 20, "too few reads were failed to call this a proof")
+            # Before the first copy: a list that could not be read is never announced as 0 repositories.
+            st = mirror.load_json(w.p["state"], {})
+            saved = st.pop("announced"), st.pop("first_copy_done", None)
+            mirror.save_state(w.p, st)
+            rc, out, _ = under(["sync", "--announce"], "github api", 0, "outage")
+            self.assertNotEqual(rc, 0, out)
+            self.assertNotIn("0 repositories", out)
+            self.assertIn("could not be read", out)
+            self.assertFalse(mirror.load_json(w.p["state"], {}).get("announced"), "an announcement made on a failed read")
+            st = mirror.load_json(w.p["state"], {})
+            st["announced"], st["first_copy_done"] = saved
+            mirror.save_state(w.p, st)
+            # GitHub answers 404 for a private repository both when it was deleted and when the key can no longer see
+            # it. So "gone" is earned only when a list read that SUCCEEDED, with the same key, no longer names the
+            # project; a 404 on the project is "could not be read", and a refused key is said as a key that stopped.
+            not_found = "remote: Repository not found.\nfatal: repository 'x' not found"
+
+            def github_says(listing=None, fetch_404=False):
+                def gh_get(key, path):
+                    if listing is None:
+                        return real[0](key, path)
+                    if listing == "fails":
+                        return 502, {}, {"message": "Bad Gateway"}
+                    if listing == "refused":
+                        return 401, {}, {"message": "Bad credentials"}
+                    code, headers, body = real[0](key, path)                 # read, then leave out the named one
+                    return code, headers, [r for r in body if r.get("full_name") != listing]
+
+                def git(cache, *args, **kw):
+                    if fetch_404 and "fetch" in args and "github" in args:
+                        return subprocess.CompletedProcess(["git", *args], 128, "", not_found)
+                    return real[2](cache, *args, **kw)
+                st = mirror.load_json(w.p["state"], {})
+                st["last_full_pass"] = ""
+                mirror.save_state(w.p, st)
+                mirror.gh_get, mirror.git = gh_get, git
+                try:
+                    return quiet(mirror.main, ["sync"])
+                finally:
+                    mirror.gh_get, mirror.git = real[0], real[2]
+            rc, out = github_says("fails", fetch_404=True)              # (a) the list cannot be read; projects 404
+            unchanged("the list could not be read, and every project answered 404", out)
+            self.assertIn("nothing was changed for someone", out)
+            rc, out = github_says("refused", fetch_404=True)            # (b) the day a key expires
+            unchanged("the key was refused, and every project answered 404", out)
+            self.assertIn("the key stopped working", out)
+            self.assertIn("run key set someone", out)
+            rc, out = github_says(fetch_404=True)                       # (d) listed, but every project answers 404
+            unchanged("the list named every project, and every project answered 404", out)
+            self.assertIn("the fetch from GitHub failed", out)
+            rc, out = github_says("someone/alpha", fetch_404=True)      # (c) a list read that succeeded, without it
+            self.assertIn("someone/alpha: gone from GitHub (or no longer visible to its key); its copy is kept", out)
+            self.assertEqual(forge_now(), before, "a copy was touched when its project left the list")
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual([r["full_name"] for r in st["repos"].values() if r.get("gone_since")], ["someone/alpha"])
+            # And with every read answering again, the next sync is clean, and alpha is back.
+            rc, out, _ = under(["sync"])
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(forge_now(), before)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual([r["full_name"] for r in st["repos"].values() if r.get("gone_since")], [])
+
 
 def status():
     return quiet(mirror.main, ["status"])
