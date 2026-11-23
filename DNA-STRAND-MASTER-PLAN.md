@@ -108,6 +108,16 @@ only in memory, into a local cache, then pushes into stock Gitea with a narrow G
 mirror used this same road for its most important repositories for months. It is also what lets the copy keep
 what GitHub loses.
 
+**GitHub calls, counted from the code** (2026-11-23, for G4.4 and G4.8; the git fetches' cost with a key is not yet
+seen, C4):
+- A sync lists each owner's repositories: 1 REST call per owner per 100 repositories. At the default interval of
+  15 minutes, 100 repositories of one owner cost about 4 calls an hour, against GitHub's 5,000 an hour for a key.
+- The first copy costs the same listing (2 calls with the announcement) plus one git fetch per repository; with
+  no key, git fetches spent no REST calls (C4). Whether the large-file batch calls count is not seen.
+- `status` asks for this skill's latest release once a day, with no key (C11: 60 an hour for the computer).
+- A watcher of the person's own that polls GitHub every few seconds can spend a key's hour in minutes; G4.8 is
+  what the mirror does then.
+
 ## Genes and codons
 
 The whole tool is one script, `scripts/mirror.py`: Python standard library, plus `git` and the Gitea binary.
@@ -123,7 +133,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.4 | Setup makes two Gitea accounts: the person's (an administrator), and a `mirror` account that owns the copies. It writes the person's first password to a file only they can read, and says where. It never prints the password. | `test_G1_4_setup_makes_the_two_accounts_and_never_prints_a_password` |
 | G1.5 | `setup --dry-run` says everything setup would do and changes nothing. Running `setup` twice does not make a second forge, account or service. | `test_G1_5_setup_dry_run_changes_nothing_and_setup_twice_is_one_setup` |
 | G1.6 | Where the forge and the timer start only once the person logs in, `setup` and `status` say so in plain words: "after a restart, the copy stands still until you log in". That covers a Linux account without lingering, and every Mac (a launchd agent runs only in a login session; with FileVault on, nothing runs before someone logs in). On Linux, `setup` first tries `loginctl enable-linger` for the person's own account. When the system refuses, it names that as a step for the computer's administrator, with the one command they run. | `test_G1_6_when_it_will_not_come_back_by_itself_it_says_so` |
-| G1.8 | Setup checks that git is installed before anything else, and if it is not, says so in one plain sentence with how to install it, and changes nothing (no download). git must also be where the forge's service and the sync timer look (on Linux the PATH of the person's own service manager, read with `systemctl --user show-environment`; on a Mac, launchd's): when git is only in a folder outside it, setup says so, with where git is and how to install it for the whole computer, and changes nothing. The dry run and setup name a missing git lfs, and what it costs. A program that is not installed is an answer, never a traceback. | `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` |
+| G1.8 | Setup checks that git is installed before anything else, and if it is not, says so in one plain sentence with how to install it, and changes nothing (no download). git must also be where the forge's service and the sync timer look (on Linux the PATH of the person's own service manager, read with `systemctl --user show-environment`; on a Mac, launchd's): when git is only in a folder outside it, setup says so, with where git is and how to install it for the whole computer, and changes nothing. The dry run and setup name a missing git lfs, and what it costs. Every install line named was run as written on a fresh system first ("Install lines, as seen", M28). A program that is not installed is an answer, never a traceback. | `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` |
 | G1.9 | Lingering changes how the person's computer behaves after they log out, so: the dry run says, in plain words, what it means before setup; it asks this computer (polkit, never with a password prompt, with a time limit) whether the person may switch it on themselves, and says one of three things: yes, no (the administrator's one command), or not known (setup will try, without a password, and the command in case it is refused); setup switches it on without a password prompt and records that it did; `uninstall` switches it off only when setup switched it on, and says which; `setup --no-linger` never tries, and says the mirror then syncs only while the person is logged in. The choice is the person's, and the tool carries it: on Linux with lingering off, plain `setup` changes nothing (no download), prints the sentence and the two choices, `--linger` or `--no-linger`, and ends with "Needs you"; where the person may not switch it on themselves, `--linger` ends on the administrator's command. A no is kept, so a later plain `setup` does not ask again. | `test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it` |
 | G1.10 | Setup says the forge runs only once it answers; otherwise it says the service was started and the forge was not answering yet (seen: the first `status` right after setup, on a stock machine, found the forge still starting). | `test_G1_10_setup_says_the_forge_runs_only_once_it_answers` |
 | G1.7 | On a Mac, the forge comes back by itself after a restart only when the system logs the person in by itself (automatic login set to them, FileVault off). Otherwise setup says the copy stands still until they log in, and why. Of the automatic-login setting it keeps only whether it is set and whether it is this person's own account; another account's name is never said or kept. | `test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login` |
@@ -141,6 +151,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G2.3 | A key that can write is named for what it is. When GitHub's answer shows a classic key with write scopes, `key set` and `status` say "this key can write to GitHub; the skill never uses that, make a read-only one". | `test_G2_3_a_key_that_can_write_is_named_for_what_it_is` *(to build)* |
 | G2.4 | `status` shows each key's expiry, from GitHub's answer, on its own line, and warns 14 days before it. A key that is refused, or still waiting for an organisation's approval, turns that owner's copies to "cannot refresh", never "current", and `status` says which key it is. | `test_G2_4_each_keys_expiry_is_watched_and_a_refused_key_is_never_current` *(to build)* |
 | G2.5 | Changing a key is one step, `key set <owner>` again. The next sync proves that every repository of that owner refreshed with the new key, or names those that did not. | `test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it` |
+| G2.6 | A key is never taken before setup. Before setup, `key set` reads no key, asks GitHub nothing and keeps nothing, and says "Setup comes first: run setup, then key set <owner>", so every key lands where uninstall and the key scan already look (a cold start saw an agent give `key set` before setup, M31). | `test_G2_6_a_key_is_never_taken_before_setup` |
 
 ### G3 Find every project, and copy it
 
@@ -152,8 +163,9 @@ reaches several owners, and a classic key that can read private repositories can
 | G3.4 | The fetch from GitHub carries the key as a header set in the environment of that one git process. The key is never in a URL, a git config, a command line or the process list. | `test_G3_4_the_key_travels_only_in_the_fetchs_own_environment` |
 | G3.5 | Settings can leave repositories out by name or pattern, or name the only ones to copy (`include`). The default is all of them, and `status` lists what was left out and why. Archived, empty, forked and private repositories are copied unless left out. An `include` that matches nothing stops the sync: it never widens to everything. | `test_G3_5_what_is_left_out_is_chosen_and_listed` |
 | G3.6 | A repository deleted on GitHub, or no longer visible to the key, keeps its copy. `status` shows it as "gone from GitHub since <date>". The skill never deletes a copy. | `test_G3_6_a_repository_gone_from_github_keeps_its_copy` |
-| G3.7 | Before the first copy, the skill says what it is about to do: how many repositories, their total size as GitHub reports it (which can read 0, C1), and a rough time measured from the first ones. It waits for the person's go. During the first copy, after the first three repositories, it says how long the rest will take at that pace. | `test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts` |
-| G3.8 | Large files (Git LFS) are copied with the repository when `git lfs` is installed, using the same in-memory key. A repository that uses large files on a computer without `git lfs` is copied without them, and `status` names it. | `test_G3_8_large_files_are_copied_or_named_as_missing` |
+| G3.7 | Before the first copy, the skill says what it is about to do: how many repositories, their total size as GitHub reports it (which can read 0, C1), and a rough time measured from the first ones. It waits for the person's go. `sync --announce` never copies, the first time or any time after (a cold start saw an agent run it again "to re-check" and get the first copy made, M26); after the go it says when the first copy was made. The go is a sync run on the person's word, recorded with its time; the timer waits for it, and `status` says "first copy: made on <time>, on your go" or "first copy: waiting for your go". During the first copy, after the first three repositories, it says how long the rest will take at that pace. | `test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts` |
+| G3.8 | Large files (Git LFS) are copied with the repository when `git lfs` is installed, using the same in-memory key. A repository that uses large files on a computer without `git lfs` is copied without them, and `sync`, `status` and `restore --check` each say it as a `problem:` line, before the counts, with the one next step (install git lfs). Once git lfs is installed, the next sync copies that repository again, not the next full pass (a cold start saw a day's wait and no problem line, M27). | `test_G3_8_large_files_are_copied_or_named_as_missing` |
+| G3.9 | The go covers exactly what the person was told. The announcement names the projects (the first 20 by name, then "and N more", with the whole list in a file only the person can read), and the tool keeps that list. At the go, if the list it would copy differs (the include list changed, a key for another owner arrived, a project appeared or went), it copies nothing, says the list again and asks for a new go. Only for the first copy; afterwards new projects join by themselves (M32). | `test_G3_9_the_go_copies_only_what_the_last_announcement_named` |
 
 ### G4 Stay current
 
@@ -162,10 +174,11 @@ reaches several owners, and a classic key that can read private repositories can
 | G4.1 | A timer runs `sync` every 15 minutes by default (a setting); after the person's go, the first copy can run from it in the background, and `status` (G6.5) shows how far it is. After a reboot, `status` reads the timer's next run, not only whether it is switched on. | `test_G4_1_a_timer_runs_sync_and_status_reads_its_next_run` |
 | G4.2 | Every fetch and push has a time limit and one retry. One slow or broken repository never holds up the rest: it is named, and the others carry on. | `test_G4_2_one_slow_repository_never_holds_up_the_rest` |
 | G4.3 | Only one sync runs at a time. A second one started meanwhile says so and exits. A lock whose owner is gone is taken over and noted. | `test_G4_3_one_sync_at_a_time` |
-| G4.4 | A sync counts its GitHub API calls. It stops listing, and says so, when GitHub's remaining allowance falls below a floor (a setting). | `test_G4_4_a_sync_spends_few_api_calls_and_stops_above_a_floor` |
+| G4.4 | A sync counts its GitHub API calls. It stops listing when GitHub's remaining allowance falls below a floor (a setting), and says it as spent until the reset (G4.8). | `test_G4_4_a_sync_spends_few_api_calls_and_stops_above_a_floor` |
 | G4.5 | Before each sync the free disk space is checked against a floor (a setting). Below it, the sync does not start, and `status` says why. A sync stopped part-way leaves every copy as it was, or as it fully became, and never marks a half-done copy current. | `test_G4_5_a_full_disk_stops_the_sync_cleanly` |
 | G4.7 | The sync timer counts from the start of the person's own service manager (`OnStartupSec`), never from the boot alone: with lingering it runs 2 minutes after boot, and without it 2 minutes after the person logs in, however late. After a restart it always has a next run. | `test_G4_7_after_a_restart_the_timer_always_has_a_next_run` |
 | G4.6 | A sync fetches only what changed. It reads each repository's `pushed_at` from the listing it already made (G3.1), and fetches only the repositories whose `pushed_at` is newer than their last good refresh. A full pass, once a day by default (a setting), fetches every repository, so a change the listing did not show cannot hide for more than a day. A quiet sync costs one listing call per 100 repositories per owner and no fetch. For a person with 300 repositories and two organisations of fewer than 100 each, that is 5 calls; at one sync every 15 minutes, 20 calls an hour, against GitHub's 5,000. `status` shows the calls the last sync spent. | `test_G4_6_a_sync_fetches_only_what_changed_and_a_daily_pass_fetches_all` |
+| G4.8 | GitHub's allowance is shared with everything else the person runs with their keys. When GitHub says it is spent (a 403 or 429 with no calls remaining, back at `X-RateLimit-Reset`; or with `Retry-After`), or it falls below the floor, the sync stops before copying and says one line with the reset in the person's own time. The reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart. No project is marked failed, every copy is as it was, and `status` says the wait (M25). | `test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project` |
 
 ### G5 Keep what GitHub loses
 
@@ -187,6 +200,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G6.5 | `status` shows the forge's version, the key's expiry, free disk space, the last good sync, and the next. The expiry leans on a header not seen yet (C3): when GitHub's answer carries no expiry the skill can read, `status` says "expiry not known", never "no expiry" and never a date it worked out, and no warning fires on a guess. | `test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync` |
 | G6.7 | `status` reads the timer's next run on the wall clock or on the boot clock, and says "no next run" only when there is none on either. | `test_G6_7_a_next_run_on_the_boot_clock_is_a_next_run` |
 | G6.6 | Once a day, `status` asks GitHub for this skill's latest release, one call with no key. It says when that release pins a newer Gitea than the one running, and whether the release names it as a security fix. It changes nothing by itself: `self-update`, then `upgrade-forge`, is the person's choice. | `test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge` |
+| G6.8 | Every stop and needs-you line names what happened and the one next step: each line the tool says just before it stops with a failing code, and each message it stops with. A line built elsewhere (the key check, a missing git, lingering) is checked where it is built. A cold start saw a stop line with no next step send the agent into the source four times, and 39 of 63 such lines had none (M30). | `test_G6_8_every_stop_and_needs_you_line_names_what_happened_and_the_next_step` |
 
 ### G7 Restore
 
@@ -221,6 +235,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G10.2 | SKILL.md gives one fixed order, and the agent follows it without skipping or reordering: `setup --dry-run` (shown to the person), the keys to make (G2.1), `setup`, `key set` for each owner, the first copy announced (G3.7) and the person's go, `status`, then `restore --check`. | `test_G10_2_skill_md_gives_the_steps_in_the_fixed_order` |
 | G10.3 | Each step that is the person's is named in SKILL.md, with what the agent says to them. The steps: logging in to GitHub; making each key, with its page and settings; an organisation's approval; the go for the first copy; and, where needed, the administrator's lingering command. The agent never logs in for the person, and never presses Agree, Accept or Continue on a terms screen. | `test_G10_3_every_step_that_is_the_persons_is_named_with_what_to_say` |
 | G10.4 | The cold start works. A fresh agent in a clean account, given only this repository's address and one sentence, reaches `copies: N on GitHub, N copied, 0 behind` and a passing `restore --check`. The write-up counts the person's steps. Anything else the person had to do is a finding, and gets a row. | by hand on a real machine, Linux and macOS (Milestones) |
+| G10.5 | What the person must hear comes from the tool as one numbered block, `tell the person 1 of N:` to `N of N:`, in the dry run (every step of setup, lingering, a missing git lfs), in setup (after a restart, how private the copy is) and in the announcement (how many, how big, where the copies go, what is not copied, how private). SKILL.md says to give the block whole, word for word and in order, before any words of the agent's own, so a line dropped, shortened or merged on its way to the person shows (a cold start saw the smallest model do all three, M29). | `test_G10_5_what_the_person_must_hear_comes_as_one_numbered_block` |
 
 ## Milestones
 
@@ -315,7 +330,30 @@ version is 0.0.0.
 
 ## Proven by hand on real machines, not by a test
 
-Nothing yet. The lab facts above are about stock Gitea, not about this skill.
+The lab facts above are about stock Gitea, not about this skill.
+
+### Install lines, as seen
+
+Every install line the tool names (`INSTALL_GIT`, `INSTALL_LFS` in `scripts/mirror.py`) was run as written on a
+fresh system before it was written; `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` holds
+that the tool names no command that is not in this table. Fresh cloud images, a new disk each, 2026-11-23 (row M28):
+
+| Line | System | Seen |
+|---|---|---|
+| `sudo apt update && sudo apt install git` | Ubuntu 24.04.5 cloud image; Debian 13 genericcloud image | works (git 2.43.0; 2.47.3) |
+| `sudo apt update && sudo apt install git-lfs` | Ubuntu 24.04.5; Debian 13 | works (git-lfs 3.4.1; 3.6.1) |
+| `sudo dnf install git` | Fedora 45 Cloud Base | works (git 2.56.1; the image has no git) |
+| `sudo dnf install git-lfs` | Fedora 45 Cloud Base | works (git-lfs 3.7.1) |
+| `xcode-select --install` | macOS 13.7.8 (Intel) and macOS 27.2.1 (Apple M4), both with the tools already | seen only on a Mac that already had them: "already installed", exit 1. The installer window on a fresh Mac is not seen. |
+| large files on a Mac: https://git-lfs.com | | not seen installed on a Mac |
+
+Lines tried and NOT used, so that no one puts them back:
+- `sudo apt install git` and `sudo apt install git-lfs` alone: on a fresh Ubuntu 24.04.5 image, git failed with a
+  404 on the stale package list and git-lfs said "Unable to locate package"; on a fresh Debian 13 image, which
+  has no package lists at all, both said "Unable to locate package". Both cold-start agents met the git-lfs one.
+- `brew install git-lfs`: on macOS 13.7.8 (Intel), with Homebrew installed, it did not install git lfs; Homebrew
+  called the system an unsupported "Tier 3" configuration. The other test Mac's Homebrew belongs to another
+  account and was not touched.
 
 ## Not verified
 

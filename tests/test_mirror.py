@@ -490,7 +490,7 @@ class G1(unittest.TestCase):
                     rc, out = h.setup(*args)
                     self.assertEqual(rc, 2, out)
                     self.assertIn("git is not installed on this computer", out)
-                    self.assertIn("sudo apt install git", out)
+                    self.assertIn("sudo apt update && sudo apt install git", out)
                     self.assertIn("Nothing was changed", out)
                 self.assertFalse(os.path.exists(mirror.paths()["app_ini"]), "setup wrote settings with no git")
             finally:
@@ -522,6 +522,22 @@ class G1(unittest.TestCase):
             finally:
                 mirror.has_git_lfs = lfs
             self.assertIn("git lfs is not installed here", out)
+
+        # Every install command the tool names was run as written on a fresh system: it is in the plan's table.
+        # (Seen: the plain apt lines fail on fresh Ubuntu and Debian images; brew failed on an older Mac.)
+        plan, readme = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md")), fread(os.path.join(ROOT, "README.md"))
+        table = plan.split("### Install lines, as seen", 1)[1].split("Lines tried and NOT used", 1)[0]
+        cmd = r"(?:sudo apt update && )?sudo (?:apt|dnf) install [^;`)\n]+|xcode-select --install|brew install [^;`)\n]+"
+        for text, where in ((mirror.INSTALL_GIT + "; " + mirror.INSTALL_LFS, "the install lines"),
+                            (fread(SCRIPT), "the script"), (readme, "README.md")):
+            named = {c.strip().rstrip(".,") for c in re.findall(cmd, text)}
+            if where == "the install lines":
+                self.assertEqual(len(named), 5, named)
+            for line in sorted(named):
+                self.assertIn(f"`{line}`", table, f"{where} names a line never seen on a fresh system: {line}")
+            self.assertNotIn("brew install", text, where)
+            self.assertIsNone(re.search(r"(?<!&& )sudo apt install", text), f"an apt line without apt update in {where}")
+        self.assertIn("https://git-lfs.com", mirror.INSTALL_LFS)
 
     def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
         with Home() as h:
@@ -670,7 +686,9 @@ class G2(unittest.TestCase):
         os.environ.pop("WSM_GITHUB_API", None)
         shutil.rmtree(self.gh_root, ignore_errors=True)
 
-    def key_set(self, owner, key):
+    def key_set(self, owner, key, after_setup=True):
+        if after_setup and not mirror.load_json(mirror.paths()["state"], {}).get("port"):
+            mirror.save_state(mirror.paths(), {"port": 1})    # what setup leaves; these tests are about the keys
         out, saved = io.StringIO(), sys.stdin
         sys.stdin = io.StringIO(key + "\n")
         try:
@@ -679,6 +697,29 @@ class G2(unittest.TestCase):
         finally:
             sys.stdin = saved
         return rc, out.getvalue()
+
+    def test_G2_6_a_key_is_never_taken_before_setup(self):
+        """The cold start's run B told the person to run key set before setup. Setup comes first: before it, key set
+        reads no key and keeps nothing, so every key lands where uninstall and the key scan already look."""
+        with Home():
+            p = mirror.paths()
+            saved = sys.stdin
+            sys.stdin = io.StringIO(self.gh.key + "\n")
+            try:
+                rc, out = quiet(mirror.main, ["key", "set", "someone"])
+                left = sys.stdin.read()
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 2, out)
+            self.assertIn("Setup comes first: run setup, then key set someone. No key was read, and nothing was kept.",
+                          out)
+            self.assertEqual(left, self.gh.key + "\n", "the key was read before the refusal")
+            self.assertFalse(os.path.exists(mirror.key_path(p, "someone")))
+            self.assertNotIn("owners", mirror.load_json(p["settings"], {}))
+            self.assertEqual(self.gh.log, [], "GitHub was asked before setup")
+            rc, out = self.key_set("someone", self.gh.key)       # after setup, the same step keeps it
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.exists(mirror.key_path(p, "someone")))
 
     def test_G2_2_each_key_is_kept_in_its_own_file_and_nowhere_else(self):
         key = self.gh.key
@@ -737,6 +778,7 @@ class World:
             self.home.place_gitea()
             rc, out = self.home.setup()
             self.tc.assertEqual(rc, 0, out)
+            self.setup_out = out
             self.port, _ = self.home.start_forge()
             self.home.forge_follows = True
         except BaseException:
@@ -994,13 +1036,41 @@ class G3(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("The first copy: 5 repositories from 1 owner(s), 2.0 MB as GitHub reports it", out)
             self.assertIn("as private as this computer", out)
-            self.assertIn("When the person says go, run: sync", out)
+            self.assertIn("Nothing was copied. When the person says go, run: sync", out)
             self.assertEqual(w.forge_get("/user/repos")[1], [], "the announcement copied something")
+            # Seen in a cold start (P1a run B, 2026-11-23): an agent ran --announce again "to re-check", and the
+            # tool made the first copy without the go. Every later announcement says it all again, copies nothing.
+            for again in (2, 3):
+                rc, out = w.sync("--announce")
+                self.assertEqual(rc, 0, out)
+                self.assertIn("The first copy: 5 repositories", out)
+                self.assertIn("Nothing was copied.", out)
+                self.assertEqual(w.forge_get("/user/repos")[1], [], f"announcement {again} copied something")
+            rc, out = w.sync("--from-timer")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("waiting for the person's go", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "the timer copied before the go")
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(st.get("announced"))
+            self.assertNotIn("go", st)
+            self.assertIn("first copy: waiting for your go", quiet(mirror.main, ["status"])[1])
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertRegex(out, r"first copy: 3 of 5 done; about \d+ min left at this pace")
+            go = mirror.load_json(w.p["state"], {})["go"]
+            self.assertRegex(go, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertIn(f"first copy: made on {mirror.local_time(go)}, on your go",
+                          quiet(mirror.main, ["status"])[1])
             rc, out = w.sync()
             self.assertNotIn("first copy:", out)
+            before = w.forge_refs("someone--r1")
+            w.gh.commit("someone/r1", {"b": b"2"})
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("The first copy was made on", out)
+            self.assertNotIn("The first copy: 5", out)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["go"], go, "an announcement moved the go")
+            self.assertEqual(w.forge_refs("someone--r1"), before, "an announcement after the go copied")
 
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():
@@ -1031,8 +1101,110 @@ class G3(unittest.TestCase):
             finally:
                 mirror.has_git_lfs = saved
             self.assertEqual(rc, 0, out)
-            self.assertIn("Large files NOT copied (git lfs is not installed here): someone/big", out)
+            gone = f"problem: someone/big: {mirror.LFS_NOT_IN_COPY}"
+            self.assertIn(gone, out)
+            self.assertIn("1 copy without its large files", out)
+            # Seen in a cold start (P1a run A, 2026-11-23): git lfs installed after the first copy, and the next
+            # sync skipped the project as unchanged until the daily full pass, while status said no problem.
+            mirror.has_git_lfs = lambda: False
+            try:
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(gone, out)
+                self.assertLess(out.index(gone), out.index("copies:"), "the worst true thing is not said first")
+                self.assertIn("1 without its large files", out)
+                rc, out = quiet(mirror.main, ["restore", "--check"])
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"someone/big: {mirror.LFS_NOT_IN_COPY}", out)
+            finally:
+                mirror.has_git_lfs = saved
+            st = mirror.load_json(w.p["state"], {})
+            self.assertTrue(st.get("last_full_pass"), "the first copy was not a full pass")
+            rc, out = w.sync()                          # git lfs is here now; no full pass is due
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn(", a full pass", out)
+            self.assertIn("1 copied now, 0 unchanged", out)
+            self.assertNotIn("without its large files", out)
+            req = urllib.request.Request(f"http://127.0.0.1:{w.port}/api/v1/repos/mirror/someone--big/media/blob.bin",
+                                         headers={"Authorization": f"token {fread(w.p['mirror_key']).strip()}"})
+            self.assertEqual(urllib.request.urlopen(req, timeout=10).read(), data)
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertNotIn("large files", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
 
+
+
+    def test_G3_9_the_go_copies_only_what_the_last_announcement_named(self):
+        """The person says yes to a list; "seven projects" must not become seventy between the yes and the copy,
+        whoever changed the settings in between (a cold start saw the include list kept only by the person's care).
+        The announcement names the projects; the first copy copies exactly the last one announced, or nothing."""
+        def told(out):
+            return [x.split(": ", 1)[1] for x in out.splitlines() if x.startswith("tell the person ")]
+
+        with World(self) as w:
+            for n in ("a", "b", "c"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"f": n.encode()})
+            w.key_set()
+            self.assertEqual(quiet(mirror.main, ["config", "include", "someone/a", "someone/b"])[0], 0)
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("They are: someone/a, someone/b.", told(out))
+            lst = w.p["first_copy_list"]
+            self.assertEqual(fread(lst), "someone/a\nsomeone/b\n")
+            self.assertEqual(os.stat(lst).st_mode & 0o777, 0o600)
+
+            def refused(why, counts):
+                rc, out = w.sync()
+                self.assertEqual(rc, 2, f"{why}: {out}")
+                self.assertIn(f"Needs you: the first copy would not be what the person was told ({counts} than the "
+                              "last announcement). Nothing was copied.", out)
+                self.assertEqual(w.forge_get("/user/repos")[1], [], f"{why}: copied after a change")
+                self.assertNotIn("go", mirror.load_json(w.p["state"], {}), f"{why}: a go recorded")
+                self.assertTrue(out.rstrip().endswith("when they say go to this list, run: sync"), out)
+                return told(out)
+
+            # 1. The include list grows between the announcement and the go.
+            quiet(mirror.main, ["config", "include", "someone/a", "someone/b", "someone/c"])
+            self.assertIn("They are: someone/a, someone/b, someone/c.", refused("include list", "1 more and 0 fewer"))
+            # 2. A project appears on GitHub.
+            w.gh.add_repo("someone", "d")
+            w.gh.commit("someone/d", {"f": b"d"})
+            quiet(mirror.main, ["config", "include", "--clear"])
+            self.assertIn("They are: someone/a, someone/b, someone/c, someone/d.",
+                          refused("a project appeared", "1 more and 0 fewer"))
+            # 3. A project goes.
+            w.gh.delete("someone/d")
+            self.assertIn("They are: someone/a, someone/b, someone/c.", refused("a project went", "0 more and 1 fewer"))
+            # 4. A key for another owner arrives.
+            w.gh.add_repo("acme", "x", owner_type="Organization")
+            w.gh.commit("acme/x", {"f": b"x"})
+            self.assertEqual(w.key_set("acme")[0], 0)
+            said = refused("another owner's key", "1 more and 0 fewer")
+            self.assertTrue(said[0].startswith("The first copy: 4 repositories from 2 owner(s)"), said)
+            self.assertIn("They are: acme/x, someone/a, someone/b, someone/c.", said)
+            # The go to the list as it was last said copies exactly that list.
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            names = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
+            self.assertEqual(names, ["acme--x", "someone--a", "someone--b", "someone--c"])
+            # After the first copy, a new project joins by itself, as the README says.
+            w.gh.add_repo("someone", "e")
+            w.gh.commit("someone/e", {"f": b"e"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("Needs you", out)
+            self.assertIn("someone--e", [r["name"] for r in w.forge_get("/user/repos")[1]])
+        with World(self) as w:                                   # many: the first 20 named, the rest in the file
+            for i in range(25):
+                w.gh.add_repo("someone", f"r{i:02d}")
+            w.key_set()
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            first = ", ".join(f"someone/r{i:02d}" for i in range(mirror.ANNOUNCE_NAMES))
+            self.assertIn(f"They are: {first}, and 5 more; the whole list is in {w.p['first_copy_list']}.", told(out))
+            self.assertEqual(fread(w.p["first_copy_list"]).splitlines(), [f"someone/r{i:02d}" for i in range(25)])
 
 class G2Sync(unittest.TestCase):
     def test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it(self):
@@ -1168,18 +1340,81 @@ class G4(unittest.TestCase):
             before = {f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}
             w.gh.rate_remaining = 450                  # below the floor of 500
             rc, out = w.sync()
-            self.assertEqual(rc, 1, out)
-            self.assertIn("GitHub's remaining API allowance (449) is below the floor (500), so the listing of someone "
-                          "stopped at page 1", out)
-            self.assertIn("0 copied now", out)
-            self.assertIn("1 GitHub API call(s)", out)
+            self.assertEqual(rc, 0, out)               # G4.8: below the floor is said as spent, until the reset
+            self.assertIn("GitHub's allowance for your keys is spent until", out)
             self.assertNotIn("gone from GitHub", out)
+            self.assertNotIn("cannot refresh", out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual(st["last_sync"]["calls"], 1)
+            self.assertEqual(st["github_wait_until"], mirror.stamp_of(w.gh.rate_reset))
             self.assertEqual({f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}, before)
+            st["github_wait_until"] = mirror.stamp_of(time.time() - 1)     # the reset has come
+            mirror.save_state(w.p, st)
             put_settings(w.p, api_floor=100)           # the floor is a setting
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertIn("3 GitHub API call(s)", out)
             self.assertIn("3 GitHub API call(s)", quiet(mirror.main, ["status"])[1])
+
+    def test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project(self):
+        """GitHub's allowance is shared with everything else the person runs with their keys (a lane once spent the
+        fleet's in minutes). Both of GitHub's ways of saying "spent" become one line with the reset in the person's
+        own time; nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project
+        is marked as failed, and every copy is as it was."""
+        with World(self) as w:
+            for i in range(3):
+                w.gh.add_repo("someone", f"r{i}")
+                w.gh.commit(f"someone/r{i}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            before = {f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(3)}
+            w.gh.commit("someone/r0", {"b": b"2"})
+            line = "GitHub's allowance for your keys is spent until {}. The sync waits until then"
+            # 1. The hour's allowance is spent: a 403 with no calls remaining, back at X-RateLimit-Reset.
+            w.gh.limit_answer = (403, None)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            until = mirror.stamp_of(w.gh.rate_reset)
+            self.assertIn(line.format(mirror.local_time(until)), out)
+            self.assertIn("every copy is as it was", out)
+            self.assertNotIn("problem:", out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual(st["github_wait_until"], until)
+            self.assertFalse([r for r in st["repos"].values() if r.get("problem")], "a project was marked failed")
+            self.assertEqual({f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(3)}, before)
+            out = quiet(mirror.main, ["status"])[1]
+            self.assertIn("github: " + line.format(mirror.local_time(until)), out)
+            self.assertNotIn("problem:", out)
+            # 2. Nothing is asked of GitHub before the reset, even when it would answer again.
+            w.gh.limit_answer = None
+            asked = len(w.gh.log)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(line.format(mirror.local_time(until)), out)
+            self.assertEqual(len(w.gh.log), asked, "GitHub was asked before the reset")
+            # 3. Nor by a fresh process: the timer's own run after a restart of the service or the computer.
+            r = subprocess.run([sys.executable, "-I", w.p["script"], "sync", "--from-timer"], env=dict(os.environ),
+                               capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("spent until", r.stdout)
+            self.assertEqual(len(w.gh.log), asked, "a fresh process asked GitHub before the reset")
+            # 4. At the reset, the sync runs again and copies what waited.
+            st = mirror.load_json(w.p["state"], {})
+            st["github_wait_until"] = mirror.stamp_of(time.time() - 1)
+            mirror.save_state(w.p, st)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertRegex(out, r"[1-9]\d* copied now")
+            self.assertNotEqual(w.forge_refs("someone--r0"), before["r0"], "what waited was not copied at the reset")
+            # 5. GitHub's other way: a 429 with Retry-After, back that many seconds on.
+            w.gh.limit_answer = (429, 600)
+            t0 = time.time()
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("spent until", out)
+            wait = mirror.epoch_of(mirror.load_json(w.p["state"], {})["github_wait_until"])
+            self.assertTrue(t0 + 590 <= wait <= time.time() + 610, wait - t0)
+            self.assertNotIn("problem:", quiet(mirror.main, ["status"])[1])
 
     def test_G4_5_a_full_disk_stops_the_sync_cleanly(self):
         with World(self) as w:
@@ -1451,7 +1686,7 @@ class G5(unittest.TestCase):
             self.assertGreater(tried, 20, "too few reads were failed to call this a proof")
             # Before the first copy: a list that could not be read is never announced as 0 repositories.
             st = mirror.load_json(w.p["state"], {})
-            saved = st.pop("announced"), st.pop("first_copy_done", None)
+            saved = st.pop("announced"), st.pop("first_copy_done", None), st.pop("go", None)
             mirror.save_state(w.p, st)
             rc, out, _ = under(["sync", "--announce"], "github api", 0, "outage")
             self.assertNotEqual(rc, 0, out)
@@ -1459,7 +1694,7 @@ class G5(unittest.TestCase):
             self.assertIn("could not be read", out)
             self.assertFalse(mirror.load_json(w.p["state"], {}).get("announced"), "an announcement made on a failed read")
             st = mirror.load_json(w.p["state"], {})
-            st["announced"], st["first_copy_done"] = saved
+            st["announced"], st["first_copy_done"], st["go"] = saved
             mirror.save_state(w.p, st)
             # GitHub answers 404 for a private repository both when it was deleted and when the key can no longer see
             # it. So "gone" is earned only when a list read that SUCCEEDED, with the same key, no longer names the
@@ -2188,6 +2423,128 @@ class G10(unittest.TestCase):
         self.assertIn("sudo loginctl enable-linger", fread(SCRIPT))
 
 
+
+    def test_G10_5_what_the_person_must_hear_comes_as_one_numbered_block(self):
+        """A cold start (2026-11-23): the smallest model shortened the dry run to one line and dropped a sentence of
+        the privacy line. The person's sentences come as one block, "tell the person 1 of N" to "N of N", so a
+        line dropped or merged on the way shows, and SKILL.md says to give the block whole before any words of its
+        own."""
+        tell = re.compile(r"^tell the person (\d+) of (\d+): (.*)$")
+
+        def block(out, where):
+            lines = out.splitlines()
+            at = [i for i, x in enumerate(lines) if tell.match(x)]
+            self.assertTrue(at, f"{where}: no block for the person")
+            self.assertEqual(at, list(range(at[0], at[0] + len(at))), f"{where}: the block is broken up")
+            got = [tell.match(lines[i]).groups() for i in at]
+            self.assertEqual([(a, b) for a, b, _ in got], [(str(i), str(len(at))) for i in range(1, len(at) + 1)],
+                             f"{where}: not numbered 1 of N to N of N")
+            return [t for _, _, t in got]
+
+        with Home() as h:
+            saved = mirror.has_git_lfs
+            mirror.has_git_lfs = lambda: False
+            try:
+                rc, out = h.setup("--dry-run")
+            finally:
+                mirror.has_git_lfs = saved
+            self.assertEqual(rc, 0, out)
+            said = block(out, "setup --dry-run")
+            plan = mirror.setup_plan(mirror.paths(), {})
+            self.assertEqual(said[:len(plan)], [f"Setup would {step}." for step in plan], "a step of setup unsaid")
+            self.assertTrue(any(x.startswith("After a restart") for x in said), said)
+            self.assertIn(mirror.LFS_MISSING, said)
+        with World(self) as w:
+            said = block(w.setup_out, "setup")
+            self.assertIn(mirror.PRIVATE_AS_THIS_COMPUTER, said)
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            said = block(out, "sync --announce")
+            self.assertEqual(len(said), 5, said)
+            self.assertTrue(said[0].startswith("The first copy: 1 repositories from 1 owner(s)"), said)
+            self.assertEqual(said[1], "They are: someone/alpha.")
+            self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[2])
+            self.assertIn("Nothing is ever written to GitHub.", said[2])
+            self.assertEqual(said[3:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
+            self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
+        _, _, body = skill_front()
+        self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
+                      body)
+        self.assertIn("word for word and in that order, before any\nwords of your own", body)
+        order = section(body, "The order")
+        for step in ("1. `M setup --dry-run`. Give the person its `tell the person` block whole",
+                     "5. `M sync --announce`. Give the person its `tell the person` block whole"):
+            self.assertIn(step, order)
+
+
+class G6Words(unittest.TestCase):
+    NEXT = re.compile(r"\b(run|again|install|make|ask|try|wait|free|name|check|open an issue)\b|`|python3 -I", re.I)
+
+    def test_G6_8_every_stop_and_needs_you_line_names_what_happened_and_the_next_step(self):
+        """A cold start (2026-11-23): restore --check stopped on a git error with no next step, and the agent opened
+        the script's source four times to find one. Every line the tool says just before it stops with a failing
+        code, and every message it stops with, names the one next step. A line built elsewhere is checked where it
+        is built."""
+        import ast
+        tree = ast.parse(fread(SCRIPT))
+
+        def words(n):
+            return " ".join(x.value for x in ast.walk(n) if isinstance(x, ast.Constant) and isinstance(x.value, str))
+
+        funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        lacking, built, seen = [], set(), 0
+        for node in ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                b = getattr(node, field, None)
+                if not isinstance(b, list):
+                    continue
+                for a, nxt in zip(b, b[1:]):
+                    if not (isinstance(a, ast.Expr) and isinstance(a.value, ast.Call)
+                            and getattr(a.value.func, "id", None) == "say" and isinstance(nxt, ast.Return)
+                            and isinstance(nxt.value, ast.Constant) and nxt.value.value not in (0, None)):
+                        continue
+                    seen += 1
+                    arg, mine = a.value.args[0], set()
+                    for x in ast.walk(arg):                   # names and calls the words are built from
+                        if isinstance(x, ast.Name) and x.id.isupper():
+                            mine.add(x.id)
+                        elif isinstance(x, ast.Call) and getattr(x.func, "id", None) in funcs:
+                            mine.add(x.func.id)
+                        elif (isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr == "replace"
+                              and isinstance(x.func.value, ast.Name) and x.func.value.id == "why"):
+                            mine.add("check_key")             # say(why.replace(key, ...)): the key check's words
+                    if isinstance(arg, ast.Name) and not arg.id.isupper():
+                        mine.add(f"<{arg.id}>")
+                    if words(arg).strip() == "STOPPED:":
+                        mine.add("HardStop")                  # says a HardStop's words: every raise is checked
+                    built |= mine
+                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop"}:
+                        continue                              # checked below, where the words are built
+                    if not self.NEXT.search(words(arg)):
+                        lacking.append((a.lineno, words(arg)[:90]))
+            if (isinstance(node, ast.Raise) and isinstance(getattr(node, "exc", None), ast.Call)
+                    and getattr(node.exc.func, "id", None) in ("SystemExit", "HardStop")):
+                seen += 1
+                if not self.NEXT.search(words(node.exc)):
+                    lacking.append((node.lineno, words(node.exc)[:90]))
+        self.assertGreater(seen, 50, "too few stop lines found to call this a proof")
+        self.assertEqual(lacking, [])
+        # Built elsewhere: each is checked where it is built.
+        self.assertTrue(self.NEXT.search(mirror.LINGER_CHOICE))
+        self.assertTrue(self.NEXT.search(mirror.git_missing_sentence()))
+        self.assertTrue(self.NEXT.search(words(funcs["git_out_of_service_reach"])))
+        for r in ast.walk(funcs["check_key"]):
+            if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
+                    isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
+                self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
+        data = {"SKILL_REPO", "GITEA_VERSION", "last_line"}          # facts inside a line, not its words
+        self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop"},
+                         set(),
+                         "a stop line is built from something this test does not check")
+
 class Invariants(unittest.TestCase):
     def test_INV6_standard_library_only_and_no_other_network(self):
         import ast
@@ -2200,6 +2557,7 @@ class Invariants(unittest.TestCase):
         # computer. The plist's DOCTYPE names Apple's DTD and is never fetched.
         allowed = {"http://127.0.0.1", "https://api.github.com", "https://github.com", "https://dl.gitea.com/gitea",
                    "https://github.com/TheWindstorm/windstorm-mirror-for-github", "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
+                   "https://git-lfs.com",                     # named to the person (M28), never reached
                    "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
         found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
         self.assertEqual(found - allowed, set(), "an address outside the allowed ones")
