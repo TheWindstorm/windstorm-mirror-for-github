@@ -608,6 +608,21 @@
    "issue": "#59",
    "seen": "2026-11-23, the family's rule on real proof before the tag, read against our own gate: it refused a version only for a row with no test, and the version after it for a row with no proven line, so a row whose test leans on a stand-in could be tagged while seen only by that stand-in.",
    "promise": "Every row says what its test stands in for, or 'none'; on a release branch the tests refuse each row due in that version that has a stand-in and no proven line; the check fails once on purpose with a made-up row."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M41",
+   "codon": "G9.4",
+   "test": "test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice",
+   "stand_in": "the service manager (stand-ins for systemctl and launchctl); Claude Code's own plugin uninstall is not run by the test",
+   "issue": "#61",
+   "seen": "2026-11-23, uninstall read against the family's rule on leaving: a running sync made it refuse with a sync's words; run twice, it said the service and the rest 'are removed' with nothing under it; after the copies were deleted, it made the skill's folder again to take a lock; it said nothing of what was kept unless the copies were there; and the README did not say what goes on running after Claude Code's own plugin uninstall.",
+   "promise": "A running sync is a wait that names the process and goes on when it ends (up to 10 minutes; past that it says what runs, that nothing was removed, and to run it again); the last thing printed is a census of what is gone and what is kept (the copies and the record of what the skill did, which are the person's); run twice it is safe; what setup left takes itself off without the plugin; nothing of ours acts on the person's Claude Code sessions; the README says what keeps running after Claude Code's own plugin uninstall and the one command that takes it off."
   }
  ],
  "declined": []

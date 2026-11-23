@@ -1178,6 +1178,18 @@ def cmd_config(args):
     return 0
 
 
+UNINSTALL_WAIT = 600     # seconds uninstall waits for a running sync to end (rule 8: a lock is a wait)
+
+
+def lock_holder(p):
+    """The process that holds the sync lock, as its number, or 'unknown'."""
+    try:
+        with open(os.path.join(p["data"], "sync.lock"), encoding="utf-8") as f:
+            return int(f.read().strip() or 0) or "unknown"
+    except (OSError, ValueError):
+        return "unknown"
+
+
 def take_lock(p):
     """(True, note) when this sync may run; (False, why) when another one is running."""
     path = os.path.join(p["data"], "sync.lock")
@@ -2427,10 +2439,22 @@ def cmd_uninstall(args):
             f"window of their own: python3 -I {p['script']} uninstall --delete-copies. Nothing was changed.")
         return 2
     st = load_json(p["state"], {})
-    ok, why = take_lock(p)
-    if not ok:
-        say(f"Not now: {why}. Run uninstall again when it has ended.")
-        return 3
+    # Rule 8: a sync that is running is a wait, said with what holds it, never a refusal of a person who wants to
+    # leave. With no folder of the skill's left, nothing can be running, and no folder is made again.
+    if os.path.exists(p["data"]):
+        ok, why = take_lock(p)
+        if not ok:
+            holder = lock_holder(p)
+            say(f"Waiting: a sync is running (process {holder}); uninstall goes on as soon as it ends, for up to "
+                f"{UNINSTALL_WAIT // 60} minutes.")
+            end = time.time() + UNINSTALL_WAIT
+            while not ok and time.time() < end:
+                time.sleep(2)
+                ok, why = take_lock(p)
+        if not ok:
+            say(f"Not now: a sync is still running (process {lock_holder(p)}) after {UNINSTALL_WAIT // 60} minutes, "
+                "and nothing was removed. Run uninstall again once it has ended.")
+            return 3
     removed, linger_said = [], ""
     try:
         uid = str(os.getuid())
@@ -2469,28 +2493,43 @@ def cmd_uninstall(args):
                 os.remove(f)
                 removed.append(f)
     finally:
-        drop_lock(p)
-    say("uninstall: the service, the sync timer, the forge's binary, the settings and every key are removed:")
-    for r in removed:
-        say(f"  removed {r}")
+        if os.path.exists(p["data"]):
+            drop_lock(p)
+    n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
+    rc = 0
+    if args.delete_copies and os.path.exists(p["forge"]):
+        say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds:")
+        answer = input("> ").strip()
+        if answer == str(n):
+            shutil.rmtree(p["data"])
+            removed.append(f"{p['data']}: the folder of copies ({n} copies) and the record of what the skill did here")
+        else:
+            say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
+                f"--delete-copies again and type {n}.")
+            rc = 1
+    uninstall_census(p, removed, linger_said, n)
+    return rc
+
+
+def uninstall_census(p, removed, linger_said, n):
+    """Rule 8: the last thing uninstall prints says what is gone now and what is kept. Run twice, it says so."""
+    say("uninstall: what is gone, and what is kept.")
+    if removed:
+        say("Gone now:")
+        for r in removed:
+            say(f"  {r}")
+    else:
+        say("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and the keys were "
+            "already gone.")
     if linger_said:
         say(linger_said)
-    n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
-    if not os.path.exists(p["forge"]):
-        return 0
-    if not args.delete_copies:
-        say(f"Left: the folder of copies, {p['data']} ({n} copies). It is yours; delete it only when you are sure, "
-            "with: uninstall --delete-copies")
-        return 0
-    say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds:")
-    answer = input("> ").strip()
-    if answer != str(n):
-        say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
-            f"--delete-copies again and type {n}.")
-        return 1
-    shutil.rmtree(p["data"])
-    say(f"The folder of copies is deleted ({n} copies).")
-    return 0
+    if os.path.exists(p["forge"]):
+        say(f"Kept: the folder of copies, {p['data']} ({n} copies), with the record of what the skill did here. It "
+            "is yours; delete it only when you are sure, with: uninstall --delete-copies")
+    elif os.path.exists(p["data"]):
+        say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
+    else:
+        say("Kept: nothing. Nothing of the skill's is left on this computer.")
 
 
 def cmd_run_forge(args):
