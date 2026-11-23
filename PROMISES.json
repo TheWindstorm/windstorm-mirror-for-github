@@ -926,7 +926,7 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "proven": "",
+   "proven": "2026-11-23, a Mac (macOS 13.7.8, Intel) with Apple's developer tools, in an administrator test account with no login session at the screen, over ssh: setup loaded nothing, ended with code 1 and said, in place of launchctl's words, that this account is not logged in at this Mac's screen, that the forge starts once it is, and to log in there and run setup again; no line carried launchctl's words; uninstall then left the account as found.",
    "moved_why": "",
    "moved_by_person": "",
    "id": "M58",
