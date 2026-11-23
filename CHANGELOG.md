@@ -3,6 +3,7 @@
 ## Unreleased
 
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.
+- T2 (row M40, #59): every promise row says what its test stands in for, or none, and a release branch's tests refuse a row that leans on a stand-in while no real machine has proven it. 24 of the 40 rows lean on one.
 - G1.13 (row M39, #57): a Mac is written as what it was. The Mac's git line now names Apple's developer tools and Apple's command for them, and no longer describes what that command shows on a Mac without them, which we have not seen. The Mac sighting under "Seen to work" says it was the Mac's own main account, on a Mac that carries the developer tools, with two stand-in launch agents.
 - G10.8 (row M37, #52): SKILL.md says the agent reaches GitHub only through the tool, never with your own git, SSH key or `gh` login, not even to look, and why: your own login reaches every repository you can, with your right to write; the tool reads with the one read-only key you made for it. A cold start saw the smallest model probe GitHub over SSH and anonymous git.
 - G10.7 (row M36, #51): the skill gives the order plainly: you make your keys first and paste them only after setup. If `key set` is run before setup anyway, it says setup is your agent's step and to run `key set` again after it. Two cold starts saw the smallest model send the person there first.
