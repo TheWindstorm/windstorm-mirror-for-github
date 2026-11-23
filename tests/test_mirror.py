@@ -1472,6 +1472,11 @@ class G3(unittest.TestCase):
             for n in ("alpha", "beta"):
                 w.gh.add_repo("someone", n)
                 w.gh.commit(f"someone/{n}", {"a": b"1"})
+            helped = io.StringIO()
+            with contextlib.redirect_stdout(helped), self.assertRaises(SystemExit):
+                mirror.main(["--help"])
+            self.assertIn("shows you what will be copied and takes your go for the first copy",
+                          " ".join(helped.getvalue().split()), "go's help line does not say what it does")
             rc, out = w.key_set()
             self.assertEqual(rc, 0, out)
             self.assertIn("the go for the first copy is yours, here in this window: run python3 -I ", out)

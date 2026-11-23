@@ -2854,7 +2854,8 @@ def main(argv=None):
     y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
     y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
-    g = sub.add_parser("go", help="the person's own go for the first copy, in a terminal of their own")
+    g = sub.add_parser("go", help="shows you what will be copied and takes your go for the first copy (run it yourself, in a "
+                       "terminal window of your own)")
     g.set_defaults(fn=cmd_go)
     lo = sub.add_parser("left-out", help="the names of the projects your include list and exclude patterns leave out")
     lo.set_defaults(fn=cmd_left_out)
