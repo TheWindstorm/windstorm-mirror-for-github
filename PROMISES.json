@@ -508,7 +508,7 @@
    "moved_by_person": "",
    "id": "M36",
    "codon": "G10.7",
-   "test": "",
+   "test": "test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step",
    "issue": "#51",
    "seen": "2026-11-23, two cold starts on a stock virtual machine: the smallest model told the person to run `key set` before setup, both times; the tool's refusal held ('Setup comes first ... No key was read, and nothing was kept'). Twice is our words, not the model.",
    "promise": "The README and SKILL.md give the order so plainly that the person is not sent to a step that refuses: setup first, then each `key set`; the refusal's own line names the one next step. Seen when the next small-model cold start does not do it."

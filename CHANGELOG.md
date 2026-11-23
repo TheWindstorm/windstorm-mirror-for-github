@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.7 (row M36, #51): the skill gives the order plainly: you make your keys first and paste them only after setup. If `key set` is run before setup anyway, it says setup is your agent's step and to run `key set` again after it. Two cold starts saw the smallest model send the person there first.
 - G6.9 (row M38, #53): before you say go, the announcement says for each key when it ends and that you are warned two weeks before, or that its end date could not be read and so no warning can be promised, and where to read it. `status` says the same. SKILL.md no longer promises the warning itself.
 - G1.12 (row M35, #49): the script checks Python 3.9 or newer before anything else, for every command; an older Python is told which version it is and what is needed, and nothing is made. CI runs 3.9 on Linux and on a Mac, on runner images it names. Rule of the gate: a row names its test only once that test exists and the runner reports it, and the gate counts every row's test (row M8's field is cleared; its test waits in draft #23).
 - G10.6 (row M34, #47): what you must hear before you say go is in the announcement you say go to: what happens after a restart, whether large files are copied, what is not copied and how private the copy is. Setup prints no block of its own any more; a cold start saw the smallest model lose it by going straight on.
