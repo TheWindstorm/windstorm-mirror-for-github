@@ -161,7 +161,8 @@ def pin_for_this_system():
     pin = PINS.get(system())
     if not pin:
         raise SystemExit(f"This system ({'/'.join(system())}) is not one 0.1 supports: Linux on x86-64, macOS on "
-                         "Intel or Apple Silicon. Nothing was changed.")
+                         "Intel or Apple Silicon. Nothing was changed. To ask for this system, open an issue at "
+                         f"https://github.com/{SKILL_REPO}.")
     return pin
 
 
@@ -322,10 +323,12 @@ def create_user(p, name, admin):
         args.append("--admin")
     out = gitea(p, *args)
     if out.returncode != 0:
-        raise SystemExit(f"Gitea refused to create the account {name}: {last_line(out.stderr)}")
+        raise SystemExit(f"Gitea refused to create the account {name}: {last_line(out.stderr)}. Run setup again; if "
+                         "it stops here again, Gitea's words above are the reason.")
     m = re.search(r"generated random password is '([^']+)'", out.stdout + out.stderr)
     if not m:
-        raise SystemExit(f"Gitea created {name} but did not give its password; nothing was printed.")
+        raise SystemExit(f"Gitea created {name} but did not give its password; nothing was printed. The account has "
+                         "no password this skill knows: open an issue with this line.")
     return m.group(1)
 
 
@@ -697,7 +700,7 @@ def check_key(key, owner):
     if code == 401:
         return None, "GitHub refused this key (401). Make a new one; nothing was kept."
     if code != 200:
-        return None, f"GitHub did not answer as expected ({code}); nothing was kept."
+        return None, f"GitHub did not answer as expected ({code}); nothing was kept. Run key set again in a few minutes."
     if (body or {}).get("login", "").lower() == owner.lower():
         kind, listing = "user", "/user/repos?affiliation=owner&per_page=1"
     else:
@@ -708,7 +711,9 @@ def check_key(key, owner):
         kind, listing = "org", f"/orgs/{urllib.parse.quote(owner)}/repos?per_page=1"
     code, _, _ = gh_get(key, listing)
     if code != 200:
-        return None, f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). Nothing was kept."
+        return None, (f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). Nothing was "
+                      "kept. Check the key's resource owner and repository access on GitHub's key page, then run key "
+                      "set again.")
     return kind, ""
 
 
@@ -720,7 +725,8 @@ def cmd_key_set(args):
         return 2
     key = secret(read_key_from_stdin())
     if not key or any(c.isspace() for c in key) or len(key) > 255:
-        say("No key was read from standard input (or it was not one line). Nothing was kept.")
+        say(f"No key was read (or it was not one line). Nothing was kept. Run key set {owner} again in a terminal "
+            "window of your own, and paste the key when it asks.")
         return 2
     kind, why = check_key(key, owner)
     if not kind:
@@ -889,7 +895,8 @@ class Forge:
             dcode, _ = self.call("DELETE", f"/repos/{self.user}/{urllib.parse.quote(name)}")
             raise HardStop(f"the forge made the copy {name} without 'private'; it was deleted at once "
                            f"({'deleted' if dcode == 204 else f'delete answered {dcode}: delete it by hand'}), "
-                           "and the sync stopped. Nothing else was copied.")
+                           "and the sync stopped. Nothing else was copied. Open an issue with this line; the "
+                           "timer tries again at its next run, and stops the same way if the forge does the same.")
         self.call("PATCH", f"/repos/{self.user}/{urllib.parse.quote(name)}", {"has_actions": False})
         return body
 
@@ -1187,7 +1194,7 @@ def cmd_sync(args):
     p = paths()
     ok, note = take_lock(p)
     if not ok:
-        say(note)
+        say(f"{note}. It ends by itself; wait for it, or run sync again when it has ended.")
         return 3
     try:
         if note:
@@ -1233,7 +1240,8 @@ def sync(p, args):
         why = f"only {free_mb} MB free on this disk, below the floor of {floor_mb} MB"
         st["last_sync"] = {"at": now_utc(), "calls": 0, "copied": 0, "problems": 1, "stopped": why}
         save_state(p, st)
-        say(f"The sync did not start: {why}. Every copy is as it was.")
+        say(f"The sync did not start: {why}. Every copy is as it was. Free some space on this disk; the next sync "
+            "starts by itself once there is enough.")
         return 1
     state = st.setdefault("repos", {})
     found, problems, report, calls = {}, [], [], 0
@@ -1264,7 +1272,9 @@ def sync(p, args):
         ok, why = chosen(r["full_name"], s)
         (picked.__setitem__(gid, (owner, key, r)) if ok else skipped.append(f"{r['full_name']} ({why})"))
     if s.get("include") and not picked and found:
-        say("The include list matches no repository GitHub shows; the sync stops rather than copy everything.")
+        say("The include list matches no repository GitHub shows; the sync stops rather than copy everything. Check "
+            "the names (owner/name, as GitHub shows them) with config include, or clear the list with config "
+            "include --clear.")
         return 2
     if args.announce:
         # G3.7: the announcement never copies, the first time or any time after; only a plain sync is the go.
@@ -1423,7 +1433,8 @@ def cmd_setup(args):
         os.makedirs(os.path.join(p["forge"], d), exist_ok=True)
     out = gitea(p, "migrate")
     if out.returncode != 0:
-        raise SystemExit(f"Gitea could not prepare its database: {last_line(out.stderr)}")
+        raise SystemExit(f"Gitea could not prepare its database: {last_line(out.stderr)}. Run setup again; if it "
+                         "stops here again, Gitea's words above are the reason.")
     users = forge_users(p)
     if not st.get("person"):
         name = person_name()
@@ -1437,7 +1448,7 @@ def cmd_setup(args):
         out = gitea(p, "admin", "user", "generate-access-token", "--username", MIRROR_USER,
                     "--token-name", "windstorm-mirror", "--scopes", MIRROR_SCOPES, "--raw")
         if out.returncode != 0 or not out.stdout.strip():
-            raise SystemExit("Gitea did not give the mirror account its key; nothing was printed.")
+            raise SystemExit("Gitea did not give the mirror account its key; nothing was printed. Run setup again.")
         write_private(p["mirror_key"], out.stdout.strip() + "\n")
         st["mirror_user"] = MIRROR_USER
         say(f"The '{MIRROR_USER}' account that owns the copies is made; its key is in {p['mirror_key']}.")
@@ -1865,12 +1876,14 @@ def restore_to(p, st, forge, url, repository):
         say(f"The copy of {repository} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
         return 1
     if not cur:
-        say(f"There is no copy of {repository} in the forge.")
+        say(f"There is no copy of {repository} in the forge. Run status to see the copies it holds, and name one "
+            "of them as owner/name.")
         return 2
     # The person's own git login for the new home; the skill's keys are not used there.
     out = run(["git", "ls-remote", url], env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=120)
     if out.returncode != 0:
-        say(f"The new home could not be reached: {last_line(out.stderr)}. Nothing was pushed.")
+        say(f"The new home could not be reached: {last_line(out.stderr)}. Nothing was pushed. Check the address, "
+            "and that your own git login reaches it (git ls-remote <the address>), then run restore --to again.")
         return 1
     if out.stdout.strip():
         say("The new home is not empty, so nothing was pushed. Make a new, empty repository and name that.")
@@ -1880,7 +1893,7 @@ def restore_to(p, st, forge, url, repository):
         into = os.path.join(work, "copy.git")
         why = clone_copy(forge, cur["name"], into)
         if why:
-            say(f"{repository}: {why}. Nothing was pushed.")
+            say(f"{repository}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
             return 1
         mine = dict(os.environ, GIT_TERMINAL_PROMPT="0")
         run(["git", "--git-dir", into, "remote", "add", "home", url], env=mine)
@@ -1889,20 +1902,24 @@ def restore_to(p, st, forge, url, repository):
             out = run(["git", "--git-dir", into, "lfs", "push", "--all", "home"], env=mine, timeout=3600)
             if out.returncode != 0:
                 say("The large files could not be put in the new home, so nothing else was pushed: "
-                    + " / ".join(out.stderr.strip().splitlines()[-3:]))
+                    + " / ".join(out.stderr.strip().splitlines()[-3:])
+                    + ". Check that the new home takes large files, then run restore --to again.")
                 return 1
         specs = ["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*", "^refs/heads/kept/*"]
         out = run(["git", "--git-dir", into, "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--atomic", "home",
                    *specs], env=mine, timeout=3600)
         if out.returncode != 0:
-            say("The push to the new home failed: " + " / ".join(out.stderr.strip().splitlines()[-4:]))
+            say("The push to the new home failed: " + " / ".join(out.stderr.strip().splitlines()[-4:])
+                + ". Run restore --to again into a new, empty repository; if it fails the same way, git's words are "
+                  "the reason.")
             return 1
         sent = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
         back = run(["git", "ls-remote", url], env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=120)
         there = {r: s for s, r in (l.split("\t", 1) for l in back.stdout.splitlines() if "\t" in l)
                  if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
         if there != sent:
-            say("The new home does not hold what was sent; check it before you rely on it.")
+            say("The new home does not hold what was sent; do not rely on it. Run restore --to again into a new, "
+                "empty repository.")
             return 1
         heads = sum(1 for r in sent if r.startswith("refs/heads/"))
         say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
@@ -1940,7 +1957,8 @@ def safe_extract(archive, into):
         for m in tf.getmembers():
             dest = os.path.realpath(os.path.join(into, m.name))
             if not dest.startswith(root + os.sep) or m.issym() or m.islnk() or m.isdev():
-                raise SystemExit(f"The backup holds an entry that points outside it ({m.name}); nothing was restored.")
+                raise SystemExit(f"The backup holds an entry that points outside it ({m.name}); nothing was restored. "
+                                 "Name a backup made by this skill's own backup command.")
         tf.extractall(into)
 
 
@@ -1954,7 +1972,7 @@ def cmd_backup(args):
         return 2
     lock_ok, why = take_lock(p)
     if not lock_ok:
-        say(f"No backup was made: {why}.")
+        say(f"No backup was made: {why}. Run backup again when it has ended.")
         return 3
     try:
         return make_backup(p, st, args.folder)
@@ -1973,12 +1991,14 @@ def make_backup(p, st, folder):
                 break
             time.sleep(0.5)
         else:
-            say("The forge did not stop, so no backup was made (a backup of a running forge can be torn).")
+            say("The forge did not stop, so no backup was made (a backup of a running forge can be torn). Run "
+                "backup again; if the forge still does not stop, run status.")
             return 1
         dump = os.path.join(work, "gitea-dump.tar.gz")
         out = gitea(p, "dump", "--type", "tar.gz", "--file", dump, "--tempdir", work)
         if out.returncode != 0 or not os.path.exists(dump):
-            say(f"Gitea's dump failed: {last_line(out.stderr)}. No backup was made.")
+            say(f"Gitea's dump failed: {last_line(out.stderr)}. No backup was made. Run backup again; if it fails "
+                "the same way, Gitea's words are the reason.")
             return 1
     finally:
         started = service(p, "start")
@@ -2010,7 +2030,8 @@ def make_backup(p, st, folder):
 def setup_from(p, args):
     """G7.4: a new computer with only the backup file and the skill gets back every copy."""
     if load_json(p["state"], {}).get("port"):
-        say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed.")
+        say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed. "
+            "Run setup --from on the new computer; this one keeps its own forge.")
         return 2
     if linger_unchosen(args, {}):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
@@ -2025,7 +2046,8 @@ def setup_from(p, args):
         safe_extract(src, work)
         old_st = load_json(os.path.join(work, "skill", "state.json"), None)
         if not old_st or not os.path.exists(os.path.join(work, "gitea-dump.tar.gz")):
-            say("That file is not a backup of this skill. Nothing was changed.")
+            say("That file is not a backup of this skill. Nothing was changed. Name the file this skill's own "
+                "backup command made.")
             return 2
         dump = os.path.join(work, "dump")
         os.makedirs(dump)
@@ -2057,13 +2079,15 @@ def setup_from(p, args):
     for step in (["migrate"], ["admin", "regenerate", "hooks"]):
         out = gitea(p, *step)
         if out.returncode != 0:
-            raise SystemExit(f"Gitea could not {' '.join(step)}: {last_line(out.stderr)}")
+            raise SystemExit(f"Gitea could not {' '.join(step)}: {last_line(out.stderr)}. The forge's data is in "
+                             "place, and the forge is not ready: open an issue with this line.")
     user = old_st.get("mirror_user", MIRROR_USER)
     out = gitea(p, "admin", "user", "generate-access-token", "--username", user,
                 "--token-name", "windstorm-mirror-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()),
                 "--scopes", MIRROR_SCOPES, "--raw")
     if out.returncode != 0 or not out.stdout.strip():
-        raise SystemExit("Gitea did not give the mirror account a new key; nothing was printed.")
+        raise SystemExit("Gitea did not give the mirror account a new key; nothing was printed. The forge's data "
+                         "is in place, and the sync cannot reach it: open an issue with this line.")
     write_private(p["mirror_key"], secret(out.stdout.strip()) + "\n")
     st = dict(old_st, port=port, version=VERSION, gitea=GITEA_VERSION, restored_from=os.path.basename(src),
               restored_at=now_utc())
@@ -2130,28 +2154,30 @@ def cmd_upgrade_forge(args):
         return 0
     if vt(cur) > vt(new):
         say(f"The forge runs Gitea {cur}, newer than the {new} this release pins. A forge is never moved back. "
-            "Nothing was changed.")
+            "Nothing was changed. Run self-update for the newest release of this skill.")
         return 2
     ok, why = take_lock(p)
     if not ok:
-        say(f"No upgrade: {why}.")
+        say(f"No upgrade: {why}. Run upgrade-forge again when it has ended.")
         return 3
     rollback = os.path.join(p["data"], "upgrade-rollback")
     try:
         say(f"upgrade-forge: Gitea {cur} to {new}. First, a backup.")
         if make_backup(p, st, os.path.join(p["data"], "backups")) != 0:
-            say("The backup failed, so the forge was not touched.")
+            say("The backup failed, so the forge was not touched. Run upgrade-forge again once the backup's "
+                "reason above is dealt with; it makes the backup first.")
             return 1
         save_state(p, st)
         try:
             fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
         except SystemExit as e:
-            say(f"{e} The forge was not touched.")
+            say(f"{e} The forge was not touched. Run upgrade-forge again.")
             return 1
         service(p, "stop")
         if not wait_forge(st["port"], up=False, seconds=30):
             service(p, "start")
-            say("The forge did not stop, so it was not upgraded.")
+            say("The forge did not stop, so it was not upgraded. Run upgrade-forge again; if the forge still does "
+                "not stop, run status.")
             return 1
         shutil.rmtree(rollback, ignore_errors=True)
         os.makedirs(rollback, mode=0o700)
@@ -2202,7 +2228,8 @@ def cmd_self_update(args):
     p = paths()
     code, raw = gh_public(f"/repos/{SKILL_REPO}/releases/latest")
     if code != 200:
-        say(f"GitHub did not show the latest release ({code or 'no answer'}). Nothing was changed.")
+        say(f"GitHub did not show the latest release ({code or 'no answer'}). Nothing was changed. Run "
+            "self-update again later.")
         return 1
     rel = json.loads(raw or b"null") or {}
     tag = rel.get("tag_name", "")
@@ -2216,7 +2243,9 @@ def cmd_self_update(args):
     code, data = gh_public(f"/repos/{SKILL_REPO}/contents/scripts/mirror.py?ref={urllib.parse.quote(tag)}",
                            accept="application/vnd.github.raw")
     if code != 200 or hashlib.sha256(data).hexdigest() != m.group(1):
-        say(f"The mirror.py of {tag} did not arrive whole or does not match its checksum. Nothing was changed.")
+        say(f"The mirror.py of {tag} did not arrive whole or does not match its checksum. Nothing was changed. "
+            "Run self-update again; if it fails the same way, do not install it by hand: open an issue with this "
+            "line.")
         return 1
     target = p["script"] if os.path.exists(p["script"]) else os.path.abspath(__file__)
     tmp = target + ".new"
@@ -2255,7 +2284,7 @@ def cmd_uninstall(args):
     st = load_json(p["state"], {})
     ok, why = take_lock(p)
     if not ok:
-        say(f"Not now: {why}.")
+        say(f"Not now: {why}. Run uninstall again when it has ended.")
         return 3
     removed, linger_said = [], ""
     try:
@@ -2311,7 +2340,8 @@ def cmd_uninstall(args):
     say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds:")
     answer = input("> ").strip()
     if answer != str(n):
-        say(f"That is not {n}. The copies were not deleted.")
+        say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
+            f"--delete-copies again and type {n}.")
         return 1
     shutil.rmtree(p["data"])
     say(f"The folder of copies is deleted ({n} copies).")

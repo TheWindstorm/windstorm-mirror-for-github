@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G6.8 (row M30, #35): every stop and needs-you line names what happened and the one next step. 39 of 63 had none, and a cold start saw one send the agent into the source four times.
 - G10.5 (row M29, #34): what the person must hear in the dry run, in setup and in the announcement comes as one numbered block, `tell the person 1 of N:` to `N of N:`, and SKILL.md says to give it whole, before any words of the agent's own. The announcement now also says where the copies go. A cold start saw the smallest model shorten the dry run to one line and drop part of the privacy line.
 - G1.8 (row M28, #32): every install line named was run as written on a fresh system first (Ubuntu 24.04.5, Debian 13, Fedora 45; two test Macs), and the plan's "Install lines, as seen" table says where. The apt lines now start with `sudo apt update &&`, because alone they fail on a fresh Ubuntu or Debian image. The Mac's git line says it opens Apple's installer. Large files on a Mac point to https://git-lfs.com, since `brew install git-lfs` failed on the older test Mac.
 - G3.8 (row M27, #30): a copy made without its large files is a `problem:` line in `sync`, `status` and `restore --check`, with the next step; once git lfs is installed, the next sync copies it again instead of waiting for the daily full pass.
