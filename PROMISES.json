@@ -395,6 +395,22 @@
    "exception": ""
   },
   {
+   "id": "M25",
+   "seen": "2026-11-23 (about 12:00 AM ET): another program sharing one GitHub login polled every 3 s, spent the hour's allowance, and everything using that login was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
+   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time (\"spent\" only when GitHub said so; under the floor, how much is left and the floor); the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
+   "codon": "G4.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project",
+   "stand_in": "GitHub (a stand-in's two answers for a spent allowance)",
+   "proven": "",
+   "issue": "#38",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
+  },
+  {
    "id": "M26",
    "seen": "2026-11-23, a cold start on a stock Ubuntu 24.04 virtual machine (a fresh agent, the smallest model, given one sentence): after the announcement and the question for the go, the agent ran `sync --announce` again to re-check, and the tool made the first copy without the go.",
    "promise": "`sync --announce` never copies, the first time or any time after; the go is a sync run on the person's word, recorded with its time, and `status` says whether the first copy was made on the person's go or still waits for it.",
@@ -475,22 +491,6 @@
    "exception": ""
   },
   {
-   "id": "M32",
-   "seen": "2026-11-23, the cold start's run B: a second owner's key was held back until the include list stood, and only the person's care did that; had the agent announced before `config include`, the person's yes would have copied every project of the owner.",
-   "promise": "The announcement names the projects (20 by name, then 'and N more', the whole list in a file only the person can read), and the first copy copies exactly the list last announced; if the list changed, nothing is copied, it is said again, and a new go is asked.",
-   "codon": "G3.9",
-   "owner": "maintainer",
-   "first_ship_in": "0.1.0",
-   "ship_in": "0.1.0",
-   "test": "test_G3_9_the_go_copies_only_what_the_last_announcement_named",
-   "stand_in": "none",
-   "proven": "",
-   "issue": "#36",
-   "moved_why": "",
-   "moved_by_person": "",
-   "exception": ""
-  },
-  {
    "id": "M31",
    "seen": "2026-11-23, the cold start's run B: the agent told the person to run key set before setup, against SKILL.md's order; key set before setup checked the key with GitHub and kept it in a file before the skill that guards it was installed.",
    "promise": "Before setup, key set reads no key, asks GitHub nothing and keeps nothing, and says setup comes first.",
@@ -507,17 +507,17 @@
    "exception": ""
   },
   {
-   "id": "M25",
-   "seen": "2026-11-23 (about 12:00 AM ET): another program sharing one GitHub login polled every 3 s, spent the hour's allowance, and everything using that login was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
-   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time (\"spent\" only when GitHub said so; under the floor, how much is left and the floor); the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
-   "codon": "G4.8",
+   "id": "M32",
+   "seen": "2026-11-23, the cold start's run B: a second owner's key was held back until the include list stood, and only the person's care did that; had the agent announced before `config include`, the person's yes would have copied every project of the owner.",
+   "promise": "The announcement names the projects (20 by name, then 'and N more', the whole list in a file only the person can read), and the first copy copies exactly the list last announced; if the list changed, nothing is copied, it is said again, and a new go is asked.",
+   "codon": "G3.9",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "test": "test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project",
-   "stand_in": "GitHub (a stand-in's two answers for a spent allowance)",
+   "test": "test_G3_9_the_go_copies_only_what_the_last_announcement_named",
+   "stand_in": "none",
    "proven": "",
-   "issue": "#38",
+   "issue": "#36",
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
@@ -801,14 +801,14 @@
    "proven": "",
    "moved_why": "",
    "moved_by_person": "",
-   "id": "M52",
-   "codon": "G5.5",
-   "test": "test_G5_5_github_out_of_reach_is_said_so_never_a_code_or_a_no",
-   "stand_in": "GitHub (a closed port, and a stand-in that fails one read)",
+   "id": "M50",
+   "codon": "G1.15",
+   "test": "test_G1_15_a_copy_on_a_mac_is_said_unseen_until_it_is_seen",
+   "stand_in": "GitHub (the suite's stand-in, on GitHub's macOS runners)",
    "exception": "",
-   "issue": "#85",
-   "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine with its road to GitHub cut: sync said 'GitHub answered 0'. Reading the code then found key set saying 'this key cannot see' on no answer or a 5xx.",
-   "promise": "A read of GitHub that got no answer is said as 'GitHub could not be reached', never as an answer of 0; in key set, no answer or GitHub's own failure is never 'this key cannot see': nothing is kept, and the step is to run key set again."
+   "issue": "#89",
+   "seen": "2026-11-23, reading the Mac's first sighting with the skill itself: it had 0 copies (no key), and the sighting before it was stand-in agents. No copy from GitHub has been made on a Mac by a person's account.",
+   "promise": "A first copy from GitHub, and restore --check, are seen on a Mac in a person's own account before the tag; until then, a README that names the Mac says in one plain sentence that it was not seen, and what was seen instead."
   },
   {
    "owner": "maintainer",
@@ -825,6 +825,22 @@
    "issue": "#87",
    "seen": "2026-11-23, a Mac test account: the dry run's git lfs line named the install commands for Ubuntu, Debian and Fedora as well as a Mac's; and the install lines had been run with -y, not exactly as printed.",
    "promise": "The install words name this computer's way only, read from the system itself, and only a line run exactly as printed on that kind of system with its prompts answered by hand; any other system gets the program's own page."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M52",
+   "codon": "G5.5",
+   "test": "test_G5_5_github_out_of_reach_is_said_so_never_a_code_or_a_no",
+   "stand_in": "GitHub (a closed port, and a stand-in that fails one read)",
+   "exception": "",
+   "issue": "#85",
+   "seen": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine with its road to GitHub cut: sync said 'GitHub answered 0'. Reading the code then found key set saying 'this key cannot see' on no answer or a 5xx.",
+   "promise": "A read of GitHub that got no answer is said as 'GitHub could not be reached', never as an answer of 0; in key set, no answer or GitHub's own failure is never 'this key cannot see': nothing is kept, and the step is to run key set again."
   }
  ],
  "declined": []

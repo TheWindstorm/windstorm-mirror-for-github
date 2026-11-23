@@ -242,6 +242,9 @@ class Home:
                 time.sleep(0.5)
 
 
+MAC_COPY_UNSEEN = ("No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS "
+                   "runners the tests make first copies and run restore --check with the real pinned Gitea, against "
+                   "a stand-in for GitHub.")
 KEY_BEFORE_SETUP_SOMEONE = ("Setup comes first, and it has not run on this computer: setup is your agent's step (or run setup "
                     "yourself), then run key set someone again. No key was read, and nothing was kept.")
 
@@ -629,6 +632,17 @@ class G1(unittest.TestCase):
                 self.assertNotIn(word, said)
         finally:
             mirror.OS_RELEASE, mirror.system = saved_rel, saved_sys
+
+    def test_G1_15_a_copy_on_a_mac_is_said_unseen_until_it_is_seen(self):
+        """No copy from GitHub has been made on a Mac by a person's account (the owner, reading the Mac's first
+        sighting, 2026-11-23: it had 0 copies, and the one before it was stand-in agents). While row M50 has no
+        proven line, a README that names the Mac says so in one plain sentence, with what was seen instead."""
+        rows = {r["id"]: r for r in json.loads(fread(os.path.join(ROOT, "PROMISES.json")))["rows"]}
+        self.assertEqual(rows["M50"]["test"], "test_G1_15_a_copy_on_a_mac_is_said_unseen_until_it_is_seen")
+        readme = fread(os.path.join(ROOT, "README.md"))
+        if rows["M50"]["proven"] or not re.search(r"\b(?:Macs?|macOS)\b", readme):
+            return
+        self.assertIn(MAC_COPY_UNSEEN, " ".join(readme.split()))
 
     def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
         with Home() as h:
