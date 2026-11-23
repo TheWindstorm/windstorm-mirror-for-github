@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.13 (row M57): this repository's own catalog entry stays `./` only until the first release; after it, an https url pinned to a released version with its full sha.
 - G10.12 (row M56): an exception, and a ruling in public text, says whose word it was by role: an exception begins "By the maintainer's word, " or "By the owner's word, ", and the promise file says who may move each; M13, M42 and three changelog lines now say "the maintainer's", which is whose word they were.
 - G9.6 (row M55): after Claude Code's own plugin uninstall, `status` and each sync say the plugin was removed, with the one command that takes the mirror off; nothing runs from a folder Claude Code set aside.
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.

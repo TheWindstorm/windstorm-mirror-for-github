@@ -3255,6 +3255,34 @@ class G10(unittest.TestCase):
             self.assertIn(f'"{w}"', rule)
         self.assertIn("an owner's exception is moved only by the owner, a maintainer's by the maintainer or the owner", rule)
 
+    def test_G10_13_our_own_catalog_entry_is_pinned_once_a_version_is_released(self):
+        """M57 (the family's rule 16, corrected 2026-11-23): this repository's own catalog file stays, and its entry
+        never hands out unreleased code under a released label. `./` stands only while no version older than this one
+        is released; then an https url with ref v<a released version no newer than this one> and a full sha. The one
+        commit between a tag and its pin is the release step's to hold: the pin needs the tag's sha."""
+        url = lambda ref, sha="a" * 40, u="https://github.com/TheWindstorm/windstorm-mirror-for-github.git": \
+            {"source": {"source": "url", "url": u, "ref": ref, "sha": sha}}
+        ok = [({"source": "./"}, "0.0.0", ["Unreleased"]),
+              ({"source": "./"}, "0.1.0", ["0.1.0 (2026-11-24)"]),
+              (url("v0.1.0"), "0.1.0", ["0.1.0 (2026-11-24)"]),
+              (url("v0.1.0"), "0.1.1", ["0.1.1 (2026-12-01)", "0.1.0 (2026-11-24)"])]
+        wrong = [({"source": "./"}, "0.1.1", ["0.1.1 (2026-12-01)", "0.1.0 (2026-11-24)"]),
+                 (url("v0.1.1"), "0.1.0", ["0.1.0 (2026-11-24)"]),
+                 (url("v0.1.1"), "0.1.0", ["0.1.1 (2026-12-01)", "0.1.0 (2026-11-24)"]),
+                 (url("v0.0.9"), "0.1.0", ["0.1.0 (2026-11-24)"]),
+                 (url("0.1.0"), "0.1.0", ["0.1.0 (2026-11-24)"]),
+                 (url("v0.1.0", sha="abc123"), "0.1.0", ["0.1.0 (2026-11-24)"]),
+                 (url("v0.1.0", u="http://github.com/TheWindstorm/windstorm-mirror-for-github.git"), "0.1.0", ["0.1.0"]),
+                 ({"source": "https://github.com/TheWindstorm/windstorm-mirror-for-github.git"}, "0.1.0", ["0.1.0"])]
+        for e, ver, heads in ok:
+            self.assertIsNone(catalog_entry_wrong(e, ver, heads), (e, ver))
+        for e, ver, heads in wrong:
+            self.assertIsNotNone(catalog_entry_wrong(e, ver, heads), (e, ver))
+        entry = [p for p in jload(os.path.join(ROOT, ".claude-plugin", "marketplace.json"))["plugins"]
+                 if p["name"] == "windstorm-mirror-for-github"][0]
+        heads = re.findall(r"^## (.+)$", fread(os.path.join(ROOT, "CHANGELOG.md")), re.M)
+        self.assertIsNone(catalog_entry_wrong(entry, version(), heads))
+
     def test_G10_11_the_cold_starts_are_the_first_evals_as_cases(self):
         """The family's rule 13: the cold-start runs, written as cases, are the first evals. Each case loads in
         skill-creator's layout (what `claude plugin eval` reads), and the evals' README records every run against
@@ -3472,6 +3500,26 @@ def stand_ins_unproven(rows, at):
 
 
 WHOSE_WORD = ("By the maintainer's word, ", "By the owner's word, ")
+
+
+def catalog_entry_wrong(entry, ver, heads):
+    """M57 (the family's rule 16): why this repository's own catalog entry is wrong at version `ver`, given the
+    changelog's headings, or None. `./` hands out whatever main holds, so it stands only while no version older
+    than this one is released (0.0.0, and the release commit itself, before the tag exists to pin to). Otherwise
+    the entry is an https url pinned to a released version no newer than this one: ref v<that version>, a full sha."""
+    released = [h.split(" ")[0] for h in heads if re.match(r"^\d+\.\d+\.\d+(?: \(\d{4}-\d{2}-\d{2}\))?$", h)]
+    src = entry.get("source")
+    if src == "./":
+        older = [x for x in released if v(x) < v(ver)]
+        return f"'./' after {older[0]} was released: pin the entry to a release" if older else None
+    if not isinstance(src, dict) or src.get("source") != "url" or not str(src.get("url", "")).startswith("https://"):
+        return "the entry is neither './' nor an https url source"
+    ref, sha = str(src.get("ref", "")), str(src.get("sha", ""))
+    if not (ref.startswith("v") and ref[1:] in released and v(ref[1:]) <= v(ver)):
+        return f"ref {ref!r} is not a released version no newer than {ver}"
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return "the sha is not a full commit id"
+    return None
 
 
 def exception_named(text):

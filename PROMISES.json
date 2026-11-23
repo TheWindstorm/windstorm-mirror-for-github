@@ -905,6 +905,22 @@
    "issue": "",
    "seen": "2026-11-23: the rows' exceptions and moved dates all read \"by the owner's word\", while every one of them was set by the maintainer; the family's rule 18 grew the same day to cover every public text, and its principle 9 is to say only what is true.",
    "promise": "An exception, and a ruling in any public text, says whose word it really was, by role: an exception begins \"By the maintainer's word, \" or \"By the owner's word, \" and nothing else lets a version be tagged before its row is proven; the promise file says in one sentence who may move each; public text never pins a ruling to a person's name or our own labels."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M57",
+   "codon": "G10.13",
+   "test": "test_G10_13_our_own_catalog_entry_is_pinned_once_a_version_is_released",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "",
+   "seen": "2026-11-23: the family's rule 16, corrected the same afternoon: a skill's own catalog file with a './' source hands out whatever main holds, and the road every cold start of this skill walked is that file. Pinning, not removing, keeps unreleased code from going out under a released label.",
+   "promise": "This repository's own catalog entry is './' only while no version older than the current one is released; otherwise it is an https url source pinned to a released version no newer than the current one (ref v<version>, a full sha). The pin is a text-only commit on main right after each tag; the one commit between the tag and the pin is the release step's to hold."
   }
  ],
  "declined": []
