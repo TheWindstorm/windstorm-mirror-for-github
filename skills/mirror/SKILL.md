@@ -21,10 +21,15 @@ Follow these steps in this order. Do not skip one, and do not change the order. 
 marked **Person** and is described under "The person's steps": say what is written there, then wait.
 
 1. `M setup --dry-run`. Show the person its whole output: it says what setup would do and changes nothing.
+   On Linux it also says, in plain words, whether setup will switch on lingering, and what that means: the
+   mirror keeps running when they are logged out and after a restart. Read that sentence to the person and
+   ask whether they want it. If they say no, step 3 is `M setup --no-linger`: the mirror then syncs only while
+   they are logged in.
 2. **Person**: the keys to make. One read-only key for each owner whose projects are to be copied: their own
    account, and each organisation they name. See "Making each key".
-3. `M setup`. It installs the forge as the person's own service. If it prints a command for an administrator
-   (lingering), that is a **Person** step: see "The administrator's command".
+3. `M setup` (or `M setup --no-linger`, if the person said no in step 1). It installs the forge as the
+   person's own service. If it prints a command for an administrator (lingering), that is a **Person** step:
+   see "The administrator's command".
 4. **Person**: `key set` for each owner. The person runs it themselves, so the key never passes through you:
    ask them to type `! python3 -I <the script> key set <owner>` and paste the key when it asks. Run nothing that
    would put a key on a command line, in a file you write, or in your own output.
@@ -60,7 +65,8 @@ Only a clear yes from the person is the go. Do not take silence, or an earlier y
 **The administrator's command.** If setup says the copy stands still after a restart until the person logs in,
 and prints a command such as `sudo loginctl enable-linger <user>`, say: "To keep the copy current after a restart
 without your logging in, an administrator of this computer can run: <the command>. It is your choice; without it,
-the copy catches up when you log in." Never run it yourself.
+the copy catches up when you log in." Never run it yourself. Setup itself never asks for a password; when the
+computer refuses, this command is the only way, and it is the administrator's.
 
 **Terms screens.** If anything shows a terms, licence or privacy screen whose only way on is Agree, Accept or
 Continue, never press it. Stop, and tell the person it is theirs to read and decide.

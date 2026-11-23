@@ -128,13 +128,30 @@ Seen:
   `StartInterval`, came back after a restart. The first ran 45 s after the boot; the second ran 316 s after it,
   then on its interval. `launchctl print` showed `run interval = 300 seconds`, the text `status` reads. Before
   the restart, agents loaded over a remote login ran while no one was at the console.
-- Not seen yet: the systemd user unit across a restart; lingering switched on by a person who is not an
-  administrator; a Mac restart with no automatic login (FileVault on turns it off); Apple Silicon.
+- Seen on 2026-11-22, on a stock Ubuntu 24.04 virtual machine (the cloud image, nothing added), with a person
+  account that has no administrator rights:
+  - A stock machine has git 2.43 and Python 3.12, and no git lfs. The user manager's PATH is the standard one,
+    and the forge's own process ran the pinned binary and found git.
+  - Lingering is off by default, and polkit lets any user switch on their own (`set-self-linger`: "implicit
+    any: yes"). `loginctl --no-ask-password` exists for that call.
+  - Across a restart with lingering on and no one logged in, the forge and the timer started 7 s after boot,
+    the forge answered, and the sync ran 2 min 16 s after boot (with `OnStartupSec=2min`).
+  - With `OnBootSec=5min` and lingering off, a person who logged in 5.5 minutes after boot had a timer that
+    was active with no next run (`NextElapseUSecMonotonic=infinity`). With `OnStartupSec=2min`, the same case
+    had its next run 2 minutes after the login.
+  - systemd may keep a next run on the boot clock only: `NextElapseUSecRealtime` empty,
+    `NextElapseUSecMonotonic` set.
+- Not seen yet: a suspend and a timed wake; a Mac restart with no automatic login (FileVault on turns it off);
+  Apple Silicon; a Linux machine whose polkit refuses self-lingering.
 
 ## C10 Gitea's settings take effect
 
 - Seen in part: Gitea listened on 127.0.0.1 with registration disabled and sign-in required to view.
-- Not seen yet: a probe from another computer; Actions off for the whole forge.
+- Seen on 2026-11-22, a probe from another computer: the forge ran in a stock Ubuntu 24.04 virtual machine,
+  and the host reached the VM's own address through its network. The forge's port there reset the connection,
+  while SSH's port on the same path answered with its banner (the control). Inside the VM the forge answered on
+  127.0.0.1, and `ss` showed it listening on 127.0.0.1 only.
+- Not seen yet: Actions off for the whole forge.
 
 ## C11 The skill's latest release, read with no key
 

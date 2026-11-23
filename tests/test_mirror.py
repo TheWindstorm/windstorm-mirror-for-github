@@ -114,6 +114,9 @@ class Home:
         self.timer_next = "Sun 2026-11-22 19:15:00 UTC"     # what the system says of the sync timer's next run
         self.forge_follows = False      # when True, stopping and starting the service stops and starts the forge
         self.auto_login, self.filevault = None, False      # a Mac's automatic login after a restart, and FileVault
+        self.pkcheck = 1             # polkit's exit for "may this person switch on their own lingering"; None: no pkcheck
+        self.timer_mono = ""         # the timer's next run on the boot clock (systemd's NextElapseUSecMonotonic)
+        self.kws = []                # the keyword arguments of each command the stand-in answered
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -122,6 +125,14 @@ class Home:
         self.procs = []
 
     def fake_run(self, cmd, **kw):
+        if cmd[0] == "pkcheck":
+            self.calls.append(cmd)
+            self.kws.append(kw)
+            if self.pkcheck == "timeout":
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+            if self.pkcheck is None:
+                return subprocess.CompletedProcess(cmd, 127, "", "pkcheck is not installed on this computer")
+            return subprocess.CompletedProcess(cmd, self.pkcheck, "", "")
         if cmd[0] in ("defaults", "fdesetup"):
             self.calls.append(cmd)
             if cmd[0] == "defaults":
@@ -146,12 +157,16 @@ class Home:
             if cmd[:3] == ["systemctl", "--user", "show"]:
                 if self.timer_next is None:
                     return subprocess.CompletedProcess(cmd, 0, "ActiveState=inactive\nNextElapseUSecRealtime=\n", "")
-                return subprocess.CompletedProcess(cmd, 0, f"ActiveState=active\nNextElapseUSecRealtime={self.timer_next}\n", "")
+                return subprocess.CompletedProcess(cmd, 0, f"ActiveState=active\nNextElapseUSecRealtime={self.timer_next}\n"
+                                                            f"NextElapseUSecMonotonic={self.timer_mono}\n", "")
             if cmd[:2] == ["launchctl", "print"]:
                 if self.timer_next is None:
                     return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
                 return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n", "")
-            if cmd[:2] == ["loginctl", "enable-linger"]:
+            if cmd[:2] == ["loginctl", "disable-linger"]:
+                self.linger = "no"
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if [c for c in cmd if c != "--no-ask-password"][:2] == ["loginctl", "enable-linger"]:
                 if self.enable_ok:
                     self.linger = "yes"
                     return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -162,9 +177,11 @@ class Home:
     def __enter__(self):
         os.environ.update(self.env)
         mirror.run = self.fake_run
+        self.saved_wait, mirror.SETUP_WAIT = mirror.SETUP_WAIT, 0     # no forge follows a stand-in service start
         return self
 
     def __exit__(self, *a):
+        mirror.SETUP_WAIT = self.saved_wait
         for pr in self.procs:
             if pr.poll() is None:
                 pr.terminate()
@@ -403,7 +420,8 @@ class G1(unittest.TestCase):
             self.assertIn("nothing is changed", out)
             self.assertIn("download Gitea", out)
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
-            reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"])   # read-only checks
+            reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"],
+                     ["pkcheck", "--action-id"])                                                  # read-only checks
             self.assertFalse([c for c in h.calls if c[:2] not in reads], "the dry run ran a command that changes something")
             p = h.place_gitea()
             self.assertEqual(h.setup()[0], 0)
@@ -427,7 +445,7 @@ class G1(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn(mirror.NO_LOGIN_NOTE, out)
             self.assertIn(f"sudo loginctl enable-linger {mirror.getpass.getuser()}", out)
-            self.assertIn(["loginctl", "enable-linger", mirror.getpass.getuser()], h.calls)
+            self.assertIn(["loginctl", "--no-ask-password", "enable-linger", mirror.getpass.getuser()], h.calls)
             rc, out = h.setup("--dry-run")
             self.assertIn(mirror.NO_LOGIN_NOTE, out)
         with Home(linger="no", enable_linger_ok=True) as h:       # the person may turn it on: setup does
@@ -454,6 +472,119 @@ class G1(unittest.TestCase):
                     self.assertEqual("another account" in note, auto == "someone-else")
                     self.assertNotIn("someone-else", note)      # another person's account name is never said
                 self.assertFalse([c for c in h.calls if c[0] not in ("defaults", "fdesetup")], "it changed something")
+        finally:
+            mirror.system = saved
+
+    def test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded(self):
+        """Seen on a stock Ubuntu 24.04 with git removed: setup downloaded Gitea, then stopped on Gitea's own words."""
+        with Home() as h:
+            which, fetch = mirror.shutil.which, mirror.fetch_forge
+            mirror.shutil.which = lambda c, *a, **k: None if c == "git" else which(c, *a, **k)
+            mirror.fetch_forge = lambda *a, **k: (_ for _ in ()).throw(AssertionError("setup downloaded Gitea"))
+            try:
+                for args in (["--dry-run"], []):
+                    rc, out = h.setup(*args)
+                    self.assertEqual(rc, 2, out)
+                    self.assertIn("git is not installed on this computer", out)
+                    self.assertIn("sudo apt install git", out)
+                    self.assertIn("Nothing was changed", out)
+                self.assertFalse(os.path.exists(mirror.paths()["app_ini"]), "setup wrote settings with no git")
+            finally:
+                mirror.shutil.which, mirror.fetch_forge = which, fetch
+        r = mirror.run(["wsm-a-program-that-is-not-here"])            # never a traceback
+        self.assertEqual((r.returncode, "not installed" in r.stderr), (127, True))
+        with Home() as h:
+            lfs = mirror.has_git_lfs
+            mirror.has_git_lfs = lambda: False
+            try:
+                rc, out = h.setup("--dry-run")
+            finally:
+                mirror.has_git_lfs = lfs
+            self.assertIn("git lfs is not installed here", out)
+
+    def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
+        with Home() as h:
+            h.place_gitea()
+            saved = mirror.wait_forge
+            try:
+                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                rc, out = h.setup()
+                self.assertIn("not answering yet", out)
+                self.assertNotIn("The forge runs as your own service", out)
+                mirror.wait_forge = lambda port, up=True, seconds=60: True
+                rc, out = h.setup()
+                self.assertIn("The forge runs as your own service", out)
+            finally:
+                mirror.wait_forge = saved
+
+    def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
+        saved = mirror.system
+        mirror.system = lambda: ("linux", "x86_64")
+        me = mirror.getpass.getuser()
+        try:
+            # (a, b) The dry run says what lingering means, from this computer's own three answers.
+            for code, said in ((0, "this computer lets you do that yourself"), (1, "administrator runs one command"),
+                               (2, "administrator runs one command"), (127, "Setup will try"),
+                               (None, "Setup will try"), ("timeout", "Setup will try")):
+                with Home(linger="no") as h:
+                    h.pkcheck = code
+                    rc, out = h.setup("--dry-run")
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn(mirror.LINGER_MEANS, out, code)
+                    self.assertIn(said, out, code)
+                    if code != 0:
+                        self.assertIn(f"sudo loginctl enable-linger {me}", out, code)
+                    asked = [c for c in h.calls if c[0] == "pkcheck"]
+                    self.assertEqual(len(asked), 1, code)
+                    self.assertEqual(asked[0][:4], ["pkcheck", "--action-id", "org.freedesktop.login1.set-self-linger",
+                                                    "--process"])
+                    self.assertRegex(asked[0][4], r"^\d+,\d+,\d+$")     # pid,pid-start-time,uid, as its manual asks
+                    self.assertEqual(len(asked[0]), 5, "pkcheck may never be allowed to ask for a password")
+                    self.assertEqual(h.kws[0].get("timeout"), 10)
+                    self.assertFalse([c for c in h.calls if "enable-linger" in c], "the dry run switched lingering on")
+            # (c) Setup switches it on without a password prompt and keeps a record; uninstall undoes only that.
+            with Home(linger="no", enable_linger_ok=True) as h:
+                st = {}
+                back, note = mirror.linger_step(st)
+                self.assertTrue(back)
+                self.assertEqual(st["linger_by_setup"], True)
+                self.assertIn(mirror.LINGER_MEANS, note)
+                self.assertIn(["loginctl", "--no-ask-password", "enable-linger", me], h.calls)
+                mirror.linger_step(st)                                   # a second setup keeps the record
+                self.assertEqual(st["linger_by_setup"], True)
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["state"]), exist_ok=True)
+                mirror.save_state(p, st)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertIn("Lingering was switched on by setup, and is switched off again.", out)
+                self.assertEqual(h.linger, "no")
+                self.assertNotIn("linger_by_setup", mirror.load_json(p["state"], {}))
+            with Home(linger="yes") as h:
+                st = {}
+                self.assertTrue(mirror.linger_step(st)[0])
+                self.assertEqual(st["linger_by_setup"], False)
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["state"]), exist_ok=True)
+                mirror.save_state(p, st)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertIn("Lingering was already on before setup, so it is left on.", out)
+                self.assertEqual(h.linger, "yes")
+                self.assertFalse([c for c in h.calls if "disable-linger" in c])
+            # Refused: the administrator's one command, never a dialog.
+            with Home(linger="no", enable_linger_ok=False) as h:
+                back, note = mirror.linger_step({})
+                self.assertFalse(back)
+                self.assertIn(f"administrator runs one command: sudo loginctl enable-linger {me}", note)
+            # (d) The person says no: setup still works, and says what that costs.
+            with Home(linger="no", enable_linger_ok=True) as h:
+                st = {}
+                back, note = mirror.linger_step(st, allow=False)
+                self.assertFalse(back)
+                self.assertIn("syncs only while you are logged in", note)
+                self.assertFalse([c for c in h.calls if "enable-linger" in c])
+                self.assertNotIn("linger_by_setup", st)
+                rc, out = h.setup("--dry-run", "--no-linger")
+                self.assertIn("syncs only while you are logged in", out)
         finally:
             mirror.system = saved
 
@@ -896,7 +1027,7 @@ class G4(unittest.TestCase):
             else:
                 base = os.path.dirname(p["unit"])
                 self.assertIn("OnUnitActiveSec=15min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))
-                self.assertIn("Persistent=true", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))
+                self.assertIn("OnStartupSec=2min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))   # G4.7
                 unit = fread(os.path.join(base, mirror.SYNC_UNIT + ".service"))
                 self.assertIn(f"{p['script']} sync --from-timer", unit)
                 self.assertIn("WSM_HOME=", unit)
@@ -1073,6 +1204,16 @@ class G4(unittest.TestCase):
             self.assertIn("refs/heads/side", w.forge_refs("someone--r2"))
             for i in range(3):
                 self.assertEqual(w.forge_refs(f"someone--r{i}"), w.gh_refs(f"someone/r{i}"))
+
+    def test_G4_7_after_a_restart_the_timer_always_has_a_next_run(self):
+        """Seen on a stock Ubuntu 24.04: with OnBootSec, a person who logs in more than 5 min after boot has a
+        timer that is 'active' with no next run, forever. Counted from the start of the person's own service
+        manager, it runs 2 min after boot with lingering, and 2 min after the login without (seen, both ways)."""
+        t = mirror.sync_timer_text(15)
+        self.assertIn("\nOnStartupSec=2min\n", t)
+        self.assertIn("\nOnUnitActiveSec=15min\n", t)
+        self.assertNotIn("OnBootSec", t)
+        self.assertNotIn("Persistent", t)          # it applies to calendar timers only, and promised a catch-up
 
 
 class G5(unittest.TestCase):
@@ -1360,6 +1501,27 @@ class G6(unittest.TestCase):
             out = quiet(mirror.main, ["status", "--check-release"])[1]
             self.assertIn(f"that release pins Gitea 28.9.2 (this forge runs {mirror.GITEA_VERSION});", out)
             self.assertNotIn("SECURITY", out)
+
+    def test_G6_7_a_next_run_on_the_boot_clock_is_a_next_run(self):
+        """Seen on a stock Ubuntu 24.04: systemd kept the next run on the boot clock only, and status said
+        'no next run' while one was 2 min away."""
+        saved = mirror.system
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            with Home() as h:
+                h.timer_next, h.timer_mono = "", "%dmin 57.5s" % (time.monotonic() // 60 + 2)
+                when, problem = mirror.next_sync()
+                self.assertEqual(problem, "")
+                self.assertRegex(when, r"\d{4}-\d\d-\d\d \d\d:\d\d")
+                h.timer_mono = "infinity"
+                when, problem = mirror.next_sync()
+                self.assertIn("no next run", problem)
+                h.timer_next, h.timer_mono = "Mon 2026-11-23 01:07:28 UTC", ""
+                self.assertEqual(mirror.next_sync(), ("Mon 2026-11-23 01:07:28 UTC", ""))
+                h.timer_next, h.timer_mono = "", "not a time span"
+                self.assertIn("no next run", mirror.next_sync()[1])
+        finally:
+            mirror.system = saved
 
 
 def bare_home(root, name, with_commit=False):
@@ -1847,7 +2009,7 @@ class Invariants(unittest.TestCase):
                 first = n.args[0].elts[0] if n.args[0].elts else None
                 progs.add(first.value if isinstance(first, ast.Constant) else ast.unparse(first))
         self.assertEqual(progs - {"git", "systemctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
-                                  "running_bin(p)", "binary", "defaults", "fdesetup"}, set(), progs)
+                                  "running_bin(p)", "binary", "defaults", "fdesetup", "pkcheck"}, set(), progs)
 
 
 class Harness(unittest.TestCase):
