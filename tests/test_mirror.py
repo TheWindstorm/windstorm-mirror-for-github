@@ -783,6 +783,36 @@ class G1(unittest.TestCase):
         finally:
             mirror.system, mirror.own_process_for_polkit = saved, saved_proc
 
+    def test_G1_13_a_mac_is_written_as_what_was_seen(self):
+        """The family's rule on Macs (2026-11-23): we have no stock Mac. A Mac sighting is written as what it was, a
+        Mac that carries Apple's developer tools, and in which account; nothing of ours says what a Mac without
+        those tools shows, because nobody here has seen it."""
+        texts = {"the script": fread(SCRIPT), "SKILL.md": fread(SKILL), "README.md": fread(os.path.join(ROOT, "README.md")),
+                 "the plan": fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md")),
+                 "PROMISES.json": fread(os.path.join(ROOT, "PROMISES.json")),
+                 "CHANGELOG.md": fread(os.path.join(ROOT, "CHANGELOG.md"))}
+        for where, text in texts.items():
+            flat = " ".join(text.replace('" "', "").split())
+            for sentence in re.findall(r"[^.!?|]*\b(?:Macs?|macOS)\b[^.!?|]*", flat):
+                self.assertIsNone(re.search(r"\bstock\b", sentence), f"{where} calls a Mac stock: {sentence[:160]}")
+            for sentence in re.findall(r"[^.;|]*xcode-select --install[^.;|]*", flat):
+                self.assertIsNone(re.search(r"\bopens\b|installer|window|dialog|at the screen|asks you", sentence),
+                                  f"{where} describes what a Mac without the tools shows: {sentence[:160]}")
+        self.assertIn("on a Mac: git comes with Apple's developer tools, and xcode-select --install is Apple's "
+                      "command for them", mirror.INSTALL_GIT)
+        # Where the README lists what was seen (a release branch), each Mac seen outside GitHub's runners is
+        # written as what it was.
+        readme = texts["README.md"]
+        if "## Seen to work" in readme:
+            seen = readme.split("## Seen to work", 1)[1].split("\n## ", 1)[0]
+            macs = [b for b in seen.split("\n- ")[1:] if re.search(r"\b(?:Mac|macOS)\b", b)
+                    and "runners" not in b and not b.startswith("**Not seen")]
+            self.assertTrue(macs, "no Mac sighting found under Seen to work")
+            for b in macs:
+                b = " ".join(b.split())
+                self.assertIn("a Mac that carries Apple's developer tools", b)
+                self.assertRegex(b, r"\baccount\b")
+
 
 # ------------------------------------------------------------------ G2 the GitHub keys
 
@@ -800,6 +830,7 @@ def files_holding(root, needle):
             if needle.encode() in data:
                 hits.append(path)
     return hits, read
+
 
 
 class G2(unittest.TestCase):
