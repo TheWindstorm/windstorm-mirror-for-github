@@ -564,7 +564,7 @@
    "ship_in": "0.1.0",
    "test": "test_G1_12_an_older_python_is_told_first_and_nothing_is_made",
    "stand_in": "Python (an older Python is stood in for where no real one is present)",
-   "proven": "",
+   "proven": "2026-11-23, a fresh stock Ubuntu 20.04.6 cloud image (its python3 3.8.10, checksum and signature of the image checked), an account with no administrator rights: setup --dry-run, setup, status, sync --announce, key set, restore --check, uninstall and --help each stopped first with 'Stopped: this is Python 3.8.10 (/usr/bin/python3), and this skill needs Python 3.9 or newer. Nothing was made.' and the step, and ended with 3; afterwards the account held none of the skill's folders and no file newer than the script.",
    "issue": "#49",
    "moved_why": "",
    "moved_by_person": "",
