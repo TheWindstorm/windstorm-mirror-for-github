@@ -1263,6 +1263,28 @@ def first_copy_names(picked):
     return sorted((r["full_name"] for _, _, r in picked.values()), key=str.lower)
 
 
+KEY_PAGE = "https://github.com/settings/personal-access-tokens"
+
+
+def key_end_epoch(exp):
+    """G6.9: the key's end date as GitHub sent it, or None when there is none or it could not be read. The header
+    has not been seen on a real key yet (contract C3): only a date that reads cleanly counts; nothing is worked out,
+    and nothing absent is called "no end date" until GitHub's way of saying that has been seen."""
+    try:
+        return calendar.timegm(time.strptime(exp.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")) if exp else None
+    except ValueError:
+        return None
+
+
+def key_end_line(owner, exp):
+    """G6.9: what the person hears about a key's end before the go: a date and the warning, or that no warning
+    can be promised and where the date can be read."""
+    if key_end_epoch(exp) is not None:
+        return f"The key for {owner} ends {exp}; the mirror warns you two weeks before."
+    return (f"The end date of the key for {owner} could not be read, so no warning before it ends can be promised; "
+            f"its end date is on GitHub's key page, {KEY_PAGE}.")
+
+
 def restart_line(st):
     """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to."""
     if system()[0] == "darwin":
@@ -1293,6 +1315,7 @@ def announce_first_copy(p, st, picked, complete):
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
           restart_line(st), LFS_MISSING if not has_git_lfs() else "",
+          *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
           NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
     st["announced"] = st.get("announced") or now_utc()
     st["announced_list"] = names
@@ -1806,15 +1829,10 @@ def cmd_status(args):
             problems.append(f"{name}: {LFS_NOT_IN_COPY}")
     for owner, k in sorted((st.get("keys") or {}).items()):
         exp = k.get("expires") or ""
-        # The expiry header has not been seen on a real key yet (contract C3). Only a date GitHub sent and that
-        # reads cleanly is shown or warned about; nothing is worked out, and nothing absent is called "no expiry".
-        try:
-            when = calendar.timegm(time.strptime(exp.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")) if exp else None
-        except ValueError:
-            when = None
+        when = key_end_epoch(exp)
         if when is None:
             notes.append(f"key for {owner}: expiry not known" + (f" (GitHub sent '{exp[:40]}', which could not be read)"
-                                                                if exp else ""))
+                                                                if exp else "") + "; no warning before it ends can be promised")
             continue
         left = (when - time.time()) / 86400
         if left < 14:

@@ -1995,6 +1995,34 @@ class G6(unittest.TestCase):
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
 
+    def test_G6_9_a_keys_end_date_is_a_date_or_said_unread_and_no_warning_is_promised_without_it(self):
+        """A cold start (2026-11-23): the smallest model told the person the mirror warns two weeks before the key
+        ends while its end date could not be read, and SKILL.md itself promised the warning. Each key's end has
+        three answers: a date (the warning is promised), no end (said only once GitHub's way of saying it is seen,
+        contract C3), or could not be read: said so, with no warning promised, in the block before the go."""
+        tell = re.compile(r"^tell the person \d+ of \d+: (.*)$", re.M)
+        unread = ("The end date of the key for someone could not be read, so no warning before it ends can be "
+                  f"promised; its end date is on GitHub's key page, {mirror.KEY_PAGE}.")
+        date = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() + 60 * 86400))
+        for sent, want in ((date, f"The key for someone ends {date}; the mirror warns you two weeks before."),
+                           (None, unread), ("next Tuesday-ish", unread)):
+            with World(self) as w:
+                w.gh.add_repo("someone", "alpha")
+                w.gh.commit("someone/alpha", {"a": b"1"})
+                w.gh.expires = sent
+                w.key_set()
+                rc, out = w.sync("--announce")
+                self.assertEqual(rc, 0, out)
+                said = tell.findall(out)
+                self.assertIn(want, said, sent)
+                if sent != date:
+                    self.assertFalse(any("warns you" in x for x in said), "a warning promised without a date")
+                    rc, st = quiet(mirror.main, ["status"])
+                    self.assertIn("no warning before it ends can be promised", st)
+        skill = fread(os.path.join(ROOT, "skills", "mirror", "SKILL.md"))
+        self.assertNotIn("warn you", skill.lower(), "SKILL.md promises a warning the tool may not be able to give")
+        self.assertIn("Never promise a\nwarning before a key ends", skill)
+
     def test_G6_5_status_shows_version_expiry_disk_and_the_last_and_next_sync(self):
         with World(self) as w:
             w.gh.add_repo("someone", "alpha")
@@ -2591,13 +2619,14 @@ class G10(unittest.TestCase):
                 mirror.has_git_lfs = saved
             self.assertEqual(rc, 0, out)
             said = block(out, "sync --announce")
-            self.assertEqual(len(said), 6, said)
+            self.assertEqual(len(said), 7, said)
             self.assertTrue(said[0].startswith("The first copy: 1 repositories from 1 owner(s)"), said)
             self.assertEqual(said[1], "They are: someone/alpha.")
             self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[2])
             self.assertIn("Nothing is ever written to GitHub.", said[2])
             self.assertTrue(said[3].startswith("After a restart"), said)
-            self.assertEqual(said[4:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
+            self.assertEqual(said[4], mirror.key_end_line("someone", ""))
+            self.assertEqual(said[5:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
             self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
         _, _, body = skill_front()
         self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
@@ -2732,6 +2761,7 @@ class Invariants(unittest.TestCase):
         allowed = {"http://127.0.0.1", "https://api.github.com", "https://github.com", "https://dl.gitea.com/gitea",
                    "https://github.com/TheWindstorm/windstorm-mirror-for-github", "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
                    "https://git-lfs.com",                     # named to the person (M28), never reached
+                   "https://github.com/settings/personal-access-tokens",  # named to the person (M38), never reached
                    "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
         found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
         self.assertEqual(found - allowed, set(), "an address outside the allowed ones")

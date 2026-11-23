@@ -498,6 +498,48 @@
    "issue": "#49",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M36",
+   "codon": "G10.7",
+   "test": "",
+   "issue": "#51",
+   "seen": "2026-11-23, two cold starts on a stock virtual machine: the smallest model told the person to run `key set` before setup, both times; the tool's refusal held ('Setup comes first ... No key was read, and nothing was kept'). Twice is our words, not the model.",
+   "promise": "The README and SKILL.md give the order so plainly that the person is not sent to a step that refuses: setup first, then each `key set`; the refusal's own line names the one next step. Seen when the next small-model cold start does not do it."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M37",
+   "codon": "G10.8",
+   "test": "",
+   "issue": "#52",
+   "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model probed GitHub with anonymous git and with SSH; both were refused there. On a person's own computer their SSH key or gh login is present and such a probe succeeds, giving the agent a road to every repository the person can reach, outside the one read-only key the tool confines.",
+   "promise": "SKILL.md says in plain words that the agent reaches GitHub through the tool only and never tries the person's own git, SSH or gh for it, and why; every cold-start write-up counts each reach outside the tool as a deviation."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M38",
+   "codon": "G6.9",
+   "test": "test_G6_9_a_keys_end_date_is_a_date_or_said_unread_and_no_warning_is_promised_without_it",
+   "issue": "#53",
+   "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model told the person the mirror warns two weeks before the key ends while its end date could not be read; status said 'expiry not known' but no block for the person said what that means, and SKILL.md itself promised the warning without a condition.",
+   "promise": "Each key's end has three answers: a date (the warning two weeks before is promised), no end date (said only once GitHub's way of saying it has been seen, contract C3), or could not be read: said so in the block the person hears before the go, with no warning promised and the place to read the date. SKILL.md never promises the warning itself."
   }
  ],
  "declined": []
