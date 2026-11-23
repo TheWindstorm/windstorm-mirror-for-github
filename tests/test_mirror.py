@@ -218,22 +218,39 @@ class Home:
             rc = mirror.main(["setup", *args])
         return rc, out.getvalue()
 
-    def start_forge(self):
+    def start_forge(self, seconds=None):
+        """Start the forge and wait for its first answer, as long as setup itself waits (G1.9). If it stops or does
+        not answer, the failure carries the forge's own last log lines, not only that it did not answer."""
+        seconds = mirror.FIRST_START_WAIT if seconds is None else seconds
         p = mirror.paths()
-        pr = subprocess.Popen([sys.executable, "-I", p["script"], "run-forge"], env=dict(os.environ),
+        script = p["script"] if os.path.exists(p["script"]) else SCRIPT
+        pr = subprocess.Popen([sys.executable, "-I", script, "run-forge"], env=dict(os.environ),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.procs.append(pr)
         STARTED.append(pr)
         port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
-        for _ in range(120):
+        end = time.monotonic() + seconds
+        while True:
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/api/healthz", timeout=2)
                 return port, pr
             except (urllib.error.URLError, OSError):
                 if pr.poll() is not None:
-                    raise AssertionError("the forge stopped: " + pr.stdout.read()[-400:])
+                    raise AssertionError("the forge stopped: " + pr.stdout.read()[-400:] + forge_log_tail(p))
+                if time.monotonic() > end:
+                    raise AssertionError(f"the forge did not answer in {seconds} s" + forge_log_tail(p))
                 time.sleep(0.5)
-        raise AssertionError("the forge did not answer in 60 s")
+
+
+def forge_log_tail(p, n=8):
+    """The forge's own last log lines, for a failure message (G1.9)."""
+    f = os.path.join(p["forge"], "log", "gitea.log")
+    try:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()[-n:]
+    except OSError:
+        return f"\n(the forge's log {f} is not there)"
+    return f"\nthe forge's own last log lines ({f}):\n" + "\n".join(lines)
 
 
 def http_get(url, key=None):
@@ -575,6 +592,52 @@ class G1(unittest.TestCase):
                 self.assertIn("The forge runs as your own service", out)
             finally:
                 mirror.wait_forge = saved
+
+    def test_G1_11_the_first_start_waits_are_measured_and_said(self):
+        # The waits come from the figure measured on a slow machine, and the plan says where it was measured.
+        self.assertGreaterEqual(mirror.FIRST_START_WAIT, 3 * mirror.FIRST_START_SEEN)
+        plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
+        notes = plan.split("### First start, as measured", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("1 processor, 512 MB", notes)
+        self.assertIn(f"`FIRST_START_SEEN` is {mirror.FIRST_START_SEEN} and `FIRST_START_WAIT` is "
+                      f"{mirror.FIRST_START_WAIT}", notes)
+        self.assertIn(f"| {mirror.FIRST_START_SEEN} at most", notes)
+        src = fread(SCRIPT)
+        self.assertEqual(mirror.SETUP_WAIT, mirror.FIRST_START_WAIT)
+        self.assertNotRegex(src, r"wait_forge\([^)]*up=True, seconds=\d", "a first-start wait that is not the measured one")
+        self.assertEqual(inspect.signature(Home.start_forge).parameters["seconds"].default, None)
+        self.assertIn("seconds = mirror.FIRST_START_WAIT if seconds is None", inspect.getsource(Home.start_forge))
+        # A test that waits for a forge that never answers fails with the forge's own last log lines.
+        with Home() as h:
+            p = mirror.paths()
+            os.makedirs(os.path.dirname(p["app_ini"]), exist_ok=True)
+            os.makedirs(os.path.join(p["forge"], "log"), exist_ok=True)
+            mirror.write_file(p["app_ini"], f"[server]\nHTTP_PORT = {mirror.free_port()}\n", 0o600)
+            os.makedirs(os.path.dirname(p["bin"]), exist_ok=True)
+            log = os.path.join(p["forge"], "log", "gitea.log")
+            with open(p["bin"], "w") as f:
+                f.write(f"#!/bin/sh\necho 'PING DATABASE sqlite3: held up by the stand-in' >> '{log}'\nexec sleep 30\n")
+            os.chmod(p["bin"], 0o755)
+            with self.assertRaises(AssertionError) as e:
+                h.start_forge(seconds=3)
+            self.assertIn("the forge did not answer in 3 s", str(e.exception))
+            self.assertIn("PING DATABASE sqlite3: held up by the stand-in", str(e.exception))
+        # (needs the real Gitea: setup prepares its database)
+        # Setup says what "not answering yet" means, when to look again, and where the forge's own words are.
+        with Home() as h:
+            h.place_gitea()
+            saved = mirror.wait_forge
+            try:
+                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                rc, out = h.setup()
+            finally:
+                mirror.wait_forge = saved
+            p = mirror.paths()
+            self.assertIn(f"not answering yet on http://127.0.0.1:{mirror.load_json(p['state'], {})['port']}/ after "
+                          f"{mirror.SETUP_WAIT} s", out)
+            self.assertIn(f"it answered within {mirror.FIRST_START_SEEN} s", out)
+            self.assertIn("run `status` in 5 minutes", out)
+            self.assertIn(os.path.join(p["forge"], "log", "gitea.log"), out)
 
     def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
         saved, saved_proc = mirror.system, mirror.own_process_for_polkit
