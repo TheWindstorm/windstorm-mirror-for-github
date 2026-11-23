@@ -1002,6 +1002,30 @@ class World:
 
 
 class G3(unittest.TestCase):
+    def test_G3_10_the_page_size_is_githubs_largest_unless_a_test_or_lab_sets_it(self):
+        """A real owner with few repositories has one page; to see paging (M5) and the floor (M9) there, a lab
+        makes the page small with WSM_PAGE_SIZE. Nothing a person does sets it, and only 1 to 100 is taken."""
+        asked = []
+        saved, env = mirror.gh_get, os.environ.get("WSM_PAGE_SIZE")
+        mirror.gh_get = lambda key, url, *a, **k: (asked.append(url), (500, {}, None))[1]
+        try:
+            for val, want in ((None, 100), ("3", 3), ("1", 1), ("100", 100), ("0", 100), ("101", 100), ("x", 100),
+                              ("-5", 100)):
+                os.environ.pop("WSM_PAGE_SIZE", None)
+                if val is not None:
+                    os.environ["WSM_PAGE_SIZE"] = val
+                for kind in ("user", "org"):
+                    asked.clear()
+                    mirror.list_owner("someone", kind, "k")
+                    self.assertIn(f"per_page={want}", asked[0], (val, kind))
+        finally:
+            mirror.gh_get = saved
+            os.environ.pop("WSM_PAGE_SIZE", None)
+            if env is not None:
+                os.environ["WSM_PAGE_SIZE"] = env
+        self.assertNotIn("WSM_PAGE_SIZE", fread(SKILL))
+        self.assertNotIn("WSM_PAGE_SIZE", fread(os.path.join(ROOT, "README.md")))
+
     def test_G3_1_every_repository_is_found_page_by_page_to_the_end(self):
         with World(self) as w:
             w.gh.page_cap = 2
@@ -1150,7 +1174,11 @@ class G3(unittest.TestCase):
             self.assertEqual(quiet(mirror.main, ["config", "exclude", "someone/secret-*"])[0], 0)
             rc, out = w.first_sync()
             self.assertEqual(rc, 0, out)
-            self.assertIn("left out: someone/secret-notes (left out by 'someone/secret-*')", out)
+            self.assertIn("left out: 1 by your exclude patterns; their names are not shown here (to see them, run: "
+                          "left-out).", out)
+            self.assertNotIn("secret-notes", out)
+            rc, asked = quiet(mirror.main, ["left-out"])
+            self.assertIn("left out: someone/secret-notes (left out by 'someone/secret-*')", asked)
             names = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
             self.assertEqual(names, ["someone--alpha", "someone--empty", "someone--forked", "someone--old"])
             # An include that matches nothing stops the sync; it never widens to everything.
@@ -1163,7 +1191,47 @@ class G3(unittest.TestCase):
             quiet(mirror.main, ["config", "include", "someone/alpha"])
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
-            self.assertIn("left out: someone/later (not in include)", out)
+            self.assertIn("left out: 5 by your include list; their names", out)
+            self.assertNotIn("someone/later", out)
+            rc, asked = quiet(mirror.main, ["left-out"])
+            self.assertIn("left out: someone/later (not in include)", asked)
+
+    def test_G3_11_what_is_left_out_is_a_count_and_its_names_come_only_when_asked(self):
+        """Five cold starts (2026-11-23): every plain sync printed the name of each project the include list left
+        out, so every agent transcript held names the person had chosen to leave out. The tool names what it copies;
+        what is left out is a count, and its names come only from left-out, which the count line names."""
+        with World(self) as w:
+            for n in ("alpha", "beta", "hidden-one", "hidden-two"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            quiet(mirror.main, ["config", "exclude", "someone/hidden-*"])
+            outs = [quiet(mirror.main, ["setup", "--dry-run"])[1]]
+            rc, out = w.sync("--announce")
+            outs.append(out)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            outs.append(out)
+            self.assertIn("left out: 2 by your exclude patterns; their names are not shown here (to see them, run: "
+                          "left-out).", out)
+            quiet(mirror.main, ["config", "include", "someone/alpha"])
+            rc, out = w.sync()
+            outs.append(out)
+            self.assertIn("left out: 3 by your include list; their names are not shown here", out)
+            outs += [quiet(mirror.main, ["status"])[1], quiet(mirror.main, ["restore", "--check"])[1]]
+            for o in outs:
+                for hidden in ("hidden-one", "hidden-two"):
+                    self.assertNotIn(hidden, o, "a left-out name was printed without being asked for")
+            self.assertNotIn("someone/beta", outs[-3] + outs[-2] + outs[-1])
+            before = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
+            rc, asked = quiet(mirror.main, ["left-out"])
+            self.assertEqual(rc, 0, asked)
+            for line in ("left out: someone/beta (not in include)", "left out: someone/hidden-one (not in include)",
+                         "left out: someone/hidden-two (not in include)"):
+                self.assertIn(line, asked)
+            self.assertNotIn("someone/alpha", asked)
+            self.assertEqual(asked.strip().splitlines()[-1], "left-out: 3 left out. Nothing was copied or changed.")
+            self.assertEqual(sorted(r["name"] for r in w.forge_get("/user/repos")[1]), before)
 
     def test_G3_6_a_repository_gone_from_github_keeps_its_copy(self):
         with World(self) as w:
@@ -1517,8 +1585,8 @@ class G4(unittest.TestCase):
             self.assertIn("3 GitHub API call(s)", quiet(mirror.main, ["status"])[1])
 
     def test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project(self):
-        """GitHub's allowance is shared with everything else the person runs with their keys (a lane once spent the
-        fleet's in minutes). Both of GitHub's ways of saying "spent" become one line with the reset in the person's
+        """GitHub's allowance is shared with everything else the person runs with their keys (another program on a
+        shared login once spent it in minutes). Both of GitHub's ways of saying "spent" become one line with the reset in the person's
         own time; nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project
         is marked as failed, and every copy is as it was."""
         with World(self) as w:
@@ -2029,6 +2097,45 @@ class G6(unittest.TestCase):
             for text in outs + logs:
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
+
+    def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
+        """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said
+        "0 problem(s)" and ended with 0, though no copy had been read. The sync asks the forge first. A forge that
+        does not answer is a problem line with its next step and a failing code; nothing is copied, changed or used
+        up (not the person's go either); once the forge answers again, the next sync is clean."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            port = w.port
+
+            def stop():
+                pr = w.home.procs[-1]
+                pr.terminate()
+                pr.wait(60)
+            stop()
+            rc, out = w.sync()
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{port}, so no copy was read", out)
+            self.assertIn("run status", out)
+            self.assertNotIn("go", mirror.load_json(w.p["state"], {}))
+            w.home.start_forge()
+            self.assertEqual(w.sync()[0], 0)
+            before = w.forge_refs("someone--alpha")
+            self.assertTrue(before)
+            stop()
+            rc, out = w.sync()
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: the forge does not answer", out)
+            self.assertNotIn("0 problem(s)", out)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["last_sync"]["problems"], 1)
+            self.assertIn("the forge does not answer", status()[1])
+            w.home.start_forge()
+            self.assertEqual(w.forge_refs("someone--alpha"), before)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("0 problem(s)", out)
 
     def test_G6_9_a_keys_end_date_is_a_date_or_said_unread_and_no_warning_is_promised_without_it(self):
         """A cold start (2026-11-23): the smallest model told the person the mirror warns two weeks before the key
@@ -2854,6 +2961,60 @@ class G10(unittest.TestCase):
             self.assertRegex(heads[0], "^" + re.escape(ver) + r"(?: \(\d{4}-\d{2}-\d{2}\))?$", "the changelog's heading")
             self.assertNotIn("Unreleased", heads[:1])
 
+    def test_G10_10_public_text_names_roles_never_our_own_labels(self):
+        """The family's rule 18: public text names kinds and roles ('another program sharing the login', 'a sister
+        skill'), never our own labels for how we work. The words are built here so this file does not hold them."""
+        ours = [re.compile(r"\b" + w + r"\b", re.I) for w in ("la" + "nes?", "fl" + "eet", "test-" + "now", "board-" + "say")]
+        files = subprocess.run(["git", "-C", ROOT, "ls-files"], capture_output=True, text=True).stdout.split()
+        if not files:                                  # a copy with no .git (a test box): every file but caches
+            files = [os.path.relpath(os.path.join(d, n), ROOT) for d, ds, ns in os.walk(ROOT)
+                     for n in ns if "__pycache__" not in d and not n.endswith(".pyc")]
+        self.assertGreater(len(files), 10)
+        found = []
+        for name in files:
+            if name in ("LICENSE", "NOTICE") or not os.path.isfile(os.path.join(ROOT, name)):
+                continue
+            try:
+                text = fread(os.path.join(ROOT, name))
+            except UnicodeDecodeError:
+                continue
+            for n, line in enumerate(text.splitlines(), 1):
+                if any(p.search(line) for p in ours):
+                    found.append(f"{name}:{n}")
+        self.assertEqual(found, [])
+
+    def test_G10_11_the_cold_starts_are_the_first_evals_as_cases(self):
+        """The family's rule 13: the cold-start runs, written as cases, are the first evals. Each case loads in
+        skill-creator's layout (what `claude plugin eval` reads), and the evals' README records every run against
+        every grader."""
+        root = os.path.join(os.path.dirname(SKILL), "evals")
+        cases = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+        self.assertIn("mirror-cold-start-to-the-first-copy-on-the-persons-go", cases)
+        readme = fread(os.path.join(root, "README.md"))
+        for c in cases:
+            self.assertRegex(c, r"^[a-z][a-z0-9-]*$")
+            self.assertNotIn(c, ("results", "mocks", "node_modules", "files", "true", "false", "null"))
+            prompt = fread(os.path.join(root, c, "prompt.md"))
+            m = re.match(r"---\n(.*?)\n---\n\n(.+)", prompt, re.S)
+            self.assertTrue(m, f"{c}: prompt.md has no settings block and prompt")
+            keys = {line.split(":", 1)[0] for line in m.group(1).splitlines()}
+            self.assertLessEqual(keys, {"tags", "max_turns", "timeout_seconds", "allowed_tools"}, c)
+            self.assertTrue(m.group(2).strip(), c)
+            case = fread(os.path.join(root, c, "case.yaml"))
+            self.assertIn('schema_version: "1.1"\n', case)
+            self.assertIn(f"name: {c}\n", case)
+            self.assertIn("expected_outcome: |\n  ", case)
+            graders = sorted(os.listdir(os.path.join(root, c, "graders")))
+            self.assertTrue(graders, f"{c}: a case with no grader fails to load")
+            for g in graders:
+                self.assertRegex(g, r"^\d\d-[a-z0-9-]+\.md$")
+                body = fread(os.path.join(root, c, "graders", g))
+                self.assertTrue(body.startswith("---\ntype: llm\nfocus: trace\nweight: 1\n---\n\n"), g)
+                self.assertTrue(body.split("---\n\n", 1)[1].strip(), g)
+                self.assertRegex(readme, r"\n\| " + g[:2] + r" [^|]+\|", f"{g}: the record of runs has no row for it")
+            # Before a release, the address the person gives is the repository's, never a machine of ours.
+            self.assertIn("https://github.com/TheWindstorm/windstorm-mirror-for-github", prompt)
+
     def test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step(self):
         """Two cold starts (2026-11-23): the smallest model sent the person to key set before setup, twice. Our
         words gave it room: step 2 made the keys before setup and nothing said the paste waits. Now the order says
@@ -3163,7 +3324,7 @@ class Strand(unittest.TestCase):
                          ["pull_request:", "push:", "branches: [main, 'release-*']"])
 
     def test_the_gate_refuses_every_way_a_test_can_hide(self):
-        """M19: one real test, hidden each way a sister lane found, in a throwaway copy of the suite. The gate
+        """M19: one real test, hidden each way a sister skill found, in a throwaway copy of the suite. The gate
         (`--gate-only`) must refuse each one, and accept the copy left as it is."""
         name = "test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login"
         src = fread(os.path.abspath(__file__))

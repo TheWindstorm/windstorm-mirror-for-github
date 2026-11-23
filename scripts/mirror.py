@@ -813,11 +813,19 @@ def next_link(headers):
     return None
 
 
+def page_size():
+    """G3.10: GitHub's largest page, 100. WSM_PAGE_SIZE (1 to 100) is read for tests and labs only: it makes the
+    pages small, so that paging can be seen on a real owner with few repositories. Anything else is 100."""
+    v = os.environ.get("WSM_PAGE_SIZE", "")
+    return int(v) if v.isdigit() and 1 <= int(v) <= 100 else 100
+
+
 def list_owner(owner, kind, key, floor=0, info=None):
     """Every repository of one owner, page by page to the last page. (repos, None), or (None, why) when any page
     failed: half a list is never acted on as if it were whole."""
-    url = ("/user/repos?affiliation=owner&per_page=100" if kind == "user"
-           else f"/orgs/{urllib.parse.quote(owner)}/repos?type=all&per_page=100")
+    n = page_size()
+    url = (f"/user/repos?affiliation=owner&per_page={n}" if kind == "user"
+           else f"/orgs/{urllib.parse.quote(owner)}/repos?type=all&per_page={n}")
     repos, page, calls = [], 0, 0
     while url:
         page += 1
@@ -1336,6 +1344,52 @@ def announce_first_copy(p, st, picked, complete):
     save_state(p, st)
 
 
+def left_out_line(skipped):
+    """G3.11: what the person left out is a count; its names come only when they ask (left-out). A plain sync put
+    the names of every project left out into every agent's transcript."""
+    inc = sum(1 for _, why in skipped if why == "not in include")
+    parts = ([f"{inc} by your include list"] if inc else []) + (
+        [f"{len(skipped) - inc} by your exclude patterns"] if len(skipped) > inc else [])
+    return f"left out: {' and '.join(parts)}; their names are not shown here (to see them, run: left-out)."
+
+
+def cmd_left_out(args):
+    """G3.11: the names of what the include list and the exclude patterns leave out, asked for by the person. It
+    reads GitHub's lists with the kept keys, and copies and changes nothing."""
+    p = paths()
+    st, s = load_json(p["state"], {}), load_json(p["settings"], {})
+    owners = s.get("owners") or {}
+    if not owners:
+        say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
+        return 2
+    if epoch_of(st.get("github_wait_until")) > time.time():
+        say(spent_line(st))
+        return 0
+    names, problems = [], []
+    for owner, meta in owners.items():
+        kp = key_path(p, owner)
+        if not os.path.exists(kp):
+            problems.append(f"{owner}: no key is kept for it; run key set {owner}")
+            continue
+        with open(kp, encoding="utf-8") as f:
+            key = secret(f.read().strip())
+        repos, why, _ = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), {})
+        if repos is None:
+            problems.append(f"{owner}: {why}")
+            continue
+        for r in repos:
+            ok, why = chosen(r["full_name"], s)
+            if not ok:
+                names.append((r["full_name"], why))
+    for full, why in sorted(names, key=lambda x: x[0].lower()):
+        say(f"left out: {full} ({why})")
+    for x in problems:
+        say(f"problem: {x}")
+    say(f"left-out: {len(names)} left out{' (the list is not whole: see the problem above)' if problems else ''}. "
+        "Nothing was copied or changed.")
+    return 1 if problems else 0
+
+
 def spent_line(st):
     return (f"GitHub's allowance for your keys is spent until {local_time(st['github_wait_until'])}. The sync waits "
             "until then and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer "
@@ -1404,7 +1458,7 @@ def sync(p, args):
     picked, skipped = {}, []
     for gid, (owner, key, r) in found.items():
         ok, why = chosen(r["full_name"], s)
-        (picked.__setitem__(gid, (owner, key, r)) if ok else skipped.append(f"{r['full_name']} ({why})"))
+        (picked.__setitem__(gid, (owner, key, r)) if ok else skipped.append((r["full_name"], why)))
     if s.get("include") and not picked and found:
         say("The include list matches no repository GitHub shows; the sync stops rather than copy everything. Check "
             "the names (owner/name, as GitHub shows them) with config include, or clear the list with config "
@@ -1443,8 +1497,19 @@ def sync(p, args):
             announce_first_copy(p, st, picked, complete)
             say("Give the person the block above; when they say go to this list, run: sync")
             return 2
-    st["go"] = st.get("go") or now_utc()
     forge = Forge(p, st)
+    # G6.10 (M48): a forge that does not answer is said by the sync itself, even when nothing changed on GitHub, so
+    # a sync never reads as clean while no copy could be read or moved. Nothing is copied, changed or used up: the
+    # go is recorded only by a sync that reached the forge.
+    if forge.call("GET", "/version")[0] != 200:
+        st["last_sync"] = {"at": now_utc(), "calls": calls, "copied": 0, "problems": 1,
+                           "stopped": "the forge does not answer"}
+        save_state(p, st)
+        say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so no copy was read, copied or changed. It "
+            "is your own service on this computer: run status; if it still does not answer, run setup, which starts "
+            "it again and keeps every copy.")
+        return 1
+    st["go"] = st.get("go") or now_utc()
     done, unchanged, started = 0, 0, time.time()
     full_due = time.time() - epoch_of(st.get("last_full_pass")) >= setting(s, "full_pass_hours") * 3600
     limit = setting(s, "git_timeout_s")
@@ -1495,8 +1560,8 @@ def sync(p, args):
     save_state(p, st)
     for line in report + [f"problem: {x}" for x in problems]:
         say(line)
-    for x in skipped:
-        say(f"left out: {x}")
+    if skipped:
+        say(left_out_line(skipped))
     lfs_missing = sorted(rec["full_name"] for rec in state.values() if rec.get("lfs_missing") and not rec.get("gone_since"))
     for name in lfs_missing:
         say(f"problem: {name}: {LFS_NOT_IN_COPY}")
@@ -2590,6 +2655,8 @@ def main(argv=None):
     y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
     y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
+    lo = sub.add_parser("left-out", help="the names of the projects your include list and exclude patterns leave out")
+    lo.set_defaults(fn=cmd_left_out)
     st_ = sub.add_parser("status", help="what is copied, what is behind, and when the next sync runs")
     st_.add_argument("--check-release", action="store_true", help="ask GitHub for the latest release now")
     st_.set_defaults(fn=cmd_status)
