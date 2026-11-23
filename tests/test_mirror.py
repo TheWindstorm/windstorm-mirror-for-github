@@ -2900,6 +2900,22 @@ class Promises(unittest.TestCase):
 
 
 class Strand(unittest.TestCase):
+    def test_T4_mac_jobs_are_shared_so_a_pull_request_runs_one(self):
+        """M54 (the family's rule 17, 2026-11-23): GitHub gives the account a few Mac runners at a time for all five
+        repositories together; one afternoon had 34 runs queued and none running. A pull request runs ONE Mac job
+        (the floor's Python); the full Mac matrix runs on main and release-*; the gate expects the reports of the
+        event it runs on; a newer push to a pull request cancels its older runs, never a run on main or a release
+        branch."""
+        wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
+        pr = "github.event_name == 'pull_request'"
+        self.assertIn(f"""exclude: ${{{{ {pr} && fromJSON('[{{"os":"macos-26","python":"3.13"}}]') || fromJSON('[]') }}}}""", wf)
+        macs = re.findall(r'\{os: (macos-[0-9]+), python: "([0-9.]+)"\}', wf)
+        self.assertEqual(macs, [("macos-26", "3.9"), ("macos-26", "3.13")], "the Mac jobs on main and release-*")
+        self.assertIn(f"--expect ${{{{ {pr} && 4 || 5 }}}}", wf)
+        self.assertIn(f"group: ${{{{ {pr} && format('pr-{{0}}', github.event.pull_request.number) || "
+                      "format('run-{0}', github.run_id) }}", wf)
+        self.assertIn(f"cancel-in-progress: ${{{{ {pr} }}}}", wf)
+
     def test_every_proof_named_in_the_plan_is_a_real_test_and_every_test_has_a_codon(self):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
