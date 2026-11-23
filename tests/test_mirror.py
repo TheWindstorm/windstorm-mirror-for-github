@@ -753,6 +753,7 @@ class World:
             self.home.place_gitea()
             rc, out = self.home.setup()
             self.tc.assertEqual(rc, 0, out)
+            self.setup_out = out
             self.port, _ = self.home.start_forge()
             self.home.forge_follows = True
         except BaseException:
@@ -2261,6 +2262,61 @@ class G10(unittest.TestCase):
         self.assertIn("sudo loginctl enable-linger", steps)
         self.assertIn("sudo loginctl enable-linger", fread(SCRIPT))
 
+
+
+    def test_G10_5_what_the_person_must_hear_comes_as_one_numbered_block(self):
+        """A cold start (2026-11-23): the smallest model shortened the dry run to one line and dropped a sentence of
+        the privacy line. The person's sentences come as one block, "tell the person 1 of N" to "N of N", so a
+        line dropped or merged on the way shows, and SKILL.md says to give the block whole before any words of its
+        own."""
+        tell = re.compile(r"^tell the person (\d+) of (\d+): (.*)$")
+
+        def block(out, where):
+            lines = out.splitlines()
+            at = [i for i, x in enumerate(lines) if tell.match(x)]
+            self.assertTrue(at, f"{where}: no block for the person")
+            self.assertEqual(at, list(range(at[0], at[0] + len(at))), f"{where}: the block is broken up")
+            got = [tell.match(lines[i]).groups() for i in at]
+            self.assertEqual([(a, b) for a, b, _ in got], [(str(i), str(len(at))) for i in range(1, len(at) + 1)],
+                             f"{where}: not numbered 1 of N to N of N")
+            return [t for _, _, t in got]
+
+        with Home() as h:
+            saved = mirror.has_git_lfs
+            mirror.has_git_lfs = lambda: False
+            try:
+                rc, out = h.setup("--dry-run")
+            finally:
+                mirror.has_git_lfs = saved
+            self.assertEqual(rc, 0, out)
+            said = block(out, "setup --dry-run")
+            plan = mirror.setup_plan(mirror.paths(), {})
+            self.assertEqual(said[:len(plan)], [f"Setup would {step}." for step in plan], "a step of setup unsaid")
+            self.assertTrue(any(x.startswith("After a restart") for x in said), said)
+            self.assertIn(mirror.LFS_MISSING, said)
+        with World(self) as w:
+            said = block(w.setup_out, "setup")
+            self.assertIn(mirror.PRIVATE_AS_THIS_COMPUTER, said)
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            said = block(out, "sync --announce")
+            self.assertEqual(len(said), 4, said)
+            self.assertTrue(said[0].startswith("The first copy: 1 repositories from 1 owner(s)"), said)
+            self.assertIn(f"The copies go into the forge on this computer only, http://127.0.0.1:{w.port}/", said[1])
+            self.assertIn("Nothing is ever written to GitHub.", said[1])
+            self.assertEqual(said[2:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
+            self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
+        _, _, body = skill_front()
+        self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
+                      body)
+        self.assertIn("word for word and in that order, before any\nwords of your own", body)
+        order = section(body, "The order")
+        for step in ("1. `M setup --dry-run`. Give the person its `tell the person` block whole",
+                     "5. `M sync --announce`. Give the person its `tell the person` block whole"):
+            self.assertIn(step, order)
 
 class Invariants(unittest.TestCase):
     def test_INV6_standard_library_only_and_no_other_network(self):
