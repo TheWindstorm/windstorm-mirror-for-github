@@ -94,6 +94,8 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 - `M status`: one line per problem, then `copies: N on GitHub, N copied, M behind, U unreadable`, the forge's
   version, each key's expiry, the free disk, the last good sync and the next. A copy is never shown as current
   unless it was seen current.
+- `M left-out`: the names of the projects the include list and the exclude patterns leave out, when the person
+  asks. `sync` and `status` give only their number; do not print or repeat those names unasked.
 - A key expires or is refused: the person makes a new one (same page) and runs `key set <owner>` again, in a
   terminal window of their own, as in step 4.
 - `M backup <folder>`: the forge's own backup in one file only the person can read. It holds the forge's secrets;

@@ -1174,7 +1174,11 @@ class G3(unittest.TestCase):
             self.assertEqual(quiet(mirror.main, ["config", "exclude", "someone/secret-*"])[0], 0)
             rc, out = w.first_sync()
             self.assertEqual(rc, 0, out)
-            self.assertIn("left out: someone/secret-notes (left out by 'someone/secret-*')", out)
+            self.assertIn("left out: 1 by your exclude patterns; their names are not shown here (to see them, run: "
+                          "left-out).", out)
+            self.assertNotIn("secret-notes", out)
+            rc, asked = quiet(mirror.main, ["left-out"])
+            self.assertIn("left out: someone/secret-notes (left out by 'someone/secret-*')", asked)
             names = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
             self.assertEqual(names, ["someone--alpha", "someone--empty", "someone--forked", "someone--old"])
             # An include that matches nothing stops the sync; it never widens to everything.
@@ -1187,7 +1191,47 @@ class G3(unittest.TestCase):
             quiet(mirror.main, ["config", "include", "someone/alpha"])
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
-            self.assertIn("left out: someone/later (not in include)", out)
+            self.assertIn("left out: 5 by your include list; their names", out)
+            self.assertNotIn("someone/later", out)
+            rc, asked = quiet(mirror.main, ["left-out"])
+            self.assertIn("left out: someone/later (not in include)", asked)
+
+    def test_G3_11_what_is_left_out_is_a_count_and_its_names_come_only_when_asked(self):
+        """Five cold starts (2026-11-23): every plain sync printed the name of each project the include list left
+        out, so every agent transcript held names the person had chosen to leave out. The tool names what it copies;
+        what is left out is a count, and its names come only from left-out, which the count line names."""
+        with World(self) as w:
+            for n in ("alpha", "beta", "hidden-one", "hidden-two"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            quiet(mirror.main, ["config", "exclude", "someone/hidden-*"])
+            outs = [quiet(mirror.main, ["setup", "--dry-run"])[1]]
+            rc, out = w.sync("--announce")
+            outs.append(out)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            outs.append(out)
+            self.assertIn("left out: 2 by your exclude patterns; their names are not shown here (to see them, run: "
+                          "left-out).", out)
+            quiet(mirror.main, ["config", "include", "someone/alpha"])
+            rc, out = w.sync()
+            outs.append(out)
+            self.assertIn("left out: 3 by your include list; their names are not shown here", out)
+            outs += [quiet(mirror.main, ["status"])[1], quiet(mirror.main, ["restore", "--check"])[1]]
+            for o in outs:
+                for hidden in ("hidden-one", "hidden-two"):
+                    self.assertNotIn(hidden, o, "a left-out name was printed without being asked for")
+            self.assertNotIn("someone/beta", outs[-3] + outs[-2] + outs[-1])
+            before = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
+            rc, asked = quiet(mirror.main, ["left-out"])
+            self.assertEqual(rc, 0, asked)
+            for line in ("left out: someone/beta (not in include)", "left out: someone/hidden-one (not in include)",
+                         "left out: someone/hidden-two (not in include)"):
+                self.assertIn(line, asked)
+            self.assertNotIn("someone/alpha", asked)
+            self.assertEqual(asked.strip().splitlines()[-1], "left-out: 3 left out. Nothing was copied or changed.")
+            self.assertEqual(sorted(r["name"] for r in w.forge_get("/user/repos")[1]), before)
 
     def test_G3_6_a_repository_gone_from_github_keeps_its_copy(self):
         with World(self) as w:

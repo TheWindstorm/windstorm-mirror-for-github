@@ -1344,6 +1344,52 @@ def announce_first_copy(p, st, picked, complete):
     save_state(p, st)
 
 
+def left_out_line(skipped):
+    """G3.11: what the person left out is a count; its names come only when they ask (left-out). A plain sync put
+    the names of every project left out into every agent's transcript."""
+    inc = sum(1 for _, why in skipped if why == "not in include")
+    parts = ([f"{inc} by your include list"] if inc else []) + (
+        [f"{len(skipped) - inc} by your exclude patterns"] if len(skipped) > inc else [])
+    return f"left out: {' and '.join(parts)}; their names are not shown here (to see them, run: left-out)."
+
+
+def cmd_left_out(args):
+    """G3.11: the names of what the include list and the exclude patterns leave out, asked for by the person. It
+    reads GitHub's lists with the kept keys, and copies and changes nothing."""
+    p = paths()
+    st, s = load_json(p["state"], {}), load_json(p["settings"], {})
+    owners = s.get("owners") or {}
+    if not owners:
+        say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
+        return 2
+    if epoch_of(st.get("github_wait_until")) > time.time():
+        say(spent_line(st))
+        return 0
+    names, problems = [], []
+    for owner, meta in owners.items():
+        kp = key_path(p, owner)
+        if not os.path.exists(kp):
+            problems.append(f"{owner}: no key is kept for it; run key set {owner}")
+            continue
+        with open(kp, encoding="utf-8") as f:
+            key = secret(f.read().strip())
+        repos, why, _ = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), {})
+        if repos is None:
+            problems.append(f"{owner}: {why}")
+            continue
+        for r in repos:
+            ok, why = chosen(r["full_name"], s)
+            if not ok:
+                names.append((r["full_name"], why))
+    for full, why in sorted(names, key=lambda x: x[0].lower()):
+        say(f"left out: {full} ({why})")
+    for x in problems:
+        say(f"problem: {x}")
+    say(f"left-out: {len(names)} left out{' (the list is not whole: see the problem above)' if problems else ''}. "
+        "Nothing was copied or changed.")
+    return 1 if problems else 0
+
+
 def spent_line(st):
     return (f"GitHub's allowance for your keys is spent until {local_time(st['github_wait_until'])}. The sync waits "
             "until then and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer "
@@ -1412,7 +1458,7 @@ def sync(p, args):
     picked, skipped = {}, []
     for gid, (owner, key, r) in found.items():
         ok, why = chosen(r["full_name"], s)
-        (picked.__setitem__(gid, (owner, key, r)) if ok else skipped.append(f"{r['full_name']} ({why})"))
+        (picked.__setitem__(gid, (owner, key, r)) if ok else skipped.append((r["full_name"], why)))
     if s.get("include") and not picked and found:
         say("The include list matches no repository GitHub shows; the sync stops rather than copy everything. Check "
             "the names (owner/name, as GitHub shows them) with config include, or clear the list with config "
@@ -1503,8 +1549,8 @@ def sync(p, args):
     save_state(p, st)
     for line in report + [f"problem: {x}" for x in problems]:
         say(line)
-    for x in skipped:
-        say(f"left out: {x}")
+    if skipped:
+        say(left_out_line(skipped))
     lfs_missing = sorted(rec["full_name"] for rec in state.values() if rec.get("lfs_missing") and not rec.get("gone_since"))
     for name in lfs_missing:
         say(f"problem: {name}: {LFS_NOT_IN_COPY}")
@@ -2598,6 +2644,8 @@ def main(argv=None):
     y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
     y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
+    lo = sub.add_parser("left-out", help="the names of the projects your include list and exclude patterns leave out")
+    lo.set_defaults(fn=cmd_left_out)
     st_ = sub.add_parser("status", help="what is copied, what is behind, and when the next sync runs")
     st_.add_argument("--check-release", action="store_true", help="ask GitHub for the latest release now")
     st_.set_defaults(fn=cmd_status)
