@@ -333,6 +333,7 @@ version is 0.0.0.
 | Codon | Claim | Proof |
 |---|---|---|
 | T1 | A proof named in this plan counts only when the suite's own runner saw it pass. The runner refuses a test name defined twice, two classes of one name, a test that is not where unittest collects it, and any skip mark. A skip raised inside a test counts as "not run here", never as a pass, and only when its reason is on a fixed list (no real pinned Gitea for this system, no git lfs here) and that is true on that machine. In CI it is never true, and a last job needs every proof to have passed on at least one of the four jobs. | `test_the_gate_refuses_every_way_a_test_can_hide` |
+| T4 | Mac jobs are shared by the whole family (rule 17): a pull request runs ONE Mac job, the floor's Python (3.9); the full Mac matrix runs on main and `release-*`; the gate expects the reports of the event it runs on (four on a pull request, five on a push); a newer push to a pull request cancels that pull request's older runs (a concurrency group per pull request), never a run on main or a release branch (M54). | `test_T4_mac_jobs_are_shared_so_a_pull_request_runs_one` |
 
 ## Proven by hand on real machines, not by a test
 

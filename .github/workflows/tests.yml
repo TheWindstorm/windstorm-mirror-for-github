@@ -2,6 +2,11 @@ name: tests
 on: [push, pull_request]
 permissions:
   contents: read
+# T4: Mac jobs are shared by the whole family (rule 17): a newer push to a pull request cancels that pull request's
+# older runs; a run on main or a release branch has a group of its own and is never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -15,6 +20,35 @@ jobs:
           - {os: ubuntu-24.04, python: "3.10"}
           - {os: ubuntu-24.04, python: "3.13"}
           - {os: macos-26, python: "3.9"}
+        # T4: a pull request runs ONE Mac job, the floor's Python; the rest of the Mac matrix is test-mac below.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # a release branch is compared with main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: The tests, with the real pinned Gitea (downloaded and checked against its pin by the tests)
+        env:
+          WSM_REQUIRE_GITEA: "1"
+          WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
+          WSM_TEST_REPORT: ${{ runner.temp }}/report.json
+        run: python -I tests/test_mirror.py -v
+      - name: Keep what this job saw pass, for the join
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.os }}-${{ matrix.python }}
+          path: ${{ runner.temp }}/report.json
+          if-no-files-found: error
+  test-mac:
+    # T4: Mac jobs are shared by the whole family (rule 17): the full Mac matrix runs on main and release-* only.
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - {os: macos-26, python: "3.13"}
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +71,7 @@ jobs:
           path: ${{ runner.temp }}/report.json
           if-no-files-found: error
   gate:
-    needs: test
+    needs: [test, test-mac]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -51,8 +85,9 @@ jobs:
         with:
           pattern: report-*
           path: reports
-      - name: Every proof the plan names, and every built row's test, passed on at least one of the five jobs
-        run: python -I tests/test_mirror.py --join --expect 5 reports/*/report.json
+      - name: Every proof the plan names, and every built row's test, passed on at least one of the event's jobs
+        # T4: the reports of the event it runs on: four on a pull request, five on main and release-*.
+        run: python -I tests/test_mirror.py --join --expect ${{ github.event_name == 'pull_request' && 4 || 5 }} reports/*/report.json
   skill-spec:
     runs-on: ubuntu-24.04
     steps:

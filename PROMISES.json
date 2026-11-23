@@ -540,6 +540,20 @@
    "issue": "#53",
    "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model told the person the mirror warns two weeks before the key ends while its end date could not be read; status said 'expiry not known' but no block for the person said what that means, and SKILL.md itself promised the warning without a condition.",
    "promise": "Each key's end has three answers: a date (the warning two weeks before is promised), no end date (said only once GitHub's way of saying it has been seen, contract C3), or could not be read: said so in the block the person hears before the go, with no warning promised and the place to read the date. SKILL.md never promises the warning itself."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M54",
+   "codon": "T4",
+   "test": "test_T4_mac_jobs_are_shared_so_a_pull_request_runs_one",
+   "issue": "#96",
+   "seen": "2026-11-23: one afternoon had 34 runs queued and none running, Mac runners being shared by the family's five repositories; changes in two of them waited about an hour each.",
+   "promise": "A pull request runs one Mac job, the floor's Python; the full Mac matrix runs on main and release-*; the gate expects the reports of the event it runs on; a newer push to a pull request cancels its older runs, never a run on main or a release branch."
   }
  ],
  "declined": []
