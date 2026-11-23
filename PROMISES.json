@@ -404,7 +404,7 @@
    "ship_in": "0.1.0",
    "test": "test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project",
    "stand_in": "GitHub (a stand-in's two answers for a spent allowance)",
-   "proven": "",
+   "proven": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine, injected, the real event not seen: a stand-in for GitHub on the machine gave GitHub's documented answer for a spent allowance, not a recorded one (403, no calls remaining, a reset 30 minutes on); the sync said one line with the reset in the computer's own time, marked no project failed and asked nothing more (status's own daily read of new releases waits too; seen after its fix the same day, on a second fresh machine); after a real restart, the timer's own sync said the same and asked GitHub nothing (no packet to port 443 from the person's account, no request to the stand-in). Not seen: GitHub itself saying it, and the 429 with Retry-After.",
    "issue": "#38",
    "moved_why": "",
    "moved_by_person": "",
