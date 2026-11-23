@@ -920,7 +920,7 @@
    "exception": "",
    "issue": "",
    "seen": "2026-11-23: the family's rule 16, corrected the same afternoon: a skill's own catalog file with a './' source hands out whatever main holds, and the road every cold start of this skill walked is that file. Pinning, not removing, keeps unreleased code from going out under a released label.",
-   "promise": "This repository's own catalog entry is './' only while no version older than the current one is released; otherwise it is an https url source pinned to a released version no newer than the current one (ref v<version>, a full sha). The pin is a text-only commit on main right after each tag; the one commit between the tag and the pin is the release step's to hold."
+   "promise": "This repository's own catalog entry is './' only while no version older than the current one is released; otherwise it is an https url source pinned to a released version no newer than the current one (ref v<version>, and as sha the commit that tag points to, checked against the tags in the clone: Claude Code refuses an annotated tag's own id and installs by the sha, without a word, when the ref disagrees). The pin is a text-only commit on main right after each tag; the one commit between the tag and the pin is the release step's to hold."
   },
   {
    "owner": "maintainer",

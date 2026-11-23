@@ -3351,7 +3351,8 @@ class G10(unittest.TestCase):
         """M57 (the family's rule 16, corrected 2026-11-23): this repository's own catalog file stays, and its entry
         never hands out unreleased code under a released label. `./` stands only while no version older than this one
         is released; then an https url with ref v<a released version no newer than this one> and a full sha. The one
-        commit between a tag and its pin is the release step's to hold: the pin needs the tag's sha."""
+        commit between a tag and its pin is the release step's to hold: the pin needs the tag's sha. The sha is the
+        commit the ref points to (`git rev-parse <ref>^{commit}`), checked against the tags in this clone."""
         url = lambda ref, sha="a" * 40, u="https://github.com/TheWindstorm/windstorm-mirror-for-github.git": \
             {"source": {"source": "url", "url": u, "ref": ref, "sha": sha}}
         ok = [({"source": "./"}, "0.0.0", ["Unreleased"]),
@@ -3373,7 +3374,31 @@ class G10(unittest.TestCase):
         entry = [p for p in jload(os.path.join(ROOT, ".claude-plugin", "marketplace.json"))["plugins"]
                  if p["name"] == "windstorm-mirror-for-github"][0]
         heads = re.findall(r"^## (.+)$", fread(os.path.join(ROOT, "CHANGELOG.md")), re.M)
-        self.assertIsNone(catalog_entry_wrong(entry, version(), heads))
+        self.assertIsNone(catalog_entry_wrong(entry, version(), heads, git_commit_of(ROOT)))
+
+    def test_G10_13_the_pinned_sha_is_the_commit_its_ref_points_to(self):
+        """M57, rule 16 (seen 2026-11-23 on Claude Code 2.1.323 and 2.1.330): an annotated tag's own id as the sha is
+        refused, and a ref that disagrees with its sha is installed by the sha without a word. In a real clone with
+        an annotated tag: the tag's commit passes; the tag's own id, another commit, and a tag not in the clone are
+        each refused."""
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid", GIT_COMMITTER_NAME="t",
+                       GIT_COMMITTER_EMAIL="t@example.invalid", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+            g = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True,
+                                          env=env).stdout.strip()
+            g("init", "-q"); g("commit", "-q", "--allow-empty", "-m", "one"); first = g("rev-parse", "HEAD")
+            g("commit", "-q", "--allow-empty", "-m", "two"); g("tag", "-a", "v0.1.0", "-m", "0.1.0")
+            commit, tag_id = g("rev-parse", "v0.1.0^{commit}"), g("rev-parse", "v0.1.0")
+            self.assertNotEqual(commit, tag_id)
+            heads = ["0.1.0 (2026-11-24)"]
+            pin = lambda sha, ref="v0.1.0": {"source": {"source": "url", "ref": ref, "sha": sha,
+                                                        "url": "https://github.com/TheWindstorm/windstorm-mirror-for-github.git"}}
+            self.assertIsNone(catalog_entry_wrong(pin(commit), "0.1.0", heads, git_commit_of(d)))
+            for sha in (tag_id, first):
+                why = catalog_entry_wrong(pin(sha), "0.1.0", heads, git_commit_of(d))
+                self.assertIsNotNone(why, sha); self.assertIn(commit, why)
+            g("tag", "-d", "v0.1.0")
+            self.assertIn("not in this clone", catalog_entry_wrong(pin(commit), "0.1.0", heads, git_commit_of(d)) or "")
 
     def test_G10_11_the_cold_starts_are_the_first_evals_as_cases(self):
         """The family's rule 13: the cold-start runs, written as cases, are the first evals. Each case loads in
@@ -3594,11 +3619,22 @@ def stand_ins_unproven(rows, at):
 WHOSE_WORD = ("By the maintainer's word, ", "By the owner's word, ")
 
 
-def catalog_entry_wrong(entry, ver, heads):
+def git_commit_of(root):
+    """The commit a ref points to in the clone at `root` (an annotated tag peeled to its commit), or None."""
+    def commit_of(ref):
+        r = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "-q", ref + "^{commit}"],
+                           capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    return commit_of
+
+
+def catalog_entry_wrong(entry, ver, heads, commit_of=None):
     """M57 (the family's rule 16): why this repository's own catalog entry is wrong at version `ver`, given the
     changelog's headings, or None. `./` hands out whatever main holds, so it stands only while no version older
     than this one is released (0.0.0, and the release commit itself, before the tag exists to pin to). Otherwise
-    the entry is an https url pinned to a released version no newer than this one: ref v<that version>, a full sha."""
+    the entry is an https url pinned to a released version no newer than this one: ref v<that version>, and a sha
+    that is the commit that ref points to (`commit_of`): Claude Code refuses an annotated tag's own id, and installs
+    by the sha, without a word, when the ref says something else."""
     released = [h.split(" ")[0] for h in heads if re.match(r"^\d+\.\d+\.\d+(?: \(\d{4}-\d{2}-\d{2}\))?$", h)]
     src = entry.get("source")
     if src == "./":
@@ -3611,6 +3647,13 @@ def catalog_entry_wrong(entry, ver, heads):
         return f"ref {ref!r} is not a released version no newer than {ver}"
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         return "the sha is not a full commit id"
+    if commit_of is not None:
+        c = commit_of(ref)
+        if c is None:
+            return f"the tag {ref} is not in this clone, so the sha cannot be checked against it: git fetch --tags"
+        if c != sha:
+            return (f"the sha is not the commit {ref} points to ({c}): an annotated tag's own id is refused, and a "
+                    "sha that disagrees with its ref is installed by the sha without a word")
     return None
 
 
