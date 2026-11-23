@@ -813,11 +813,19 @@ def next_link(headers):
     return None
 
 
+def page_size():
+    """G3.10: GitHub's largest page, 100. WSM_PAGE_SIZE (1 to 100) is read for tests and labs only: it makes the
+    pages small, so that paging can be seen on a real owner with few repositories. Anything else is 100."""
+    v = os.environ.get("WSM_PAGE_SIZE", "")
+    return int(v) if v.isdigit() and 1 <= int(v) <= 100 else 100
+
+
 def list_owner(owner, kind, key, floor=0, info=None):
     """Every repository of one owner, page by page to the last page. (repos, None), or (None, why) when any page
     failed: half a list is never acted on as if it were whole."""
-    url = ("/user/repos?affiliation=owner&per_page=100" if kind == "user"
-           else f"/orgs/{urllib.parse.quote(owner)}/repos?type=all&per_page=100")
+    n = page_size()
+    url = (f"/user/repos?affiliation=owner&per_page={n}" if kind == "user"
+           else f"/orgs/{urllib.parse.quote(owner)}/repos?type=all&per_page={n}")
     repos, page, calls = [], 0, 0
     while url:
         page += 1

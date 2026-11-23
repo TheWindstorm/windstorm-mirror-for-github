@@ -1002,6 +1002,30 @@ class World:
 
 
 class G3(unittest.TestCase):
+    def test_G3_10_the_page_size_is_githubs_largest_unless_a_test_or_lab_sets_it(self):
+        """A real owner with few repositories has one page; to see paging (M5) and the floor (M9) there, a lab
+        makes the page small with WSM_PAGE_SIZE. Nothing a person does sets it, and only 1 to 100 is taken."""
+        asked = []
+        saved, env = mirror.gh_get, os.environ.get("WSM_PAGE_SIZE")
+        mirror.gh_get = lambda key, url, *a, **k: (asked.append(url), (500, {}, None))[1]
+        try:
+            for val, want in ((None, 100), ("3", 3), ("1", 1), ("100", 100), ("0", 100), ("101", 100), ("x", 100),
+                              ("-5", 100)):
+                os.environ.pop("WSM_PAGE_SIZE", None)
+                if val is not None:
+                    os.environ["WSM_PAGE_SIZE"] = val
+                for kind in ("user", "org"):
+                    asked.clear()
+                    mirror.list_owner("someone", kind, "k")
+                    self.assertIn(f"per_page={want}", asked[0], (val, kind))
+        finally:
+            mirror.gh_get = saved
+            os.environ.pop("WSM_PAGE_SIZE", None)
+            if env is not None:
+                os.environ["WSM_PAGE_SIZE"] = env
+        self.assertNotIn("WSM_PAGE_SIZE", fread(SKILL))
+        self.assertNotIn("WSM_PAGE_SIZE", fread(os.path.join(ROOT, "README.md")))
+
     def test_G3_1_every_repository_is_found_page_by_page_to_the_end(self):
         with World(self) as w:
             w.gh.page_cap = 2
