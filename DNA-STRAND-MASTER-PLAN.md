@@ -123,7 +123,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.4 | Setup makes two Gitea accounts: the person's (an administrator), and a `mirror` account that owns the copies. It writes the person's first password to a file only they can read, and says where. It never prints the password. | `test_G1_4_setup_makes_the_two_accounts_and_never_prints_a_password` |
 | G1.5 | `setup --dry-run` says everything setup would do and changes nothing. Running `setup` twice does not make a second forge, account or service. | `test_G1_5_setup_dry_run_changes_nothing_and_setup_twice_is_one_setup` |
 | G1.6 | Where the forge and the timer start only once the person logs in, `setup` and `status` say so in plain words: "after a restart, the copy stands still until you log in". That covers a Linux account without lingering, and every Mac (a launchd agent runs only in a login session; with FileVault on, nothing runs before someone logs in). On Linux, `setup` first tries `loginctl enable-linger` for the person's own account. When the system refuses, it names that as a step for the computer's administrator, with the one command they run. | `test_G1_6_when_it_will_not_come_back_by_itself_it_says_so` |
-| G1.8 | Setup checks that git is installed before anything else, and if it is not, says so in one plain sentence with how to install it, and changes nothing (no download). git must also be where the forge's service and the sync timer look (on Linux the PATH of the person's own service manager, read with `systemctl --user show-environment`; on a Mac, launchd's): when git is only in a folder outside it, setup says so, with where git is and how to install it for the whole computer, and changes nothing. The dry run and setup name a missing git lfs, and what it costs. A program that is not installed is an answer, never a traceback. | `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` |
+| G1.8 | Setup checks that git is installed before anything else, and if it is not, says so in one plain sentence with how to install it, and changes nothing (no download). git must also be where the forge's service and the sync timer look (on Linux the PATH of the person's own service manager, read with `systemctl --user show-environment`; on a Mac, launchd's): when git is only in a folder outside it, setup says so, with where git is and how to install it for the whole computer, and changes nothing. The dry run and setup name a missing git lfs, and what it costs. Every install line named was run as written on a fresh system first ("Install lines, as seen", M28). A program that is not installed is an answer, never a traceback. | `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` |
 | G1.9 | Lingering changes how the person's computer behaves after they log out, so: the dry run says, in plain words, what it means before setup; it asks this computer (polkit, never with a password prompt, with a time limit) whether the person may switch it on themselves, and says one of three things: yes, no (the administrator's one command), or not known (setup will try, without a password, and the command in case it is refused); setup switches it on without a password prompt and records that it did; `uninstall` switches it off only when setup switched it on, and says which; `setup --no-linger` never tries, and says the mirror then syncs only while the person is logged in. The choice is the person's, and the tool carries it: on Linux with lingering off, plain `setup` changes nothing (no download), prints the sentence and the two choices, `--linger` or `--no-linger`, and ends with "Needs you"; where the person may not switch it on themselves, `--linger` ends on the administrator's command. A no is kept, so a later plain `setup` does not ask again. | `test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it` |
 | G1.10 | Setup says the forge runs only once it answers; otherwise it says the service was started and the forge was not answering yet (seen: the first `status` right after setup, on a stock machine, found the forge still starting). | `test_G1_10_setup_says_the_forge_runs_only_once_it_answers` |
 | G1.7 | On a Mac, the forge comes back by itself after a restart only when the system logs the person in by itself (automatic login set to them, FileVault off). Otherwise setup says the copy stands still until they log in, and why. Of the automatic-login setting it keeps only whether it is set and whether it is this person's own account; another account's name is never said or kept. | `test_G1_6_on_a_mac_it_comes_back_by_itself_only_with_the_systems_own_login` |
@@ -315,7 +315,30 @@ version is 0.0.0.
 
 ## Proven by hand on real machines, not by a test
 
-Nothing yet. The lab facts above are about stock Gitea, not about this skill.
+The lab facts above are about stock Gitea, not about this skill.
+
+### Install lines, as seen
+
+Every install line the tool names (`INSTALL_GIT`, `INSTALL_LFS` in `scripts/mirror.py`) was run as written on a
+fresh system before it was written; `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` holds
+that the tool names no command that is not in this table. Fresh cloud images, a new disk each, 2026-11-23 (row M28):
+
+| Line | System | Seen |
+|---|---|---|
+| `sudo apt update && sudo apt install git` | Ubuntu 24.04.5 cloud image; Debian 13 genericcloud image | works (git 2.43.0; 2.47.3) |
+| `sudo apt update && sudo apt install git-lfs` | Ubuntu 24.04.5; Debian 13 | works (git-lfs 3.4.1; 3.6.1) |
+| `sudo dnf install git` | Fedora 45 Cloud Base | works (git 2.56.1; the image has no git) |
+| `sudo dnf install git-lfs` | Fedora 45 Cloud Base | works (git-lfs 3.7.1) |
+| `xcode-select --install` | macOS 13.7.8 (Intel) and macOS 27.2.1 (Apple M4), both with the tools already | seen only on a Mac that already had them: "already installed", exit 1. The installer window on a fresh Mac is not seen. |
+| large files on a Mac: https://git-lfs.com | | not seen installed on a Mac |
+
+Lines tried and NOT used, so that no one puts them back:
+- `sudo apt install git` and `sudo apt install git-lfs` alone: on a fresh Ubuntu 24.04.5 image, git failed with a
+  404 on the stale package list and git-lfs said "Unable to locate package"; on a fresh Debian 13 image, which
+  has no package lists at all, both said "Unable to locate package". Both cold-start agents met the git-lfs one.
+- `brew install git-lfs`: on macOS 13.7.8 (Intel), with Homebrew installed, it did not install git lfs; Homebrew
+  called the system an unsupported "Tier 3" configuration. The other test Mac's Homebrew belongs to another
+  account and was not touched.
 
 ## Not verified
 

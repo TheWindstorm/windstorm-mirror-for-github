@@ -594,6 +594,19 @@ def service_path():
     return SERVICE_PATHS.get(kind, SERVICE_PATHS["linux"])
 
 
+
+# G1.8: every install line named here was run as written on a fresh system first; the plan's "Install lines, as
+# seen" table says where and when, and a test holds that no line is named here that is not in it. An apt line
+# alone fails on a fresh Ubuntu or Debian image (stale or no package lists), so it starts with apt update.
+INSTALL_GIT = ("on Ubuntu or Debian: sudo apt update && sudo apt install git; "
+               "on Fedora: sudo dnf install git; "
+               "on a Mac: xcode-select --install, which opens Apple's own installer for the command-line tools "
+               "and needs you at the screen")
+INSTALL_LFS = ("on Ubuntu or Debian: sudo apt update && sudo apt install git-lfs; "
+               "on Fedora: sudo dnf install git-lfs; "
+               "on a Mac: from the project's own site, https://git-lfs.com; setup and sync find it by themselves "
+               "once it is installed")
+
 def git_out_of_service_reach():
     """The sentence when git is here only in a folder the service does not look in, else ''."""
     here = shutil.which("git")
@@ -601,22 +614,19 @@ def git_out_of_service_reach():
     if not here or shutil.which("git", path=where):
         return ""
     return (f"git is at {here}, in a folder the mirror's service does not look in ({where}), so the forge and the "
-            f"sync would not find it. Install git for the whole computer (on Ubuntu or Debian: sudo apt install "
-            f"git; on Fedora: sudo dnf install git; on a Mac: xcode-select --install); that is the person's step, "
-            f"or their administrator's. Nothing was changed.")
+            f"sync would not find it. Install git for the whole computer ({INSTALL_GIT}); that is the person's "
+            f"step, or their administrator's. Nothing was changed.")
 
 
 def git_missing_sentence():
-    return ("git is not installed on this computer. The skill and the forge both need it. Install it (on Ubuntu "
-            "or Debian: sudo apt install git; on Fedora: sudo dnf install git; on a Mac: xcode-select --install), "
+    return (f"git is not installed on this computer. The skill and the forge both need it. Install it ({INSTALL_GIT}), "
             "then run setup again.")
 
 
 LFS_NOT_IN_COPY = ("its large files are NOT in the copy, because git lfs was not installed when it was copied; "
                    "install git lfs, and the next sync copies them")
 LFS_MISSING = ("git lfs is not installed here, so projects with large files are copied without them until it is "
-               "(on Ubuntu or Debian: sudo apt install git-lfs; on Fedora: sudo dnf install git-lfs; on a Mac with "
-               "Homebrew: brew install git-lfs).")
+               f"({INSTALL_LFS}).")
 
 
 def install_service(p):
