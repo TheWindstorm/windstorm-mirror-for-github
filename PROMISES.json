@@ -974,7 +974,7 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "proven": "",
+   "proven": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine, an account with no administrator rights, with the tests' own stand-in for GitHub (two made-up projects, a made-up key; real GitHub was not asked): key set named go as the next step; the agent's sync alone, on no go of the person's, copied nothing and named go; go with no terminal gave no go; in a real terminal (a pseudo-terminal over ssh, as a person's own ssh session has), go printed the same eight lines as the agent's block, numbered to the person, and asked; a typed 'no' gave no go; Enter, typed only once the question was on the screen, kept the go for exactly those two projects while go itself copied nothing; then the agent's sync made both copies, status said the first copy was made on the person's go, and restore --check found both whole.",
    "moved_why": "",
    "moved_by_person": "",
    "exception": "",
