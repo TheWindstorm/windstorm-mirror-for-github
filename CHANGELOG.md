@@ -3,6 +3,7 @@
 ## Unreleased
 
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.
+- G9.4 (row M41, #61): leaving is never refused. `uninstall` waits for a running sync and says which one; the last thing it prints says what is gone now and what is kept (your copies, and the record of what the skill did); run twice, it is safe and makes nothing again. The README says that Claude Code's own plugin uninstall leaves the forge and the timer running, and the one command that takes them off.
 - T2 (row M40, #59): every promise row says what its test stands in for, or none, and a release branch's tests refuse a row that leans on a stand-in while no real machine has proven it. 24 of the 40 rows lean on one.
 - G1.13 (row M39, #57): a Mac is written as what it was. The Mac's git line now names Apple's developer tools and Apple's command for them, and no longer describes what that command shows on a Mac without them, which we have not seen. The Mac sighting under "Seen to work" says it was the Mac's own main account, on a Mac that carries the developer tools, with two stand-in launch agents.
 - G10.8 (row M37, #52): SKILL.md says the agent reaches GitHub only through the tool, never with your own git, SSH key or `gh` login, not even to look, and why: your own login reaches every repository you can, with your right to write; the tool reads with the one read-only key you made for it. A cold start saw the smallest model probe GitHub over SSH and anonymous git.
