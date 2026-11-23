@@ -115,9 +115,9 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "test": "test_G2_3_a_key_that_can_write_is_named_for_what_it_is",
+   "test": "",
    "proven": "",
-   "issue": "",
+   "issue": "#23",
    "moved_why": "",
    "moved_by_person": ""
   },
@@ -482,6 +482,20 @@
    "test": "test_G10_6_what_the_person_must_hear_before_the_go_is_in_the_block_they_say_go_to",
    "proven": "",
    "issue": "#47",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
+   "id": "M35",
+   "seen": "2026-11-23: the release README names Python 3.10 or newer, and mirror.py never checks it; under Python 3.8.20 and 3.9.25 `setup --dry-run` ran to the end with no word about the version. A sister skill of the same family, on a stock machine with Python 3.8, registered and started a service before it crashed on newer grammar.",
+   "promise": "The tool checks the lowest Python version it names as its first act, for every command; below it, it stops with the version found, the version it needs and where it does run, and has made nothing; the file stays readable by the older grammar so that line is reached. Seen once on an older stock image (Ubuntu 20.04.6, Python 3.8) before the tag.",
+   "codon": "G1.12",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_12_an_older_python_is_told_first_and_nothing_is_made",
+   "proven": "",
+   "issue": "#49",
    "moved_why": "",
    "moved_by_person": ""
   }
