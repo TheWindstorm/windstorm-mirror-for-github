@@ -2894,6 +2894,11 @@ time.sleep(600)
             shutil.rmtree(marker, ignore_errors=True)
 
 
+def stand_ins_unproven(rows, at):
+    """T2: the rows due at version `at` whose test leans on a stand-in and that no real machine has proven."""
+    return [r["id"] for r in rows if v(r["ship_in"]) <= at and r.get("stand_in", "none") != "none"
+            and not r.get("proven")]
+
 class Promises(unittest.TestCase):
     """PROMISES.json holds what real machines, and the people using them, showed must change, and the version
     each change is due in. A lesson is a gate, not a note: these tests refuse a version while a promise due in it
@@ -2912,7 +2917,7 @@ class Promises(unittest.TestCase):
         for r in self.rows:
             for k in ("id", "seen", "promise", "codon", "owner", "first_ship_in", "ship_in"):
                 self.assertTrue(r.get(k), f"{r.get('id')}: '{k}' is empty")
-            for k in ("test", "proven", "issue", "moved_why", "moved_by_person"):
+            for k in ("test", "stand_in", "proven", "issue", "moved_why", "moved_by_person"):
                 self.assertIn(k, r, f"{r['id']}: the column '{k}' is missing")
             self.assertIn(r["owner"], ("person", "maintainer"), r["id"])
             self.assertIn(f"| {r['codon']} |", self.plan, f"{r['id']}: codon {r['codon']} is not in the plan")
@@ -2944,6 +2949,22 @@ class Promises(unittest.TestCase):
         for r in self.rows:
             if v(r["ship_in"]) < self.version:
                 self.assertTrue(r.get("proven"), f"{r['id']} shipped in {r['ship_in']} and no real machine has proven it yet")
+
+    def test_PROMISES_a_row_with_a_stand_in_is_proven_before_its_tag(self):
+        """Rule 3 (the family's): a row whose test leans on a stand-in's idea of how GitHub, the service manager,
+        a Mac or an older Python answers is seen to hold on a real machine before its version is tagged, not only
+        by the version after. A release branch raises the version, so there this refuses every such row due in it
+        whose 'proven' is empty; on main (0.0.0) nothing is due yet."""
+        for r in self.rows:
+            self.assertTrue(r.get("stand_in"), f"{r['id']}: say what its test stands in for, or 'none'")
+        made_up = {"id": "X1", "ship_in": "0.1.0", "stand_in": "GitHub", "proven": ""}
+        self.assertEqual(stand_ins_unproven([made_up], v("0.1.0")), ["X1"])
+        self.assertEqual(stand_ins_unproven([made_up], v("0.0.0")), [])
+        self.assertEqual(stand_ins_unproven([dict(made_up, proven="2026-11-23, a stock VM")], v("0.1.0")), [])
+        self.assertEqual(stand_ins_unproven([dict(made_up, stand_in="none")], v("0.1.0")), [])
+        unproven = stand_ins_unproven(self.rows, self.version)
+        self.assertEqual(unproven, [], f"{version()} cannot be tagged: these rows lean on a stand-in and no real "
+                                       "machine has proven them yet (see each row's stand_in)")
 
     def test_PROMISES_a_date_moves_only_with_a_reason_and_a_persons_row_only_by_their_word(self):
         for r in self.rows:

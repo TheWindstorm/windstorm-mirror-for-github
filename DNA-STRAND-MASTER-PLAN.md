@@ -334,6 +334,7 @@ version is 0.0.0.
 | Codon | Claim | Proof |
 |---|---|---|
 | T1 | A proof named in this plan counts only when the suite's own runner saw it pass. The runner refuses a test name defined twice, two classes of one name, a test that is not where unittest collects it, and any skip mark. A skip raised inside a test counts as "not run here", never as a pass, and only when its reason is on a fixed list (no real pinned Gitea for this system, no git lfs here) and that is true on that machine. In CI it is never true, and a last job needs every proof to have passed on at least one of the four jobs. | `test_the_gate_refuses_every_way_a_test_can_hide` |
+| T2 | A row whose test leans on a stand-in is proven on a real machine before its version is tagged. Every row in PROMISES.json says what its test stands in for (GitHub, the service manager, a Mac's system, an older Python), or 'none'. On a release branch, where the version is raised, the tests refuse each row due in that version that has a stand-in and an empty 'proven'; the check is seen to fail once on purpose (M40). | `test_PROMISES_a_row_with_a_stand_in_is_proven_before_its_tag` |
 
 ## Proven by hand on real machines, not by a test
 
