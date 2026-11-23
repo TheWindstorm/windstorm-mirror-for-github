@@ -2707,6 +2707,29 @@ class G10(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertEqual(out.strip(), line)
 
+    def test_G10_8_the_agent_reaches_github_through_the_tool_only(self):
+        """A cold start (2026-11-23): the smallest model probed GitHub with anonymous git and with SSH. On the VM
+        both were refused; on a person's own computer their SSH key or gh login answers, and reaches every
+        repository they can, with their right to write. So SKILL.md says the road is the tool only, and why; and no
+        line of it hands the agent a command that reaches GitHub another way."""
+        _, _, body = skill_front()
+        never = " ".join(section(body, "Never").split())
+        self.assertIn("Reach GitHub only through `M`, never by yourself, not even to look", never)
+        for road in ("`git clone`", "`git ls-remote`", "`ssh git@github.com`", "`gh`", "`curl`", "web fetch"):
+            self.assertIn(road, never)
+        why = never.split("Reach GitHub only through `M`", 1)[1].split(" - ", 1)[0]
+        self.assertIn("Why: the person's own git, SSH key or `gh` login reaches every repository they can reach", why)
+        self.assertIn("the one read-only key", why)
+        self.assertIn("`M sync --announce`: it reads with that key and copies nothing", why)
+        # Outside that one line, no command in SKILL.md goes to GitHub by another road.
+        rest = body.replace(section(body, "Never"), "")
+        spans = re.findall(r"`([^`\n]+)`", rest)
+        other = [c for c in spans if re.match(r"(git|gh|ssh|curl|wget|scp)\b", c.strip())]
+        self.assertEqual(other, [])
+        # And the tool's own announcement reads GitHub without copying: the road it names is real.
+        self.assertIn("G3.7: the announcement never copies", open(mirror.__file__).read())
+
+
 class G6Words(unittest.TestCase):
     NEXT = re.compile(r"\b(run|again|install|make|ask|try|wait|free|name|check|open an issue)\b|`|python3 -I", re.I)
 

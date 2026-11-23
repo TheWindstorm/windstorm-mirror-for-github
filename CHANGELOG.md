@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.8 (row M37, #52): SKILL.md says the agent reaches GitHub only through the tool, never with your own git, SSH key or `gh` login, not even to look, and why: your own login reaches every repository you can, with your right to write; the tool reads with the one read-only key you made for it. A cold start saw the smallest model probe GitHub over SSH and anonymous git.
 - G10.7 (row M36, #51): the skill gives the order plainly: you make your keys first and paste them only after setup. If `key set` is run before setup anyway, it says setup is your agent's step and to run `key set` again after it. Two cold starts saw the smallest model send the person there first.
 - G6.9 (row M38, #53): before you say go, the announcement says for each key when it ends and that you are warned two weeks before, or that its end date could not be read and so no warning can be promised, and where to read it. `status` says the same. SKILL.md no longer promises the warning itself.
 - G1.12 (row M35, #49): the script checks Python 3.9 or newer before anything else, for every command; an older Python is told which version it is and what is needed, and nothing is made. CI runs 3.9 on Linux and on a Mac, on runner images it names. Rule of the gate: a row names its test only once that test exists and the runner reports it, and the gate counts every row's test (row M8's field is cleared; its test waits in draft #23).
