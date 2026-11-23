@@ -2390,10 +2390,26 @@ def cmd_self_update(args):
         return 1
     rel = json.loads(raw or b"null") or {}
     tag = rel.get("tag_name", "")
-    if vt(tag) <= vt(VERSION):
-        say(f"This is the latest release ({VERSION}). Nothing was changed.")
-        return 0
     m = re.search(r"mirror\.py SHA-256 ([0-9a-f]{64})", rel.get("body") or "")
+    if vt(tag) < vt(VERSION):
+        say(f"This is {VERSION}, newer than the latest release ({tag}). Nothing was changed.")
+        return 0
+    if vt(tag) == vt(VERSION):
+        # G9.5: on the latest release, the read is said with the checksum it read, checked against this very file.
+        with open(os.path.abspath(__file__), "rb") as f:
+            own = hashlib.sha256(f.read()).hexdigest()
+        if not m:
+            say(f"This is the latest release ({VERSION}). Its notes name no checksum of mirror.py, so this file "
+                "could not be checked against it. Nothing was changed.")
+            return 0
+        if m.group(1) == own:
+            say(f"This is the latest release ({VERSION}). Its notes name mirror.py SHA-256 {m.group(1)}, and this "
+                "file matches it. Nothing was changed.")
+            return 0
+        say(f"This is the latest release ({VERSION}) by its number, but this file is not the one it names: the "
+            f"release says mirror.py SHA-256 {m.group(1)}, and this file's is {own}. Nothing was changed. To put "
+            "the released file back, update the plugin with Claude Code's own plugin update, then run setup.")
+        return 1
     if not m:
         say(f"Release {tag} does not name the checksum of mirror.py, so it is not installed. Nothing was changed.")
         return 1
