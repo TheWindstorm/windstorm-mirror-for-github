@@ -507,7 +507,8 @@ class G1(unittest.TestCase):
                     self.assertIn("git is at /home/someone/bin/git, in a folder the mirror's service does not look in",
                                   out)
                     self.assertIn("Nothing was changed", out)
-                self.assertIn(["systemctl", "--user", "show-environment"], h.calls)
+                if mirror.system()[0] == "linux":                     # a Mac's launchd PATH is fixed, not asked
+                    self.assertIn(["systemctl", "--user", "show-environment"], h.calls)
                 self.assertFalse(os.path.exists(mirror.paths()["app_ini"]))
             finally:
                 mirror.shutil.which, mirror.fetch_forge = which, fetch
@@ -538,8 +539,10 @@ class G1(unittest.TestCase):
                 mirror.wait_forge = saved
 
     def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
-        saved = mirror.system
+        saved, saved_proc = mirror.system, mirror.own_process_for_polkit
         mirror.system = lambda: ("linux", "x86_64")
+        if not os.path.exists("/proc/self/stat"):        # a Mac runner standing in for Linux has no /proc to read
+            mirror.own_process_for_polkit = lambda: f"{os.getpid()},1,{os.getuid()}"
         me = mirror.getpass.getuser()
         try:
             # (a, b) The dry run says what lingering means, from this computer's own three answers.
@@ -633,7 +636,7 @@ class G1(unittest.TestCase):
                 rc, out = h.setup("--dry-run", "--no-linger")
                 self.assertIn("syncs only while you are logged in", out)
         finally:
-            mirror.system = saved
+            mirror.system, mirror.own_process_for_polkit = saved, saved_proc
 
 
 # ------------------------------------------------------------------ G2 the GitHub keys
