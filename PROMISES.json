@@ -729,6 +729,22 @@
    "issue": "#71",
    "seen": "2026-11-23, the repository read against the family's rule 18: one row's 'seen' text and two test docstrings named where something happened by our own internal words for it, not by a role.",
    "promise": "Public text names kinds and roles, never our own labels for how we work; a test scans every tracked file (the family's copyright notice aside)."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M46",
+   "codon": "G10.11",
+   "test": "test_G10_11_the_cold_starts_are_the_first_evals_as_cases",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "#73",
+   "seen": "2026-11-23, the family's rule 13 read with the owner: five cold-start runs had been measured, but only in private notes; none was written where the skill's evals live.",
+   "promise": "skills/mirror/evals/ holds the cold start as a case claude plugin eval can load, and its README says how it is run and records every run against every grader; a test holds both."
   }
  ],
  "declined": []

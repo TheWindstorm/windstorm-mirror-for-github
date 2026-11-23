@@ -2873,6 +2873,38 @@ class G10(unittest.TestCase):
                     found.append(f"{name}:{n}")
         self.assertEqual(found, [])
 
+    def test_G10_11_the_cold_starts_are_the_first_evals_as_cases(self):
+        """The family's rule 13: the cold-start runs, written as cases, are the first evals. Each case loads in
+        skill-creator's layout (what `claude plugin eval` reads), and the evals' README records every run against
+        every grader."""
+        root = os.path.join(os.path.dirname(SKILL), "evals")
+        cases = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+        self.assertIn("mirror-cold-start-to-the-first-copy-on-the-persons-go", cases)
+        readme = fread(os.path.join(root, "README.md"))
+        for c in cases:
+            self.assertRegex(c, r"^[a-z][a-z0-9-]*$")
+            self.assertNotIn(c, ("results", "mocks", "node_modules", "files", "true", "false", "null"))
+            prompt = fread(os.path.join(root, c, "prompt.md"))
+            m = re.match(r"---\n(.*?)\n---\n\n(.+)", prompt, re.S)
+            self.assertTrue(m, f"{c}: prompt.md has no settings block and prompt")
+            keys = {line.split(":", 1)[0] for line in m.group(1).splitlines()}
+            self.assertLessEqual(keys, {"tags", "max_turns", "timeout_seconds", "allowed_tools"}, c)
+            self.assertTrue(m.group(2).strip(), c)
+            case = fread(os.path.join(root, c, "case.yaml"))
+            self.assertIn('schema_version: "1.1"\n', case)
+            self.assertIn(f"name: {c}\n", case)
+            self.assertIn("expected_outcome: |\n  ", case)
+            graders = sorted(os.listdir(os.path.join(root, c, "graders")))
+            self.assertTrue(graders, f"{c}: a case with no grader fails to load")
+            for g in graders:
+                self.assertRegex(g, r"^\d\d-[a-z0-9-]+\.md$")
+                body = fread(os.path.join(root, c, "graders", g))
+                self.assertTrue(body.startswith("---\ntype: llm\nfocus: trace\nweight: 1\n---\n\n"), g)
+                self.assertTrue(body.split("---\n\n", 1)[1].strip(), g)
+                self.assertRegex(readme, r"\n\| " + g[:2] + r" [^|]+\|", f"{g}: the record of runs has no row for it")
+            # Before a release, the address the person gives is the repository's, never a machine of ours.
+            self.assertIn("https://github.com/TheWindstorm/windstorm-mirror-for-github", prompt)
+
     def test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step(self):
         """Two cold starts (2026-11-23): the smallest model sent the person to key set before setup, twice. Our
         words gave it room: step 2 made the keys before setup and nothing said the paste waits. Now the order says

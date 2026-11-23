@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.11 (row M46, #73): the cold starts are the skill's first evals, written as a case with ten graders, with the record of the five runs so far.
 - G10.10 (row M45, #71): public text names roles, never our own labels; a test holds it.
 - Row M21 (G6.7) reworded, by the owner's word: `status` reads the timer's next run from the boot clock, the clock setup's timer keeps it on; the wall-clock answer only a hand-edited unit could give is read as a guard, not promised. Seen on a stock virtual machine.
 - G10.9 (row M44, #68): one version in every place: the manifest, the script, the changelog's heading and the repository's own catalog entry.
