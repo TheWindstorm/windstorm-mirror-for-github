@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G4.8 (row M25, #38): when GitHub says the allowance is spent (or it falls below the floor), the sync says one line with the reset in your own time, asks GitHub nothing before it, even after a restart, and marks no project failed. The plan counts the calls a sync makes.
 - G2.6 (row M31, #37): `key set` before setup reads no key, asks GitHub nothing and keeps nothing; it says setup comes first.
 - G3.9 (row M32, #36): the announcement names the projects (20 by name, then "and N more", the whole list in a file only you can read), and the first copy copies exactly the list last announced. If it changed in between, nothing is copied, the list is said again, and a new go is asked.
 - G6.8 (row M30, #35): every stop and needs-you line names what happened and the one next step. 39 of 63 had none, and a cold start saw one send the agent into the source four times.

@@ -442,6 +442,20 @@
    "issue": "#37",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M25",
+   "seen": "2026-11-23 (about 12:00 AM ET): a lane on the fleet's shared GitHub login polled every 3 s, spent the hour's allowance, and every lane was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
+   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time; the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
+   "codon": "G4.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project",
+   "proven": "",
+   "issue": "#38",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

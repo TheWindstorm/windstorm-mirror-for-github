@@ -684,6 +684,27 @@ def gh_get(key, path):
         return 0, {}, {"message": str(e)}
 
 
+def spent_until(code, headers, floor=0):
+    """G4.8: the time (epoch) until which GitHub's allowance for this key is spent, else None. GitHub says it two ways:
+    a 403 or 429 with no calls remaining (back at X-RateLimit-Reset), or with Retry-After (back that many seconds
+    on). Below the skill's own floor counts as spent too, until the same reset."""
+    h = {k.lower(): str(v) for k, v in (headers or {}).items()}
+    reset = int(h["x-ratelimit-reset"]) if h.get("x-ratelimit-reset", "").isdigit() else int(time.time()) + 3600
+    if code in (403, 429):
+        if h.get("retry-after", "").isdigit():
+            return int(time.time()) + int(h["retry-after"])
+        if h.get("x-ratelimit-remaining") == "0":
+            return reset
+    left = h.get("x-ratelimit-remaining", "")
+    if floor and left.isdigit() and int(left) < floor:
+        return reset
+    return None
+
+
+def stamp_of(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
 def key_path(p, owner):
     return os.path.join(p["keys"], owner.lower() + ".key")
 
@@ -795,15 +816,15 @@ def list_owner(owner, kind, key, floor=0, info=None):
         if info is not None and page == 1:
             info["expires"] = headers.get("github-authentication-token-expiration") or headers.get(
                 "Github-Authentication-Token-Expiration") or ""
+        until = spent_until(code, headers, floor if next_link(headers) else 0)
+        if until and info is not None:
+            info["spent_until"] = until
+            return None, "GitHub's allowance is spent", calls
         if code == 401:
             return None, (f"GitHub refused the key for {owner} (401): the key stopped working (it may have expired, "
                           f"been narrowed or lost an organisation's approval). Make a new one and run key set {owner}"), calls
         if code != 200 or not isinstance(body, list):
             return None, f"the listing of {owner} failed at page {page} (GitHub answered {code})", calls
-        left = headers.get("X-RateLimit-Remaining") or headers.get("x-ratelimit-remaining")
-        if left is not None and str(left).isdigit() and int(left) < floor and next_link(headers):
-            return None, (f"GitHub's remaining API allowance ({left}) is below the floor ({floor}), so the listing "
-                          f"of {owner} stopped at page {page}"), calls
         repos.extend(r for r in body if r.get("owner", {}).get("login", "").lower() == owner.lower())
         url = next_link(headers)
     return repos, None, calls
@@ -1254,6 +1275,13 @@ def announce_first_copy(p, st, picked, complete):
     st["announced_list"] = names
     save_state(p, st)
 
+
+def spent_line(st):
+    return (f"GitHub's allowance for your keys is spent until {local_time(st['github_wait_until'])}. The sync waits "
+            "until then and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer "
+            "starts the next sync by itself.")
+
+
 def sync(p, args):
     st = load_json(p["state"], {})
     s = load_json(p["settings"], {})
@@ -1264,6 +1292,10 @@ def sync(p, args):
     if not st.get("port") or not os.path.exists(p["mirror_key"]):
         say("Run setup first.")
         return 2
+    wait = epoch_of(st.get("github_wait_until"))
+    if wait > time.time():
+        say(spent_line(st))
+        return 0
     if not owners:
         say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
         return 2
@@ -1288,6 +1320,15 @@ def sync(p, args):
             key = secret(f.read().strip())
         info = {}
         repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), info)
+        if info.get("spent_until"):
+            # G4.8: one line for the whole sync, never a failed project; nothing more is asked of GitHub until the
+            # reset, by this process or any later one (the time is kept in the state, so it survives a restart).
+            st["github_wait_until"] = stamp_of(max(info["spent_until"], epoch_of(st.get("github_wait_until"))))
+            st["last_sync"] = {"at": now_utc(), "calls": calls + n, "copied": 0, "problems": 0,
+                               "stopped": "GitHub's allowance is spent"}
+            save_state(p, st)
+            say(spent_line(st))
+            return 0
         if repos is not None:
             st.setdefault("keys", {})[owner.lower()] = {"expires": info.get("expires", ""), "seen": now_utc()}
         calls += n
@@ -1772,6 +1813,8 @@ def cmd_status(args):
         problems.append(f"something shaped like a key, or a key itself, is in {f}")
     rel = release_check(st, force=getattr(args, "check_release", False))
     save_state(p, st)
+    if epoch_of(st.get("github_wait_until")) > time.time():
+        notes.append(f"github: {spent_line(st)}")
     for x in problems:
         say(f"problem: {x}")
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"

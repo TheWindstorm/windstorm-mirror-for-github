@@ -34,6 +34,8 @@ class FakeGitHub:
         self.repos = {}                       # full_name -> dict as GitHub's API shows it
         self.next_id = 1000
         self.rate_remaining = 5000
+        self.rate_reset = int(time.time()) + 3600      # X-RateLimit-Reset: when the hour's allowance comes back
+        self.limit_answer = None              # (code, retry_after or None): GitHub's "spent" answer, for every keyed GET
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
         self.lfs_uploads = []                 # LFS batch calls that asked to upload (a batch call to download is a read)
@@ -149,7 +151,8 @@ class FakeGitHub:
                 data = json.dumps(body).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("X-RateLimit-Remaining", str(fake.rate_remaining))
+                self.send_header("X-RateLimit-Remaining", str(max(fake.rate_remaining, 0)))
+                self.send_header("X-RateLimit-Reset", str(fake.rate_reset))
                 if fake.scopes is not None:
                     self.send_header("X-OAuth-Scopes", ", ".join(fake.scopes))
                 if fake.expires:
@@ -202,6 +205,13 @@ class FakeGitHub:
                     return self.send_json(401, {"message": "Bad credentials"})
                 if method != "GET":
                     return self.send_json(403, {"message": "the stand-in refuses every writing call"})
+                if fake.limit_answer:
+                    code, after = fake.limit_answer
+                    if after is None:                 # the hour's allowance is spent: GitHub's primary limit
+                        fake.rate_remaining = 0
+                        return self.send_json(code, {"message": "API rate limit exceeded (stand-in)"})
+                    return self.send_json(code, {"message": "You have exceeded a secondary rate limit (stand-in)"},
+                                          {"Retry-After": str(after)})
                 with fake.lock:
                     fake.rate_remaining -= 1
                 q = urllib.parse.parse_qs(u.query)

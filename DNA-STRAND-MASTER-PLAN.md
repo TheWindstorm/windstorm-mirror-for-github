@@ -108,6 +108,16 @@ only in memory, into a local cache, then pushes into stock Gitea with a narrow G
 mirror used this same road for its most important repositories for months. It is also what lets the copy keep
 what GitHub loses.
 
+**GitHub calls, counted from the code** (2026-11-23, for G4.4 and G4.8; the git fetches' cost with a key is not yet
+seen, C4):
+- A sync lists each owner's repositories: 1 REST call per owner per 100 repositories. At the default interval of
+  15 minutes, 100 repositories of one owner cost about 4 calls an hour, against GitHub's 5,000 an hour for a key.
+- The first copy costs the same listing (2 calls with the announcement) plus one git fetch per repository; with
+  no key, git fetches spent no REST calls (C4). Whether the large-file batch calls count is not seen.
+- `status` asks for this skill's latest release once a day, with no key (C11: 60 an hour for the computer).
+- A watcher of the person's own that polls GitHub every few seconds can spend a key's hour in minutes; G4.8 is
+  what the mirror does then.
+
 ## Genes and codons
 
 The whole tool is one script, `scripts/mirror.py`: Python standard library, plus `git` and the Gitea binary.
@@ -164,10 +174,11 @@ reaches several owners, and a classic key that can read private repositories can
 | G4.1 | A timer runs `sync` every 15 minutes by default (a setting); after the person's go, the first copy can run from it in the background, and `status` (G6.5) shows how far it is. After a reboot, `status` reads the timer's next run, not only whether it is switched on. | `test_G4_1_a_timer_runs_sync_and_status_reads_its_next_run` |
 | G4.2 | Every fetch and push has a time limit and one retry. One slow or broken repository never holds up the rest: it is named, and the others carry on. | `test_G4_2_one_slow_repository_never_holds_up_the_rest` |
 | G4.3 | Only one sync runs at a time. A second one started meanwhile says so and exits. A lock whose owner is gone is taken over and noted. | `test_G4_3_one_sync_at_a_time` |
-| G4.4 | A sync counts its GitHub API calls. It stops listing, and says so, when GitHub's remaining allowance falls below a floor (a setting). | `test_G4_4_a_sync_spends_few_api_calls_and_stops_above_a_floor` |
+| G4.4 | A sync counts its GitHub API calls. It stops listing when GitHub's remaining allowance falls below a floor (a setting), and says it as spent until the reset (G4.8). | `test_G4_4_a_sync_spends_few_api_calls_and_stops_above_a_floor` |
 | G4.5 | Before each sync the free disk space is checked against a floor (a setting). Below it, the sync does not start, and `status` says why. A sync stopped part-way leaves every copy as it was, or as it fully became, and never marks a half-done copy current. | `test_G4_5_a_full_disk_stops_the_sync_cleanly` |
 | G4.7 | The sync timer counts from the start of the person's own service manager (`OnStartupSec`), never from the boot alone: with lingering it runs 2 minutes after boot, and without it 2 minutes after the person logs in, however late. After a restart it always has a next run. | `test_G4_7_after_a_restart_the_timer_always_has_a_next_run` |
 | G4.6 | A sync fetches only what changed. It reads each repository's `pushed_at` from the listing it already made (G3.1), and fetches only the repositories whose `pushed_at` is newer than their last good refresh. A full pass, once a day by default (a setting), fetches every repository, so a change the listing did not show cannot hide for more than a day. A quiet sync costs one listing call per 100 repositories per owner and no fetch. For a person with 300 repositories and two organisations of fewer than 100 each, that is 5 calls; at one sync every 15 minutes, 20 calls an hour, against GitHub's 5,000. `status` shows the calls the last sync spent. | `test_G4_6_a_sync_fetches_only_what_changed_and_a_daily_pass_fetches_all` |
+| G4.8 | GitHub's allowance is shared with everything else the person runs with their keys. When GitHub says it is spent (a 403 or 429 with no calls remaining, back at `X-RateLimit-Reset`; or with `Retry-After`), or it falls below the floor, the sync stops before copying and says one line with the reset in the person's own time. The reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart. No project is marked failed, every copy is as it was, and `status` says the wait (M25). | `test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project` |
 
 ### G5 Keep what GitHub loses
 
