@@ -1340,18 +1340,81 @@ class G4(unittest.TestCase):
             before = {f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}
             w.gh.rate_remaining = 450                  # below the floor of 500
             rc, out = w.sync()
-            self.assertEqual(rc, 1, out)
-            self.assertIn("GitHub's remaining API allowance (449) is below the floor (500), so the listing of someone "
-                          "stopped at page 1", out)
-            self.assertIn("0 copied now", out)
-            self.assertIn("1 GitHub API call(s)", out)
+            self.assertEqual(rc, 0, out)               # G4.8: below the floor is said as spent, until the reset
+            self.assertIn("GitHub's allowance for your keys is spent until", out)
             self.assertNotIn("gone from GitHub", out)
+            self.assertNotIn("cannot refresh", out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual(st["last_sync"]["calls"], 1)
+            self.assertEqual(st["github_wait_until"], mirror.stamp_of(w.gh.rate_reset))
             self.assertEqual({f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(5)}, before)
+            st["github_wait_until"] = mirror.stamp_of(time.time() - 1)     # the reset has come
+            mirror.save_state(w.p, st)
             put_settings(w.p, api_floor=100)           # the floor is a setting
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertIn("3 GitHub API call(s)", out)
             self.assertIn("3 GitHub API call(s)", quiet(mirror.main, ["status"])[1])
+
+    def test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project(self):
+        """GitHub's allowance is shared with everything else the person runs with their keys (a lane once spent the
+        fleet's in minutes). Both of GitHub's ways of saying "spent" become one line with the reset in the person's
+        own time; nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project
+        is marked as failed, and every copy is as it was."""
+        with World(self) as w:
+            for i in range(3):
+                w.gh.add_repo("someone", f"r{i}")
+                w.gh.commit(f"someone/r{i}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            before = {f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(3)}
+            w.gh.commit("someone/r0", {"b": b"2"})
+            line = "GitHub's allowance for your keys is spent until {}. The sync waits until then"
+            # 1. The hour's allowance is spent: a 403 with no calls remaining, back at X-RateLimit-Reset.
+            w.gh.limit_answer = (403, None)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            until = mirror.stamp_of(w.gh.rate_reset)
+            self.assertIn(line.format(mirror.local_time(until)), out)
+            self.assertIn("every copy is as it was", out)
+            self.assertNotIn("problem:", out)
+            st = mirror.load_json(w.p["state"], {})
+            self.assertEqual(st["github_wait_until"], until)
+            self.assertFalse([r for r in st["repos"].values() if r.get("problem")], "a project was marked failed")
+            self.assertEqual({f"r{i}": w.forge_refs(f"someone--r{i}") for i in range(3)}, before)
+            out = quiet(mirror.main, ["status"])[1]
+            self.assertIn("github: " + line.format(mirror.local_time(until)), out)
+            self.assertNotIn("problem:", out)
+            # 2. Nothing is asked of GitHub before the reset, even when it would answer again.
+            w.gh.limit_answer = None
+            asked = len(w.gh.log)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(line.format(mirror.local_time(until)), out)
+            self.assertEqual(len(w.gh.log), asked, "GitHub was asked before the reset")
+            # 3. Nor by a fresh process: the timer's own run after a restart of the service or the computer.
+            r = subprocess.run([sys.executable, "-I", w.p["script"], "sync", "--from-timer"], env=dict(os.environ),
+                               capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("spent until", r.stdout)
+            self.assertEqual(len(w.gh.log), asked, "a fresh process asked GitHub before the reset")
+            # 4. At the reset, the sync runs again and copies what waited.
+            st = mirror.load_json(w.p["state"], {})
+            st["github_wait_until"] = mirror.stamp_of(time.time() - 1)
+            mirror.save_state(w.p, st)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertRegex(out, r"[1-9]\d* copied now")
+            self.assertNotEqual(w.forge_refs("someone--r0"), before["r0"], "what waited was not copied at the reset")
+            # 5. GitHub's other way: a 429 with Retry-After, back that many seconds on.
+            w.gh.limit_answer = (429, 600)
+            t0 = time.time()
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("spent until", out)
+            wait = mirror.epoch_of(mirror.load_json(w.p["state"], {})["github_wait_until"])
+            self.assertTrue(t0 + 590 <= wait <= time.time() + 610, wait - t0)
+            self.assertNotIn("problem:", quiet(mirror.main, ["status"])[1])
 
     def test_G4_5_a_full_disk_stops_the_sync_cleanly(self):
         with World(self) as w:
