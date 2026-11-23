@@ -377,6 +377,28 @@ class G1(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(req, timeout=10)
             self.assertEqual(e.exception.code, 403)
+            # Actions are off for the whole forge (C10). A project's Actions cannot be turned on, even when asked,
+            # and the runner service is not served at all, so no runner can join, even holding a registration
+            # token (this Gitea still hands one out). With only [actions] ENABLED=true, the same Ping answers 200,
+            # a runner registers and has_actions turns on (research log of 2026-11-23).
+            def send(method, path, data, auth=True):
+                r = urllib.request.Request(base + path, method=method, data=json.dumps(data).encode(),
+                                           headers={"Content-Type": "application/json",
+                                                    **({"Authorization": f"token {key}"} if auth else {})})
+                try:
+                    with urllib.request.urlopen(r, timeout=10) as resp:
+                        return resp.status, json.loads(resp.read().decode() or "null")
+                except urllib.error.HTTPError as err:
+                    return err.code, None
+            user = json.loads(http_get(base + "/api/v1/user", key)[2])["login"]
+            self.assertEqual(send("POST", "/api/v1/user/repos", {"name": "c10", "private": True})[0], 201)
+            code, repo = send("PATCH", f"/api/v1/repos/{user}/c10", {"has_actions": True})
+            self.assertEqual(code, 200)
+            self.assertFalse(repo["has_actions"], "a project's Actions could be turned on")
+            for svc, body in (("ping.v1.PingService/Ping", {"data": "x"}),
+                              ("runner.v1.RunnerService/Register", {"name": "r", "token": "x", "labels": ["x"]})):
+                self.assertEqual(send("POST", "/api/actions/" + svc, body, auth=False)[0], 404,
+                                 f"the forge serves the runner service ({svc})")
             # Every start checks the port: a taken port is said, and the forge does not start.
             out = subprocess.run([sys.executable, "-I", p["script"], "run-forge"], env=dict(os.environ),
                                  capture_output=True, text=True, timeout=30)
