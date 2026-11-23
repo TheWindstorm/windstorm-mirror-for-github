@@ -3104,12 +3104,23 @@ class Strand(unittest.TestCase):
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
         to_build = set(re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", plan))
         real = set(collected_tests())
-        codon_tests = {n for n in real if re.match(r"test_(?:G|INV)", n)}
+        codon_tests = {n for n in real if re.match(r"test_(?:G|INV|T\d)", n)}
         self.assertEqual(to_build & real, set(), "a test marked 'to build' exists: remove the mark")
         if to_build:
             self.assertEqual(version(), "0.0.0", "a proof may be marked 'to build' only while nothing is released")
         self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
         self.assertEqual(codon_tests - named, set(), "tests with no codon in the plan")
+
+    def test_T3_a_commits_checks_run_once(self):
+        """M43 (the family's rule 17, 2026-11-23): one stack of pull requests queued 17 runs, each commit twice,
+        because the workflow ran on every push and every pull request. It runs on pull requests, and on pushes
+        only to main and release-*."""
+        wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
+        on = re.search(r"^on:\n((?:[ #].*\n)+)", wf, re.M)
+        self.assertIsNotNone(on, "the workflow's triggers are not a block of their own")
+        block = re.sub(r"#.*", "", on.group(1))
+        self.assertEqual([l.strip() for l in block.splitlines() if l.strip()],
+                         ["pull_request:", "push:", "branches: [main, 'release-*']"])
 
     def test_the_gate_refuses_every_way_a_test_can_hide(self):
         """M19: one real test, hidden each way a sister lane found, in a throwaway copy of the suite. The gate

@@ -1,5 +1,9 @@
 name: tests
-on: [push, pull_request]
+# T3: a commit's checks run once: on pull requests, and on pushes only to main and release-* (the family's rule 17).
+on:
+  pull_request:
+  push:
+    branches: [main, 'release-*']
 permissions:
   contents: read
 jobs:

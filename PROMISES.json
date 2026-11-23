@@ -681,6 +681,22 @@
    "exception": "By the owner's word, 2026-11-23: the real read can only happen once the 0.1.0 release exists, so it is seen right after the tag and before the catalog is pinned to it, on a stock virtual machine, as a step of the release; if it fails, the catalog is not pinned until it is understood.",
    "seen": "2026-11-23, the owner's ruling on row M13: before 0.1.0 there is no newer release to move to, so on the day people first depend on self-update, what can be seen is its read of the real release.",
    "promise": "self-update on the latest release reads it with no key and says there is nothing newer, with the checksum of mirror.py the release names and whether this very file matches it; on a mismatch it changes nothing and names Claude Code's own plugin update, then setup."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M43",
+   "codon": "T3",
+   "test": "test_T3_a_commits_checks_run_once",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "#66",
+   "seen": "2026-11-23, one stack of pull requests queued 17 workflow runs, each commit twice (a push run and a pull-request run), so the Mac jobs waited for hours and every run read the shared login.",
+   "promise": "The workflow runs on pull requests, and on pushes only to main and release-*: each commit's checks run once."
   }
  ],
  "declined": []
