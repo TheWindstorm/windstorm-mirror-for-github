@@ -184,7 +184,7 @@
    "ship_in": "0.1.0",
    "test": "test_G4_1_a_timer_runs_sync_and_status_reads_its_next_run",
    "stand_in": "the service manager (a stand-in for systemctl's answers after a reboot)",
-   "proven": "",
+   "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255: after a reboot with lingering on, with nobody logged in, the person's service manager ran and the timer's next run was 2 minutes after the boot; `status` then said 'next sync' with that time.",
    "issue": "",
    "moved_why": "",
    "moved_by_person": ""
@@ -304,7 +304,7 @@
    "ship_in": "0.1.0",
    "test": "test_G4_7_after_a_restart_the_timer_always_has_a_next_run",
    "stand_in": "the service manager (the timer's text is read, not run by systemd or launchd)",
-   "proven": "",
+   "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255: after a reboot with lingering on, the next run was 2 minutes after the boot, with nobody logged in; after a reboot with lingering off, the person's service manager did not run before they logged in, and at their login the next run was 2 minutes later.",
    "issue": "#18",
    "moved_why": "",
    "moved_by_person": ""
@@ -319,7 +319,7 @@
    "ship_in": "0.1.0",
    "test": "test_G6_7_a_next_run_on_the_boot_clock_is_a_next_run",
    "stand_in": "the service manager (a stand-in for systemctl's next-run answers on either clock)",
-   "proven": "",
+   "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255, partial: three times (after setup, after a reboot with lingering on, at a login with it off) systemd's wall-clock field was empty and `status` read the next run from the boot clock. The wall-clock answer was not met: this timer keeps its runs on the boot clock.",
    "issue": "#19",
    "moved_why": "",
    "moved_by_person": ""
@@ -334,7 +334,7 @@
    "ship_in": "0.1.0",
    "test": "test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded",
    "stand_in": "the system (a stand-in for where git and git lfs are found)",
-   "proven": "",
+   "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255: with git removed, `setup --dry-run` and `setup --linger` each said git is not installed and how to install it, ended with exit 2 and made no folder; with git back and no git lfs, the dry run named git lfs as missing.",
    "issue": "#20",
    "moved_why": "",
    "moved_by_person": ""
@@ -349,7 +349,7 @@
    "ship_in": "0.1.0",
    "test": "test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it",
    "stand_in": "the service manager (stand-ins for loginctl's and polkit's answers)",
-   "proven": "",
+   "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255, polkit 124: the dry run said lingering in plain words and that this computer lets the person switch it on; `setup` with no choice stopped with 'Needs you' and made nothing; `setup --linger` switched it on with no prompt and recorded that setup did. The other three answers of this computer (refused, administrator only, no pkcheck) and the no-prompt check at a real terminal were seen the same day on a stock virtual machine at 1a5393b.",
    "issue": "#21",
    "moved_why": "",
    "moved_by_person": ""
