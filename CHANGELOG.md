@@ -3,6 +3,7 @@
 ## Unreleased
 
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.
+- G1.15 (row M50, #89): a first copy and restore --check on a Mac are owed before 0.1.0; until they are seen, the README says so.
 - G1.14 (row M51, #87): the tool names how to install git and git lfs for this computer only (Ubuntu, Debian, Fedora, or a Mac), each line run exactly as printed on that system; any other system gets the program's own page.
 - G5.5 (row M52, #85): with no road to GitHub, the tool says "GitHub could not be reached" (it said "GitHub answered 0"), and `key set` no longer says a key cannot see an owner when GitHub did not answer or failed.
 - G4.4 and G4.8 (rows M9 and M25, #83): under the floor the sync keeps, it says how much is left and the floor, and "spent" only when GitHub says so. A real machine was told "spent" with 4755 calls left.
