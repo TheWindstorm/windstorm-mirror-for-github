@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G10.12 (row M56): an exception, and a ruling in public text, says whose word it was by role: an exception begins "By the maintainer's word, " or "By the owner's word, ", and the promise file says who may move each; M13, M42 and three changelog lines now say "the maintainer's", which is whose word they were.
 - G9.6 (row M55): after Claude Code's own plugin uninstall, `status` and each sync say the plugin was removed, with the one command that takes the mirror off; nothing runs from a folder Claude Code set aside.
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.
 - G4.8 (row M25, #94): while the sync waits for GitHub's reset, `status` does not make its daily release read either.
@@ -16,10 +17,10 @@
 - G3.10: a page size that only tests and labs set (`WSM_PAGE_SIZE`), so paging can be seen on a real owner with few repositories. People never need it.
 - G10.11 (row M46, #73): the cold starts are the skill's first evals, written as a case with ten graders, with the record of the five runs so far.
 - G10.10 (row M45, #71): public text names roles, never our own labels; a test holds it.
-- Row M21 (G6.7) reworded, by the owner's word: `status` reads the timer's next run from the boot clock, the clock setup's timer keeps it on; the wall-clock answer only a hand-edited unit could give is read as a guard, not promised. Seen on a stock virtual machine.
+- Row M21 (G6.7) reworded, by the maintainer's word: `status` reads the timer's next run from the boot clock, the clock setup's timer keeps it on; the wall-clock answer only a hand-edited unit could give is read as a guard, not promised. Seen on a stock virtual machine.
 - G10.9 (row M44, #68): one version in every place: the manifest, the script, the changelog's heading and the repository's own catalog entry.
 - T3 (row M43, #66): the tests run once per commit: on pull requests, and on pushes only to main and release branches.
-- G9.5 (row M42, #64): `self-update` on the latest release says so with the checksum of mirror.py that the release names, and whether this file matches it; on a mismatch it changes nothing and names Claude Code's own plugin update, then setup. A real move to a newer version (row M13) is first seen at 0.1.1: there is no newer release before 0.1.0. A promise row can now carry a named exception, set only by the owner's word, when its real sighting can only come after the tag.
+- G9.5 (row M42, #64): `self-update` on the latest release says so with the checksum of mirror.py that the release names, and whether this file matches it; on a mismatch it changes nothing and names Claude Code's own plugin update, then setup. A real move to a newer version (row M13) is first seen at 0.1.1: there is no newer release before 0.1.0. A promise row can now carry a named exception, set only by the maintainer's word or the owner's, when its real sighting can only come after the tag.
 - G9.4 (row M41, #61): leaving is never refused. `uninstall` waits for a running sync and says which one; the last thing it prints says what is gone now and what is kept (your copies, and the record of what the skill did); run twice, it is safe and makes nothing again. The README says that Claude Code's own plugin uninstall leaves the forge and the timer running, and the one command that takes them off.
 - T2 (row M40, #59): every promise row says what its test stands in for, or none, and a release branch's tests refuse a row that leans on a stand-in while no real machine has proven it. 24 of the 40 rows lean on one.
 - G1.13 (row M39, #57): a Mac is written as what it was. The Mac's git line now names Apple's developer tools and Apple's command for them, and no longer describes what that command shows on a Mac without them, which we have not seen. The Mac sighting under "Seen to work" says it was the Mac's own main account, on a Mac that carries the developer tools, with two stand-in launch agents.
@@ -47,7 +48,7 @@
   - G1.9: lingering is said in plain words before setup, asked of this computer through polkit with three answers and never a password prompt, recorded when setup switches it on, and switched off by `uninstall` only then. `setup --no-linger` leaves it off and says the mirror then syncs only while the person is logged in.
   - G1.10: setup says the forge runs only once it answers.
   - INV6 names pkcheck, added for G1.9's dry run.
-- Where only the skill's words stood, the tool now carries the person's step (the plan owner's ruling before the first cold-start proof):
+- Where only the skill's words stood, the tool now carries the person's step (the maintainer's ruling before the first cold-start proof):
   - G1.9: on Linux with lingering off, plain `setup` changes nothing until the person has chosen, `setup --linger` or `setup --no-linger`. A no is kept.
   - G9.3: `uninstall --delete-copies` reads the number of copies only at a terminal; piped in, even the right number is refused, before anything is removed.
   - G1.8: setup checks that git is where the forge's service and the sync timer look, not only in the shell's PATH.

@@ -7,7 +7,7 @@
   "'ship_in' moves only with a reason in 'moved_why'. A row whose owner is 'person' was seen by the person the skill is for, on their own machine: its date moves only by their word, restated in 'moved_by_person'.",
   "A row is never deleted. A promise that turns out wrong is closed by a row that says why.",
   "A lesson that was heard and not taken goes under 'declined' with the reason, so that nothing is dropped without a word.",
-  "'exception' is empty, except by the owner's word: a row due in a version, leaning on a stand-in, that can only be seen for real after the tag (or waits on something only the owner can give) says here, in his words, why, and when it is seen. Its version may then be tagged before 'proven' is filled; the version after it still needs 'proven'."
+  "'exception' is empty, except by the maintainer's word or the owner's: a row due in a version, leaning on a stand-in, that can only be seen for real after the tag (or waits on something only the owner can give) says here, in the words of whoever set it, why, and when it is seen. It begins \"By the maintainer's word, \" or \"By the owner's word, \" and says whose word it really was: the owner is the person whose project this is, the maintainer is who rules day to day; an owner's exception is moved only by the owner, a maintainer's by the maintainer or the owner. Its version may then be tagged before 'proven' is filled; the version after it still needs 'proven'."
  ],
  "rows": [
   {
@@ -214,7 +214,7 @@
    "stand_in": "GitHub (a stand-in's releases and downloads)",
    "proven": "",
    "issue": "",
-   "moved_why": "By the owner's word, 2026-11-23: a real move to a newer version needs a newer release, and there is none before 0.1.0; the tool reads releases with no key, so a private rehearsal cannot stand in. Its real proof is the first real update, 0.1.0 to 0.1.1, on a stock virtual machine, before 0.1.1 is announced. What 0.1.0 does promise of self-update is row M42.",
+   "moved_why": "By the maintainer's word, 2026-11-23: a real move to a newer version needs a newer release, and there is none before 0.1.0; the tool reads releases with no key, so a private rehearsal cannot stand in. Its real proof is the first real update, 0.1.0 to 0.1.1, on a stock virtual machine, before 0.1.1 is announced. What 0.1.0 does promise of self-update is row M42.",
    "moved_by_person": "",
    "exception": ""
   },
@@ -678,8 +678,8 @@
    "test": "test_G9_5_self_update_on_the_latest_release_says_so_with_the_checksum_it_read",
    "stand_in": "GitHub (a stand-in's latest release)",
    "issue": "#64",
-   "exception": "By the owner's word, 2026-11-23: the real read can only happen once the 0.1.0 release exists, so it is seen right after the tag and before the catalog is pinned to it, on a stock virtual machine, as a step of the release; if it fails, the catalog is not pinned until it is understood.",
-   "seen": "2026-11-23, the owner's ruling on row M13: before 0.1.0 there is no newer release to move to, so on the day people first depend on self-update, what can be seen is its read of the real release.",
+   "exception": "By the maintainer's word, 2026-11-23: the real read can only happen once the 0.1.0 release exists, so it is seen right after the tag and before the catalog is pinned to it, on a stock virtual machine, as a step of the release; if it fails, the catalog is not pinned until it is understood.",
+   "seen": "2026-11-23, the maintainer's ruling on row M13: before 0.1.0 there is no newer release to move to, so on the day people first depend on self-update, what can be seen is its read of the real release.",
    "promise": "self-update on the latest release reads it with no key and says there is nothing newer, with the checksum of mirror.py the release names and whether this very file matches it; on a mismatch it changes nothing and names Claude Code's own plugin update, then setup."
   },
   {
@@ -889,6 +889,22 @@
    "issue": "",
    "seen": "2026-11-23, a sister skill, on a stock virtual machine with Claude Code 2.1.280 and 2.1.330: Claude Code's own plugin uninstall emptied the plugin's row in its list of installed plugins and marked the plugin's folder as set aside, and a launcher of that skill went on running the uninstalled code from that folder every five minutes. A person may leave by that road and never run the skill's own uninstall.",
    "promise": "After Claude Code's own plugin uninstall the mirror goes on, because it is the thing the person set up, and status and each sync say the plugin was removed, with the one command that takes the mirror off. 'Removed' only when Claude Code's list of installed plugins was read and names the plugin nowhere; a list that could not be read, or none, is never 'removed'. Nothing runs from a folder Claude Code set aside: every command run from one stops, does nothing, and names the copy setup made."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M56",
+   "codon": "G10.12",
+   "test": "test_G10_12_a_ruling_says_whose_word_it_was_by_role",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "",
+   "seen": "2026-11-23: the rows' exceptions and moved dates all read \"by the owner's word\", while every one of them was set by the maintainer; the family's rule 18 grew the same day to cover every public text, and its principle 9 is to say only what is true.",
+   "promise": "An exception, and a ruling in any public text, says whose word it really was, by role: an exception begins \"By the maintainer's word, \" or \"By the owner's word, \" and nothing else lets a version be tagged before its row is proven; the promise file says in one sentence who may move each; public text never pins a ruling to a person's name or our own labels."
   }
  ],
  "declined": []

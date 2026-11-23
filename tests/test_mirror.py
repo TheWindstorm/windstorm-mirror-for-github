@@ -2759,7 +2759,7 @@ class G9(unittest.TestCase):
             self.assertIn("os.replace(tmp, target)", inspect.getsource(mirror.cmd_self_update))
 
     def test_G9_5_self_update_on_the_latest_release_says_so_with_the_checksum_it_read(self):
-        """The owner's ruling on M13 (2026-11-23): before 0.1.1 there is no newer release to move to, so what is
+        """The maintainer's ruling on M13 (2026-11-23): before 0.1.1 there is no newer release to move to, so what is
         seen at the 0.1.0 release is the read: self-update on the latest release reads it with no key and says
         there is nothing newer, with the checksum the release names, checked against this very file."""
         own = hashlib.sha256(fread_bytes(SCRIPT)).hexdigest()
@@ -3210,7 +3210,10 @@ class G10(unittest.TestCase):
     def test_G10_10_public_text_names_roles_never_our_own_labels(self):
         """The family's rule 18: public text names kinds and roles ('another program sharing the login', 'a sister
         skill'), never our own labels for how we work. The words are built here so this file does not hold them."""
-        ours = [re.compile(r"\b" + w + r"\b", re.I) for w in ("la" + "nes?", "fl" + "eet", "test-" + "now", "board-" + "say")]
+        ours = [re.compile(r"\b" + w + r"\b", re.I) for w in ("la" + "nes?", "fl" + "eet", "test-" + "now", "board-" + "say",
+                                                           "bo" + "ss", "(?:his|her) (?:words?|rulings?)", "ve" + "ron",
+                                                           "her" + "dr", "(?:windy|kit) ?0")]
+        ours += [re.compile(r"\b" + w + r"\b") for w in ("Gr" + "ant", "Ru" + "ss", "Al" + "ex", "Bi" + "ll")]   # names
         files = subprocess.run(["git", "-C", ROOT, "ls-files"], capture_output=True, text=True).stdout.split()
         if not files:                                  # a copy with no .git (a test box): every file but caches
             files = [os.path.relpath(os.path.join(d, n), ROOT) for d, ds, ns in os.walk(ROOT)
@@ -3228,6 +3231,29 @@ class G10(unittest.TestCase):
                 if any(p.search(line) for p in ours):
                     found.append(f"{name}:{n}")
         self.assertEqual(found, [])
+
+    def test_G10_12_a_ruling_says_whose_word_it_was_by_role(self):
+        """M56 (the family's rule 18 and principle 9, 2026-11-23): a ruling says whose word it really was, by role.
+        The owner is the person whose project this is; the maintainer is who rules day to day. An exception begins
+        with one of the two and nothing else lets a version be tagged before its row is proven; the promise file says
+        who may move each."""
+        rows = jload(os.path.join(ROOT, "PROMISES.json"))
+        made_up = {"id": "X1", "ship_in": "0.1.0", "stand_in": "GitHub", "proven": ""}
+        for named in ("By the maintainer's word, 2026-11-23: why, and when.", "By the owner's word, 2026-11-23: why."):
+            self.assertEqual(stand_ins_unproven([dict(made_up, exception=named)], v("0.1.0")), [], named)
+        for not_named in ("By the owner's word", "By h" + "is word, why.", "By a la" + "ne's word, why.", "why, and when.", " "):
+            self.assertEqual(stand_ins_unproven([dict(made_up, exception=not_named)], v("0.1.0")), ["X1"], not_named)
+        for r in rows["rows"]:
+            for k in ("exception", "moved_why"):
+                if r.get(k) and r[k].startswith("By "):
+                    self.assertTrue(exception_named(r[k]), f"{r['id']} {k}: say whose word it was, by role")
+        for k in ("M13", "M42"):
+            r = next(x for x in rows["rows"] if x["id"] == k)
+            self.assertTrue((r["moved_why"] or r["exception"]).startswith("By the maintainer's word, "), k)
+        rule = next(x for x in rows["how_to_use"] if x.startswith("'exception'"))
+        for w in WHOSE_WORD:
+            self.assertIn(f'"{w}"', rule)
+        self.assertIn("an owner's exception is moved only by the owner, a maintainer's by the maintainer or the owner", rule)
 
     def test_G10_11_the_cold_starts_are_the_first_evals_as_cases(self):
         """The family's rule 13: the cold-start runs, written as cases, are the first evals. Each case loads in
@@ -3442,7 +3468,15 @@ time.sleep(600)
 def stand_ins_unproven(rows, at):
     """T2: the rows due at version `at` whose test leans on a stand-in and that no real machine has proven."""
     return [r["id"] for r in rows if v(r["ship_in"]) <= at and r.get("stand_in", "none") != "none"
-            and not r.get("proven") and not r.get("exception")]
+            and not r.get("proven") and not exception_named(r.get("exception"))]
+
+
+WHOSE_WORD = ("By the maintainer's word, ", "By the owner's word, ")
+
+
+def exception_named(text):
+    """M56: an exception counts only when it says whose word it was, by role, and something after it."""
+    return any((text or "").startswith(w) and len(text) > len(w) for w in WHOSE_WORD)
 
 class Promises(unittest.TestCase):
     """PROMISES.json holds what real machines, and the people using them, showed must change, and the version
@@ -3507,11 +3541,8 @@ class Promises(unittest.TestCase):
         self.assertEqual(stand_ins_unproven([made_up], v("0.0.0")), [])
         self.assertEqual(stand_ins_unproven([dict(made_up, proven="2026-11-23, a stock VM")], v("0.1.0")), [])
         self.assertEqual(stand_ins_unproven([dict(made_up, stand_in="none")], v("0.1.0")), [])
-        # A named exception, by the owner's word only, lets the tag go before the real sighting.
-        self.assertEqual(stand_ins_unproven([dict(made_up, exception="By the owner's word, ...")], v("0.1.0")), [])
-        for r in self.rows:
-            if r.get("exception"):
-                self.assertTrue(r["exception"].startswith("By the owner's word, "), f"{r['id']}: an exception is the owner's")
+        # A named exception, by the maintainer's word or the owner's (M56), lets the tag go before the real sighting.
+        self.assertEqual(stand_ins_unproven([dict(made_up, exception="By the maintainer's word, ...")], v("0.1.0")), [])
         unproven = stand_ins_unproven(self.rows, self.version)
         self.assertEqual(unproven, [], f"{version()} cannot be tagged: these rows lean on a stand-in and no real "
                                        "machine has proven them yet (see each row's stand_in)")
