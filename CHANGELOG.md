@@ -3,6 +3,7 @@
 ## Unreleased
 
 - T4 (row M54, #96): a pull request runs one Mac job; the full Mac matrix runs on main and release-*; a newer push to a pull request cancels its older runs.
+- G3.10: a page size that only tests and labs set (`WSM_PAGE_SIZE`), so paging can be seen on a real owner with few repositories. People never need it.
 - G10.11 (row M46, #73): the cold starts are the skill's first evals, written as a case with ten graders, with the record of the five runs so far.
 - G10.10 (row M45, #71): public text names roles, never our own labels; a test holds it.
 - Row M21 (G6.7) reworded, by the owner's word: `status` reads the timer's next run from the boot clock, the clock setup's timer keeps it on; the wall-clock answer only a hand-edited unit could give is read as a guard, not promised. Seen on a stock virtual machine.
