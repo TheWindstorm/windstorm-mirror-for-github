@@ -1570,8 +1570,11 @@ class G4(unittest.TestCase):
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)               # G4.8: below the floor the sync waits for the reset, and says
             st = mirror.load_json(w.p["state"], {})    # what it is, never "spent" (a real machine was told so, M9)
-            self.assertIn("GitHub's allowance for your keys is down to 450, under the floor of 500 this skill keeps, "
-                          "so the sync waits until " + mirror.local_time(st["github_wait_until"]), out)
+            m = re.search(r"GitHub's allowance for your keys is down to (\d+), under the floor of 500 this skill keeps, "
+                          r"so the sync waits until (.+?) and asks GitHub nothing before it", out)
+            self.assertTrue(m, out)
+            self.assertLess(int(m.group(1)), 500)     # what GitHub said was left (the stand-in counts down per call)
+            self.assertEqual(m.group(2), mirror.local_time(st["github_wait_until"]))
             self.assertNotIn("spent", out)
             self.assertNotIn("spent", quiet(mirror.main, ["status"])[1])
             self.assertNotIn("gone from GitHub", out)
