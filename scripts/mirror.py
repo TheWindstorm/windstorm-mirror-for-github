@@ -764,7 +764,8 @@ def list_owner(owner, kind, key, floor=0, info=None):
             info["expires"] = headers.get("github-authentication-token-expiration") or headers.get(
                 "Github-Authentication-Token-Expiration") or ""
         if code == 401:
-            return None, f"GitHub refused the key for {owner} (401)", calls
+            return None, (f"GitHub refused the key for {owner} (401): the key stopped working (it may have expired, "
+                          f"been narrowed or lost an organisation's approval). Make a new one and run key set {owner}"), calls
         if code != 200 or not isinstance(body, list):
             return None, f"the listing of {owner} failed at page {page} (GitHub answered {code})", calls
         left = headers.get("X-RateLimit-Remaining") or headers.get("x-ratelimit-remaining")

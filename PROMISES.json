@@ -334,7 +334,7 @@
   {
    "id": "M24",
    "seen": "2026-11-23, a test that fails every read of GitHub and of the forge in turn, with the real pinned Gitea: one failed forge API read (a single 500) made sync take the live copy for an older one, move it aside and make a new copy; restore said a copy was not in the forge, or did not exist, when the read had only failed; and the first copy would be announced as 0 repositories when an owner's list could not be read. The family's rule came after a sister skill took GitHub's 502 for 'not listed' and an uninstall deleted everything.",
-   "promise": "A read that failed is 'could not be read', never a no: on a failed read of GitHub or of the forge nothing is deleted, renamed, made, moved to kept/, marked or said gone, and no owner is announced as having 0 repositories.",
+   "promise": "A read that failed is 'could not be read', never a no: on a failed read of GitHub or of the forge nothing is deleted, renamed, made, moved to kept/, marked or said gone, and no owner is announced as having 0 repositories. GitHub's 404 on a private project (deleted, or no longer visible to the key) is never taken for 'gone': only a list read that succeeded with the same key and no longer names the project says gone, and the copy is kept; a refused key is said as a key that stopped working, with the step to make a new one.",
    "codon": "G5.4",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
