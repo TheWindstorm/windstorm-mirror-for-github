@@ -246,6 +246,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G10.7 | The order is given so plainly that the person is never sent to a step that refuses: setup first, then each `key set`; the refusal's own line names the one next step (M36). | `test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step` |
 | G10.8 | The agent reaches GitHub through the tool only: SKILL.md says it never tries the person's own git, SSH or gh for GitHub, and why (their own login reaches every repository they can, beyond the one read-only key) (M37). | `test_G10_8_the_agent_reaches_github_through_the_tool_only` |
 | G10.9 | One version in every place it is written: the manifest, the script, the changelog's first heading ("Unreleased" only at 0.0.0, otherwise the version, with the date once released) and this repository's own catalog entry (the family's rule 10; M44). | `test_G10_9_one_version_in_every_place` |
+| G10.10 | Public text names kinds and roles, never our own labels for how we work; a test scans every tracked file, the family's copyright notice aside (the family's rule 18; M45). | `test_G10_10_public_text_names_roles_never_our_own_labels` |
 
 ## Milestones
 

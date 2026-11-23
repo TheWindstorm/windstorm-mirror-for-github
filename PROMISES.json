@@ -396,7 +396,7 @@
   },
   {
    "id": "M25",
-   "seen": "2026-11-23 (about 12:00 AM ET): a lane on the fleet's shared GitHub login polled every 3 s, spent the hour's allowance, and every lane was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
+   "seen": "2026-11-23 (about 12:00 AM ET): another program sharing one GitHub login polled every 3 s, spent the hour's allowance, and everything using that login was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
    "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time; the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
    "codon": "G4.8",
    "owner": "maintainer",
@@ -713,6 +713,22 @@
    "issue": "#68",
    "seen": "2026-11-23, the repository read against the family's rule 10: the script and the manifest were held equal by a test, but the changelog's heading was not (the release branch still said 'Unreleased'), and the repository's own catalog entry named no version.",
    "promise": "One version in the manifest, the script, the changelog's first heading ('Unreleased' only at 0.0.0) and the repository's own catalog entry, held by a test."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M45",
+   "codon": "G10.10",
+   "test": "test_G10_10_public_text_names_roles_never_our_own_labels",
+   "stand_in": "none",
+   "exception": "",
+   "issue": "#71",
+   "seen": "2026-11-23, the repository read against the family's rule 18: one row's 'seen' text and two test docstrings named where something happened by our own internal words for it, not by a role.",
+   "promise": "Public text names kinds and roles, never our own labels for how we work; a test scans every tracked file (the family's copyright notice aside)."
   },
   {
    "owner": "maintainer",
