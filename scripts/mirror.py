@@ -621,8 +621,8 @@ def service_path():
 # alone fails on a fresh Ubuntu or Debian image (stale or no package lists), so it starts with apt update.
 INSTALL_GIT = ("on Ubuntu or Debian: sudo apt update && sudo apt install git; "
                "on Fedora: sudo dnf install git; "
-               "on a Mac: xcode-select --install, which opens Apple's own installer for the command-line tools "
-               "and needs you at the screen")
+               # G1.13: a Mac is written as what was seen; what this shows on a Mac without the tools, nobody has.
+               "on a Mac: git comes with Apple's developer tools, and xcode-select --install is Apple's command for them")
 INSTALL_LFS = ("on Ubuntu or Debian: sudo apt update && sudo apt install git-lfs; "
                "on Fedora: sudo dnf install git-lfs; "
                "on a Mac: from the project's own site, https://git-lfs.com; setup and sync find it by themselves "
