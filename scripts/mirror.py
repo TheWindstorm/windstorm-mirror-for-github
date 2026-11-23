@@ -755,7 +755,9 @@ def cmd_key_set(args):
         return 2
     if not load_json(p["state"], {}).get("port"):
         # G2.6: setup comes first, so every key lands where uninstall and the key scan already look. Nothing is read.
-        say(f"Setup comes first: run setup, then key set {owner}. No key was read, and nothing was kept.")
+        # G10.7: it names the one next step and whose it is.
+        say(f"Setup comes first, and it has not run on this computer: setup is your agent's step (or run setup "
+            f"yourself), then run key set {owner} again. No key was read, and nothing was kept.")
         return 2
     key = secret(read_key_from_stdin())
     if not key or any(c.isspace() for c in key) or len(key) > 255:

@@ -30,13 +30,15 @@ words of your own. Never shorten, merge, reword or leave one out; your own words
    changes nothing. On Linux it also says, in plain words, what lingering means: the mirror keeps running when
    they are logged out and after a restart. That is a **Person** step: see "Lingering".
 2. **Person**: the keys to make. One read-only key for each owner whose projects are to be copied: their own
-   account, and each organisation they name. See "Making each key".
+   account, and each organisation they name. See "Making each key". They make each key now and keep it; they
+   paste it only in step 4, after setup. Do not give them the `key set` line before step 3 has run: before
+   setup, `key set` refuses and keeps nothing.
 3. `M setup --linger` if the person said yes to lingering, `M setup --no-linger` if they said no. (On a Mac,
    `M setup`.) Plain `setup` on Linux changes nothing until one of the two is given. It installs the forge as
    the person's own service. If it prints a command for an administrator (lingering), that is a **Person**
    step: see "The administrator's command".
-4. **Person**: `key set` for each owner. The person runs it themselves, in a terminal window of their own,
-   outside this conversation, because whatever runs here, even a command they start with `!`, is shown to
+4. **Person**, only after step 3 has run: `key set` for each owner. The person runs it themselves,
+   in a terminal window of their own, outside this conversation, because whatever runs here, even a command they start with `!`, is shown to
    you. Say: "In a terminal window of your own, run `python3 -I <the script> key set <owner>` and paste the
    key when it asks. Tell me when it says the key is kept." Never read a key, run nothing that would put a key
    on a command line, in a file you write or in your own output, and never ask for one.

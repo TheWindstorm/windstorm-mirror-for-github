@@ -242,6 +242,10 @@ class Home:
                 time.sleep(0.5)
 
 
+KEY_BEFORE_SETUP_SOMEONE = ("Setup comes first, and it has not run on this computer: setup is your agent's step (or run setup "
+                    "yourself), then run key set someone again. No key was read, and nothing was kept.")
+
+
 def forge_log_tail(p, n=8):
     """The forge's own last log lines, for a failure message (G1.9)."""
     f = os.path.join(p["forge"], "log", "gitea.log")
@@ -836,7 +840,7 @@ class G2(unittest.TestCase):
             finally:
                 sys.stdin = saved
             self.assertEqual(rc, 2, out)
-            self.assertIn("Setup comes first: run setup, then key set someone. No key was read, and nothing was kept.",
+            self.assertIn(KEY_BEFORE_SETUP_SOMEONE,
                           out)
             self.assertEqual(left, self.gh.key + "\n", "the key was read before the refusal")
             self.assertFalse(os.path.exists(mirror.key_path(p, "someone")))
@@ -2682,6 +2686,26 @@ class G10(unittest.TestCase):
         _, _, body = skill_front()
         order = section(body, "The order")
         self.assertIn("what happens after a restart", order)
+
+    def test_G10_7_the_order_is_setup_then_keys_and_a_refusal_names_the_next_step(self):
+        """Two cold starts (2026-11-23): the smallest model sent the person to key set before setup, twice. Our
+        words gave it room: step 2 made the keys before setup and nothing said the paste waits. Now the order says
+        it plainly, and key set's refusal says whose step setup is and what to run after it."""
+        _, _, body = skill_front()
+        order = section(body, "The order")
+        step2 = order.split("\n2. ", 1)[1].split("\n3. ", 1)[0]
+        self.assertIn("paste it only in step 4, after setup", step2)
+        self.assertIn("Do not give them the `key set` line before step 3 has run", " ".join(step2.split()))
+        self.assertNotIn("key set <owner>", step2)
+        self.assertIn("4. **Person**, only after step 3 has run: `key set` for each owner.", order)
+        self.assertLess(order.index("`M setup --linger`"), order.index("key set <owner>"))
+        line = KEY_BEFORE_SETUP_SOMEONE
+        self.assertIn("setup is your agent's step", line)
+        self.assertIn("then run key set someone again", line)
+        with Home() as h:
+            rc, out = quiet(mirror.main, ["key", "set", "someone"])
+            self.assertEqual(rc, 2)
+            self.assertEqual(out.strip(), line)
 
 class G6Words(unittest.TestCase):
     NEXT = re.compile(r"\b(run|again|install|make|ask|try|wait|free|name|check|open an issue)\b|`|python3 -I", re.I)
