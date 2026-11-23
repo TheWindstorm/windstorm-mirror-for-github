@@ -346,6 +346,20 @@
    "moved_by_person": ""
   },
   {
+   "id": "M25",
+   "seen": "2026-11-23 (about 12:00 AM ET): a lane on the fleet's shared GitHub login polled every 3 s, spent the hour's allowance, and every lane was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
+   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time; the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
+   "codon": "G4.8",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project",
+   "proven": "",
+   "issue": "#38",
+   "moved_why": "",
+   "moved_by_person": ""
+  },
+  {
    "id": "M26",
    "seen": "2026-11-23, a cold start on a stock Ubuntu 24.04 virtual machine (a fresh agent, the smallest model, given one sentence): after the announcement and the question for the go, the agent ran `sync --announce` again to re-check, and the tool made the first copy without the go.",
    "promise": "`sync --announce` never copies, the first time or any time after; the go is a sync run on the person's word, recorded with its time, and `status` says whether the first copy was made on the person's go or still waits for it.",
@@ -416,20 +430,6 @@
    "moved_by_person": ""
   },
   {
-   "id": "M32",
-   "seen": "2026-11-23, the cold start's run B: a second owner's key was held back until the include list stood, and only the person's care did that; had the agent announced before `config include`, the person's yes would have copied every project of the owner.",
-   "promise": "The announcement names the projects (20 by name, then 'and N more', the whole list in a file only the person can read), and the first copy copies exactly the list last announced; if the list changed, nothing is copied, it is said again, and a new go is asked.",
-   "codon": "G3.9",
-   "owner": "maintainer",
-   "first_ship_in": "0.1.0",
-   "ship_in": "0.1.0",
-   "test": "test_G3_9_the_go_copies_only_what_the_last_announcement_named",
-   "proven": "",
-   "issue": "#36",
-   "moved_why": "",
-   "moved_by_person": ""
-  },
-  {
    "id": "M31",
    "seen": "2026-11-23, the cold start's run B: the agent told the person to run key set before setup, against SKILL.md's order; key set before setup checked the key with GitHub and kept it in a file before the skill that guards it was installed.",
    "promise": "Before setup, key set reads no key, asks GitHub nothing and keeps nothing, and says setup comes first.",
@@ -444,16 +444,16 @@
    "moved_by_person": ""
   },
   {
-   "id": "M25",
-   "seen": "2026-11-23 (about 12:00 AM ET): a lane on the fleet's shared GitHub login polled every 3 s, spent the hour's allowance, and every lane was refused for 7 minutes. In this skill, a 403 'rate limit exceeded' made the listing fail and marked every project of that owner 'cannot refresh', and the next timer run asked again; the floor case did the same.",
-   "promise": "GitHub's two ways of saying the allowance is spent, and the floor, become one line with the reset in the person's own time; the reset is kept in the state, so nothing is asked of GitHub before it, by this process or a fresh one after a restart; no project is marked failed, and every copy is as it was.",
-   "codon": "G4.8",
+   "id": "M32",
+   "seen": "2026-11-23, the cold start's run B: a second owner's key was held back until the include list stood, and only the person's care did that; had the agent announced before `config include`, the person's yes would have copied every project of the owner.",
+   "promise": "The announcement names the projects (20 by name, then 'and N more', the whole list in a file only the person can read), and the first copy copies exactly the list last announced; if the list changed, nothing is copied, it is said again, and a new go is asked.",
+   "codon": "G3.9",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "test": "test_G4_8_a_spent_allowance_waits_for_its_reset_and_fails_no_project",
+   "test": "test_G3_9_the_go_copies_only_what_the_last_announcement_named",
    "proven": "",
-   "issue": "#38",
+   "issue": "#36",
    "moved_why": "",
    "moved_by_person": ""
   },
@@ -522,7 +522,7 @@
    "moved_by_person": "",
    "id": "M37",
    "codon": "G10.8",
-   "test": "",
+   "test": "test_G10_8_the_agent_reaches_github_through_the_tool_only",
    "issue": "#52",
    "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model probed GitHub with anonymous git and with SSH; both were refused there. On a person's own computer their SSH key or gh login is present and such a probe succeeds, giving the agent a road to every repository the person can reach, outside the one read-only key the tool confines.",
    "promise": "SKILL.md says in plain words that the agent reaches GitHub through the tool only and never tries the person's own git, SSH or gh for it, and why; every cold-start write-up counts each reach outside the tool as a deviation."

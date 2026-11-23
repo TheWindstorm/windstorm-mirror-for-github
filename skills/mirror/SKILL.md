@@ -113,3 +113,8 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 - Never run `sync` without `--announce` first, or without the person's go, on a new install.
 - Never change the forge's address from 127.0.0.1, and never start a tunnel to it.
 - Never push to GitHub, and never answer a GitHub prompt on the person's behalf.
+- Reach GitHub only through `M`, never by yourself, not even to look: no `git clone` or `git ls-remote` of
+  their projects, no `ssh git@github.com`, no `gh`, no `curl` or web fetch of them. Why: the person's own git,
+  SSH key or `gh` login reaches every repository they can reach, with their right to write, while `M` reads
+  with the one read-only key they made for it and only what the include list names. To see what GitHub holds
+  before the first copy, run `M sync --announce`: it reads with that key and copies nothing.
