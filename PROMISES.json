@@ -654,7 +654,7 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "proven": "",
+   "proven": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine, an account with no administrator rights, its real systemd and lingering switched on by setup, against a stand-in for GitHub whose listing takes 30 s (no key of anyone's): with a sync really running, uninstall said it waits for that sync, naming its process, and went on the second it ended (27 s); the last thing it printed was what is gone (the three units, the forge's binary, the settings and keys, the script) and what is kept (the folder of copies and the record); run a second time it said nothing was left to take off, kept the same, and ended with code 0; then the service manager listed no unit file and no unit of the skill, lingering read no, and no forge process ran (the same check saw the forge before uninstall). Claude Code's own plugin uninstall is seen in row M55.",
    "moved_why": "",
    "moved_by_person": "",
    "id": "M41",
