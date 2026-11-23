@@ -140,6 +140,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.11 | Every wait for a forge's first answer (setup's, upgrade-forge's, and the tests') is `FIRST_START_WAIT`, more than three times the slowest first answer measured on a slow machine (`FIRST_START_SEEN`, "First start, as measured"). When the forge is not answering by then, setup says what that means, to run `status` in 5 minutes, and where the forge's own log is. A test that waits for the forge and fails carries the forge's last log lines (M33). | `test_G1_11_the_first_start_waits_are_measured_and_said` |
 | G1.12 | The lowest Python the skill names, 3.9, is checked as the script's first act, for every command: below it the script stops with the version found and what it needs, exit 3, and has made nothing. The file stays readable by Python 3.8's grammar, so an older Python reaches that line. CI runs the floor it names (3.9, on Linux and on a Mac) on runner images it names, never "latest" (M35; the family's rules 11 and 17). | `test_G1_12_an_older_python_is_told_first_and_nothing_is_made` |
 | G1.13 | A Mac is written as what it was: every Mac sighting says it was a Mac that carries Apple's developer tools, and in which account; no Mac is called untouched (we have none), and no text describes what a Mac without those tools shows. The Mac's git line names the developer tools and Apple's command for them, nothing more (M39). | `test_G1_13_a_mac_is_written_as_what_was_seen` |
+| G1.14 | The install words name this computer's way only: the tool reads which system it is on (`/etc/os-release`'s ID; a Mac by its kernel) and names that system's line, and only a line run exactly as printed on that kind of system with its prompts answered by hand ("Install lines, as seen"). A system with no such line, a kin of these included, gets the program's own page. A Mac test account was told the lines for Ubuntu, Debian and Fedora too (M51; the family's rule 7). | `test_G1_14_the_install_words_name_this_computers_way_only` |
 
 ### G2 The GitHub keys: one read-only key per owner, each in its own file, each watched
 
@@ -354,18 +355,21 @@ The lab facts above are about stock Gitea, not about this skill.
 
 ### Install lines, as seen
 
-Every install line the tool names (`INSTALL_GIT`, `INSTALL_LFS` in `scripts/mirror.py`) was run as written on a
-fresh system before it was written; `test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` holds
-that the tool names no command that is not in this table. Fresh cloud images, a new disk each, 2026-11-23 (row M28):
+Every install line the tool names (`INSTALL_SEEN` in `scripts/mirror.py`) was run exactly as printed, in a terminal,
+its yes/no prompts answered by hand at the prompt, on a fresh image of that system (the family's rule 7; row M51);
+`test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded` holds that the tool names no command that
+is not in this table, and `test_G1_14_the_install_words_name_this_computers_way_only` that it names only this
+computer's own (read from `/etc/os-release`'s ID; a kin of these, by ID_LIKE, is not one of them). Fresh cloud
+images, a new disk each, 2026-11-23; git removed first where the image had it:
 
-| Line | System | Seen |
+| Line, exactly as printed | System | Seen |
 |---|---|---|
-| `sudo apt update && sudo apt install git` | Ubuntu 24.04.5 cloud image; Debian 13 genericcloud image | works (git 2.43.0; 2.47.3) |
-| `sudo apt update && sudo apt install git-lfs` | Ubuntu 24.04.5; Debian 13 | works (git-lfs 3.4.1; 3.6.1) |
-| `sudo dnf install git` | Fedora 45 Cloud Base | works (git 2.56.1; the image has no git) |
-| `sudo dnf install git-lfs` | Fedora 45 Cloud Base | works (git-lfs 3.7.1) |
+| `sudo apt update && sudo apt install git` | Ubuntu 24.04.5 cloud image; Debian 13 genericcloud image | works; one prompt each ("Do you want to continue? [Y/n]"; Debian: "Continue? [Y/n]"), answered y (git 2.43.0; 2.47.3) |
+| `sudo apt update && sudo apt install git-lfs` | Ubuntu 24.04.5; Debian 13 | works; no prompt (git-lfs 3.4.1; 3.6.1) |
+| `sudo dnf install git` | Fedora 45 Cloud Base | works; two prompts ("Is this ok [y/N]" for the packages, then for importing Fedora's own signing key, its fingerprint shown), answered y (git 2.56.1) |
+| `sudo dnf install git-lfs` | Fedora 45 Cloud Base | works; one prompt ("Is this ok [y/N]"), answered y (git-lfs 3.7.1) |
 | `xcode-select --install` | macOS 13.7.8 (Intel) and macOS 27.2.1 (Apple M4), both with the tools already | seen only on a Mac that already had them: "already installed", exit 1. What it shows on a Mac without the tools is not seen, and no text of ours describes it (G1.13). |
-| large files on a Mac: https://git-lfs.com | | not seen installed on a Mac |
+| large files on a Mac, or on any other system: git lfs's own page, https://git-lfs.com; git on any other system: https://git-scm.com/downloads | | pages named, no command: none was run there |
 
 Lines tried and NOT used, so that no one puts them back:
 - `sudo apt install git` and `sudo apt install git-lfs` alone: on a fresh Ubuntu 24.04.5 image, git failed with a

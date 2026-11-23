@@ -566,12 +566,19 @@ class G1(unittest.TestCase):
                 mirror.has_git_lfs = lfs
             self.assertIn("git lfs is not installed here", out)
 
-        # Every install command the tool names was run as written on a fresh system: it is in the plan's table.
+        # Every install command the tool names was run exactly as printed on a fresh system: it is in the plan's table.
         # (Seen: the plain apt lines fail on fresh Ubuntu and Debian images; brew failed on an older Mac.)
         plan, readme = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md")), fread(os.path.join(ROOT, "README.md"))
         table = plan.split("### Install lines, as seen", 1)[1].split("Lines tried and NOT used", 1)[0]
-        cmd = r"(?:sudo apt update && )?sudo (?:apt|dnf) install [^;`)\n]+|xcode-select --install|brew install [^;`)\n]+"
-        for text, where in ((mirror.INSTALL_GIT + "; " + mirror.INSTALL_LFS, "the install lines"),
+        cmd = r"(?:sudo apt update && )?sudo (?:apt|dnf) install [^;`)\n\"]+|xcode-select --install|brew install [^;`)\n\"]+"
+        words = []
+        for here in ("ubuntu", "debian", "fedora", "mac", "arch", ""):
+            saved, mirror.os_id = mirror.os_id, (lambda here=here: here)
+            try:
+                words += [mirror.install_words("git"), mirror.install_words("git-lfs")]
+            finally:
+                mirror.os_id = saved
+        for text, where in (("; ".join(words), "the install lines"),
                             (fread(SCRIPT), "the script"), (readme, "README.md")):
             named = {c.strip().rstrip(".,") for c in re.findall(cmd, text)}
             if where == "the install lines":
@@ -580,7 +587,48 @@ class G1(unittest.TestCase):
                 self.assertIn(f"`{line}`", table, f"{where} names a line never seen on a fresh system: {line}")
             self.assertNotIn("brew install", text, where)
             self.assertIsNone(re.search(r"(?<!&& )sudo apt install", text), f"an apt line without apt update in {where}")
-        self.assertIn("https://git-lfs.com", mirror.INSTALL_LFS)
+        self.assertIn("git lfs's own page is https://git-lfs.com", words)
+
+    def test_G1_14_the_install_words_name_this_computers_way_only(self):
+        """A Mac test account (2026-11-23) was told the install lines for Ubuntu, Debian and Fedora as well as a Mac's.
+        Every clause in a line the agent passes on is one this person must hear (the family's rule 7): the tool
+        reads which system this is (/etc/os-release's ID; a Mac by its kernel) and names only that system's line,
+        and only a line run exactly as printed there. A system with no such line, a kin of these included, gets
+        the program's own page."""
+        d = tempfile.mkdtemp(prefix="wsm-os-")
+        TEMPS.append(d)
+        rel, saved_rel, saved_sys = os.path.join(d, "os-release"), mirror.OS_RELEASE, mirror.system
+        others = ("Ubuntu", "Debian", "Fedora", "Mac", "apt", "dnf", "brew", "xcode")
+        cases = {"ubuntu": ("on this computer: sudo apt update && sudo apt install git",
+                            "on this computer: sudo apt update && sudo apt install git-lfs"),
+                 "debian": ("on this computer: sudo apt update && sudo apt install git",
+                            "on this computer: sudo apt update && sudo apt install git-lfs"),
+                 "fedora": ("on this computer: sudo dnf install git", "on this computer: sudo dnf install git-lfs"),
+                 "linuxmint": ("git's own page is https://git-scm.com/downloads", "git lfs's own page is https://git-lfs.com"),
+                 "arch": ("git's own page is https://git-scm.com/downloads", "git lfs's own page is https://git-lfs.com")}
+        try:
+            mirror.OS_RELEASE, mirror.system = rel, (lambda: ("linux", "x86_64"))
+            for here, (git, lfs) in cases.items():
+                like = "ubuntu debian" if here == "linuxmint" else ""
+                with open(rel, "w", encoding="utf-8") as f:
+                    f.write(f'NAME="x"\nID={here}\nID_LIKE="{like}"\nPRETTY_NAME="x"\n')
+                self.assertEqual(mirror.os_id(), here)
+                self.assertEqual((mirror.install_words("git"), mirror.install_words("git-lfs")), (git, lfs), here)
+                said = mirror.lfs_missing() + " " + mirror.git_missing_sentence()
+                tool = "apt" if here in ("ubuntu", "debian") else "dnf" if here == "fedora" else None
+                for word in others:
+                    if word != tool:
+                        self.assertNotIn(word, said, f"{here}: names another system's way: {word}")
+            os.remove(rel)
+            self.assertEqual(mirror.os_id(), "")
+            self.assertEqual(mirror.install_words("git-lfs"), "git lfs's own page is https://git-lfs.com")
+            mirror.system = lambda: ("darwin", "arm64")
+            said = mirror.lfs_missing()
+            self.assertIn("git lfs's own page is https://git-lfs.com", said)
+            for word in ("Ubuntu", "Debian", "Fedora", "apt", "dnf", "brew", "sudo"):
+                self.assertNotIn(word, said)
+        finally:
+            mirror.OS_RELEASE, mirror.system = saved_rel, saved_sys
 
     def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
         with Home() as h:
@@ -798,8 +846,12 @@ class G1(unittest.TestCase):
             for sentence in re.findall(r"[^.;|]*xcode-select --install[^.;|]*", flat):
                 self.assertIsNone(re.search(r"\bopens\b|installer|window|dialog|at the screen|asks you", sentence),
                                   f"{where} describes what a Mac without the tools shows: {sentence[:160]}")
-        self.assertIn("on a Mac: git comes with Apple's developer tools, and xcode-select --install is Apple's "
-                      "command for them", mirror.INSTALL_GIT)
+        saved, mirror.os_id = mirror.os_id, (lambda: "mac")
+        try:
+            self.assertEqual("git comes with Apple's developer tools, and xcode-select --install is Apple's "
+                             "command for them", mirror.install_words("git"))
+        finally:
+            mirror.os_id = saved
         # Where the README lists what was seen (a release branch), each Mac seen outside GitHub's runners is
         # written as what it was.
         readme = texts["README.md"]
@@ -2921,7 +2973,7 @@ class G10(unittest.TestCase):
             plan = mirror.setup_plan(mirror.paths(), {})
             self.assertEqual(said[:len(plan)], [f"Setup would {step}." for step in plan], "a step of setup unsaid")
             self.assertTrue(any(x.startswith("After a restart") for x in said), said)
-            self.assertIn(mirror.LFS_MISSING, said)
+            self.assertIn(mirror.lfs_missing(), said)
         with World(self) as w:
             w.gh.add_repo("someone", "alpha")
             w.gh.commit("someone/alpha", {"a": b"1"})
@@ -2992,7 +3044,7 @@ class G10(unittest.TestCase):
                 else:
                     self.assertIn("administrator", restart[0])
                     self.assertIn("sudo loginctl enable-linger", restart[0])
-                self.assertEqual(mirror.LFS_MISSING in said, not lfs, said)
+                self.assertEqual(mirror.lfs_missing() in said, not lfs, said)
                 self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
         _, _, body = skill_front()
         order = section(body, "The order")
@@ -3192,6 +3244,7 @@ class Invariants(unittest.TestCase):
         allowed = {"http://127.0.0.1", "https://api.github.com", "https://github.com", "https://dl.gitea.com/gitea",
                    "https://github.com/TheWindstorm/windstorm-mirror-for-github", "http://www.apple.com/DTDs/PropertyList-1.0.dtd",
                    "https://git-lfs.com",                     # named to the person (M28), never reached
+                   "https://git-scm.com/downloads",           # named to the person (M51), never reached
                    "https://github.com/settings/personal-access-tokens",  # named to the person (M38), never reached
                    "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
         found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
