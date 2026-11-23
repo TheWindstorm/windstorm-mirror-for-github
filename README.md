@@ -28,6 +28,9 @@ claude plugin install windstorm-mirror-for-github@windstorm-mirror-for-github
 
 Then start Claude Code again and say: **set up my GitHub mirror**.
 
+On a Mac, run setup from a session logged in at that Mac's screen: the forge runs as a launch agent, which starts
+only in such a session (over ssh into an account no one is logged in to at the screen, setup says so and starts nothing).
+
 ## What to expect
 
 The copy is as current as the last sync, and `status` says when that was. While this computer is off or asleep,
@@ -53,8 +56,12 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
   (127.0.0.1), with sign-up closed. Setup needs no administrator rights.
 - It makes two Gitea accounts: yours, and `mirror`, which owns the copies. Each password and each key is kept in a
   file that only you can read.
-- It runs Gitea as your own service, and syncs every 15 minutes. On Linux that is a systemd user unit; on macOS, a
-  launch agent.
+- It runs Gitea as your own service, and syncs every 15 minutes. On Linux that is a systemd user unit, with the
+  sync timer beside it, in `~/.config/systemd/user/`; switching them on, systemd links them in that folder's
+  `default.target.wants/` and `timers.target.wants/`. On macOS, two launch agents in `~/Library/LaunchAgents/`.
+- Where a folder these go in is not on your computer yet (a fresh Linux account has no `~/.config` or
+  `~/.local/share`), setup names it in the dry run, makes it and keeps a note of it; uninstall takes it away again
+  once it is empty.
 - **After a restart.** On Linux, setup can switch on *lingering* for your account. That means the mirror keeps
   running when you are logged out and after a restart, because your account's background services are allowed to
   start without you. The dry run asks your computer whether you may switch lingering on yourself, and says what it
@@ -64,12 +71,12 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
 
 ## What only you do
 
-- **Install git and Python 3.10 or newer, if your computer lacks them.** Setup checks for git first, and says how
-  to install it. git lfs is optional: without it, projects with large files are copied without those files, and
+- **Install git and Python 3.9 or newer, if your computer lacks them.** On a Mac, the python3 that comes with
+  Apple's developer tools is new enough (3.9.6 on macOS 13). Setup checks for git first, and says how to install it. git lfs is optional: without it, projects with large files are copied without those files, and
   setup and `status` say so. On Ubuntu or Debian: `sudo apt update && sudo apt install git`, and for large
   files `sudo apt update && sudo apt install git-lfs`. On Fedora: `sudo dnf install git`, and for large files
-  `sudo dnf install git-lfs`. On a Mac: `xcode-select --install` opens Apple's own installer for the command-line tools, which needs
-  you at the screen; git lfs comes from its own site, https://git-lfs.com, and setup and sync find it by
+  `sudo dnf install git-lfs`. On a Mac: git comes with Apple's developer tools, and `xcode-select --install` is Apple's command for
+  them; git lfs comes from its own site, https://git-lfs.com, and setup and sync find it by
   themselves once it is installed.
 - **Make one read-only key for each owner whose projects are to be copied**: your own account, and each
   organisation you name. Each one is a fine-grained key with read-only access to Contents and Metadata. An
@@ -79,9 +86,12 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
   agent: whatever runs inside an agent's session, even a command you start yourself, is shown to the agent. The
   key is then kept in a file only your account can read. An agent that runs as you could read that file; the
   skill tells it never to, and never to put a key in its output.
-- **Say yes to the first copy.** You say it after you have heard which projects they are (by name, the first 20,
-  with the whole list in a file), how big they are, where they go and what is not copied. Your yes covers that
-  list only: if it changes before the copy starts, nothing is copied and you are asked again.
+- **Give the go for the first copy, yourself, in a terminal window of your own**: run `go` there (the agent
+  gives you the line). It shows you which projects they are (by name, the first 20, with the whole list in a
+  file), how big they are, where they go, what is not copied, what happens after a restart, when each key ends,
+  and how private the copy is; the copy starts only after you press Enter there. A yes to your agent is not the
+  go. Your go covers that list only: if it changes before the copy starts, nothing is copied and you run `go`
+  again.
 - **Say yes or no to lingering** (see "After a restart"). Setup does not choose for you.
 - **Delete the copies, if you ever want to**, yourself, in a terminal window of your own:
   `uninstall --delete-copies` asks you to type how many copies there are, and refuses an answer from anywhere
@@ -111,23 +121,41 @@ The copy is as private as this computer. Anyone who can read this account's file
   - the forge and the sync coming back across restarts;
   - a computer with no git;
   - a full sync from GitHub;
+  - a cut road, a stopped forge and a slowed road, with nothing changed;
+  - a rename on GitHub and back, and a deleted branch kept under `kept/`;
+  - one small git lfs object, copied whole once git lfs was installed (larger ones not seen);
   - a restore onto a second computer.
   Python 3.12, git 2.43, Gitea 28.4.0.
-- **The test suite, with the real Gitea 28.4.0**, on GitHub's runners: Ubuntu 26.04 on x86-64 and macOS 26 on Apple
-  Silicon, each with Python 3.10 and 3.13. These runs use a stand-in for GitHub. A person's setup has not been
+- **The test suite, with the real Gitea 28.4.0**, on GitHub's runners: Ubuntu 24.04 on x86-64 with Python 3.9, 3.10 and
+  3.13, and macOS 26 on Apple Silicon with Python 3.9 and 3.13. These runs use a stand-in for GitHub. A person's setup has not been
   seen on either.
-- **macOS 13.7 on Intel.** Seen: launch agents coming back after a restart, with automatic login on and FileVault
-  off.
+- **macOS 13.7 on Intel: the Mac's own main account, on a Mac that carries Apple's developer tools.** Seen: two
+  stand-in launch agents, shaped like the skill's forge and timer, coming back after a restart, with automatic
+  login on and FileVault off. The skill itself was not run there.
+- **macOS 27.2.1 on Apple Silicon: a test account that is not an administrator, on a Mac that carries Apple's
+  developer tools** (its python3 3.9.6). Seen: the skill's dry run, setup (the pinned Gitea for that Mac, run as
+  the account's own launch agent on this computer's own address), status and uninstall; the dry run and setup said
+  the copy stands still after a restart until the person logs in, because that Mac does not log anyone in by itself.
+  No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS runners the tests
+  make first copies and run restore --check with the real pinned Gitea, against a stand-in for GitHub.
 - **The plugin commands above**, with no GitHub key and no GitHub login: Claude Code 2.1.280 in a Linux account,
   and 2.1.330, installed from its site, not signed in, on a stock Ubuntu 24.04. The plugin is installed and
   listed, with the skill in place. The short form (`TheWindstorm/windstorm-mirror-for-github`) worked the same
   way on 2.1.280. Versions older than 2.1.280: not seen.
 - **Not seen yet:**
-  - setup from start to end on any Mac;
-  - a Mac restart with FileVault on;
-  - Apple Silicon outside the test suite;
+  - a fine-grained read-only key on a real account: not seen by us. On the rounds against the real GitHub, a
+    broader key of ours stood in for it; the tool asks GitHub the same questions with either;
+  - GitHub's own answer about when such a key ends: not seen by us. The tests use a stand-in for that answer; when
+    the end date cannot be read, the tool says so and promises no warning;
+  - a first copy from GitHub on a Mac in a person's own account, and the copy coming back after a Mac's restart
+    with the skill itself: not seen by us. Seen instead: first copies and restore --check with the real pinned
+    Gitea on GitHub's macOS runners, against a stand-in for GitHub; and setup, status and uninstall in a Mac test
+    account with no key;
+  - a Mac that logs the person in by itself, and a Mac without Apple's developer tools;
   - Debian, Fedora and other Ubuntu versions;
   - Windows (not supported in 0.1);
+  - `self-update` moving to a newer version: none exists before 0.1.0. Its read of the latest release is seen at
+    the release. The road that always works: Claude Code's own plugin update, then `setup`;
 
 ## Taking it off
 
@@ -135,9 +163,24 @@ The copy is as private as this computer. Anyone who can read this account's file
 python3 -I ~/.local/share/windstorm-mirror/mirror.py uninstall
 ```
 
-This removes the service, the timer, Gitea, the settings and every key. It switches lingering off only if setup
-switched it on. It leaves the folder of copies, which is yours. `uninstall --delete-copies`, run in a terminal window of your own,
-deletes that folder too, but only after you type how many copies it holds.
+On a Mac (the path holds a space, so it is quoted):
+
+```bash
+python3 -I ~/"Library/Application Support/windstorm-mirror/mirror.py" uninstall
+```
+
+This removes the service, the timer and their links, Gitea, the settings and every key, and each folder setup
+made that is empty now. It switches lingering off only if setup
+switched it on. It keeps the folder of copies and the record of what the skill did here, which are yours, and the
+last thing it prints says what is gone and what is kept. If a sync is running, it waits for it to end. Run twice,
+it is safe. `uninstall --delete-copies`, run in a terminal window of your own, deletes that folder too, but only
+after you type how many copies it holds.
+
+Claude Code's own `claude plugin uninstall` takes the plugin away, but the forge and the sync timer keep running:
+they run the copy of the script that setup made in the folder above, not the plugin's files. The command above
+takes them off, and needs nothing else installed. From then on, `status` and each sync say the plugin was removed,
+with that command. Nothing of the skill's acts on your Claude Code sessions, and nothing runs from the plugin's old
+folder: a command run from there stops and names the copy setup made.
 
 ## Family
 

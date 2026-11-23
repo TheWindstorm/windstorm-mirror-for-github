@@ -13,7 +13,7 @@ written to GitHub.
 The whole tool is one script: `scripts/mirror.py`, two levels above this skill's base directory. Below, `M` means
 `python3 -I <that path>`. After `setup`, the same script is also installed at
 `~/.local/share/windstorm-mirror/mirror.py` (Linux) or `~/Library/Application Support/windstorm-mirror/mirror.py`
-(macOS); the timer runs that copy.
+(macOS; that path holds a space, so in a command it is quoted, as the tool prints it); the timer runs that copy.
 
 ## The order
 
@@ -30,21 +30,24 @@ words of your own. Never shorten, merge, reword or leave one out; your own words
    changes nothing. On Linux it also says, in plain words, what lingering means: the mirror keeps running when
    they are logged out and after a restart. That is a **Person** step: see "Lingering".
 2. **Person**: the keys to make. One read-only key for each owner whose projects are to be copied: their own
-   account, and each organisation they name. See "Making each key".
+   account, and each organisation they name. See "Making each key". They make each key now and keep it; they
+   paste it only in step 4, after setup. Do not give them the `key set` line before step 3 has run: before
+   setup, `key set` refuses and keeps nothing.
 3. `M setup --linger` if the person said yes to lingering, `M setup --no-linger` if they said no. (On a Mac,
    `M setup`.) Plain `setup` on Linux changes nothing until one of the two is given. It installs the forge as
    the person's own service. If it prints a command for an administrator (lingering), that is a **Person**
    step: see "The administrator's command".
-4. **Person**: `key set` for each owner. The person runs it themselves, in a terminal window of their own,
-   outside this conversation, because whatever runs here, even a command they start with `!`, is shown to
+4. **Person**, only after step 3 has run: `key set` for each owner. The person runs it themselves,
+   in a terminal window of their own, outside this conversation, because whatever runs here, even a command they start with `!`, is shown to
    you. Say: "In a terminal window of your own, run `python3 -I <the script> key set <owner>` and paste the
    key when it asks. Tell me when it says the key is kept." Never read a key, run nothing that would put a key
    on a command line, in a file you write or in your own output, and never ask for one.
 5. `M sync --announce`. Give the person its `tell the person` block whole: how many repositories, how big, where
    they go, what happens after a restart, whether large files are copied, what is not copied, and that the copy is
-   as private as this computer. Then the **Person** step: the go for the first copy.
-   Running `--announce` again copies nothing; it says it all again.
-6. `M sync`, only after the person said go. The first copy can take a while; it says how far it is.
+   as private as this computer. Then the **Person** step: the go for the first copy, which they give in their own
+   terminal (`go`). Running `--announce` again copies nothing; it says it all again.
+6. `M sync`, only after the person said that `go` kept their go. The first copy can take a while; it says how far
+   it is. Without their go it copies nothing and says so.
 7. `M status`. Show the person its `copies:` line and every `problem:` line.
 8. `M restore --check`. Show the person its total. It proves every copy from the forge alone.
 
@@ -58,10 +61,11 @@ their password, and never type into a login page. Say: "Please log in to GitHub 
 your password."
 
 **Making each key.** Say, for each owner: "Open https://github.com/settings/personal-access-tokens/new and make a
-fine-grained key. Name: windstorm-mirror-<owner>. Expiration: your choice (I will warn you
-two weeks before it ends). Resource owner: <owner>. Repository access: All repositories. Permissions, Repository
+fine-grained key. Name: windstorm-mirror-<owner>. Expiration: your choice. Resource owner: <owner>. Repository access: All repositories. Permissions, Repository
 permissions: Contents, Read-only (Metadata, Read-only, comes with it). Nothing else. Then copy the key; you will
-paste it in a moment, not to me." A key has one owner: an organisation needs a key of its own.
+paste it in a moment, not to me." A key has one owner: an organisation needs a key of its own. Never promise a
+warning before a key ends: the announcement says, for each key, whether its end date was read and so whether a
+warning can be promised.
 
 **An organisation's approval.** An organisation can require its owners to approve a key. Say: "<organisation>
 may ask one of its owners to approve this key. Until they do, the key waits as pending and `key set` will say it
@@ -72,10 +76,12 @@ not work around it.
 mirror to keep running when you are logged out and after a restart?" Their yes is `setup --linger`, their no is
 `setup --no-linger`. Do not choose for them.
 
-**The go for the first copy.** After step 5, say: "That is what will be copied. Shall I start the first copy?"
-Only a clear yes from the person is the go. Do not take silence, or an earlier yes to something else, as the go.
-The go covers the list the person was told. If `sync` says the first copy would not be what they were told, it
-copies nothing and prints the new block: give it whole, and ask for the go again.
+**The go for the first copy.** After step 5, say: "That is what will be copied. The go is yours: in the same
+terminal window of your own, run `python3 -I <the script> go`. It shows you all of this again, and the copy starts
+only after you press Enter there. Tell me when it says your go is kept." The go is their Enter in their own
+terminal, nothing else: a yes in this conversation is not the go, and you never run `go` yourself. The go covers
+the list it showed them. If `sync` says the first copy would not be what they were told, it copies nothing and
+prints the new block: give it whole, and ask them to run `go` again.
 
 **The administrator's command.** If setup says the copy stands still after a restart until the person logs in,
 and prints a command such as `sudo loginctl enable-linger <user>`, say: "To keep the copy current after a restart
@@ -91,6 +97,8 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 - `M status`: one line per problem, then `copies: N on GitHub, N copied, M behind, U unreadable`, the forge's
   version, each key's expiry, the free disk, the last good sync and the next. A copy is never shown as current
   unless it was seen current.
+- `M left-out`: the names of the projects the include list and the exclude patterns leave out, when the person
+  asks. `sync` and `status` give only their number; do not print or repeat those names unasked.
 - A key expires or is refused: the person makes a new one (same page) and runs `key set <owner>` again, in a
   terminal window of their own, as in step 4.
 - `M backup <folder>`: the forge's own backup in one file only the person can read. It holds the forge's secrets;
@@ -107,6 +115,15 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 ## Never
 
 - Never put a key or password on a command line, in a file you write, in a message or in your output.
-- Never run `sync` without `--announce` first, or without the person's go, on a new install.
+- Never run `sync` without `--announce` first, or without the person's go, on a new install. Never run `go`
+  yourself, and never press its Enter for the person: it is theirs, in their own terminal.
+- Never delete, and never offer to delete, the folder of copies or the record that uninstall kept, unless the
+  person asks for it in their own words in this conversation; even then, it is their own command
+  (`uninstall --delete-copies`, in a terminal window of their own).
 - Never change the forge's address from 127.0.0.1, and never start a tunnel to it.
 - Never push to GitHub, and never answer a GitHub prompt on the person's behalf.
+- Reach GitHub only through `M`, never by yourself, not even to look: no `git clone` or `git ls-remote` of
+  their projects, no `ssh git@github.com`, no `gh`, no `curl` or web fetch of them. Why: the person's own git,
+  SSH key or `gh` login reaches every repository they can reach, with their right to write, while `M` reads
+  with the one read-only key they made for it and only what the include list names. To see what GitHub holds
+  before the first copy, run `M sync --announce`: it reads with that key and copies nothing.
