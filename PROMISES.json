@@ -1022,7 +1022,7 @@
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "proven": "",
+   "proven": "2026-11-23, a fresh stock Ubuntu 24.04.5 virtual machine, an account with no administrator rights and cloud-init's own ~/.ssh/authorized_keys, its real systemd and lingering switched on by setup, with the tests' own stand-in for GitHub (two made-up projects, a made-up key; real GitHub was not asked): the person's authorized_keys was the same file (inode, modified time, size and checksum) before setup, after setup, key set, the go at a real terminal, a sync that made both copies, status and restore --check with the real forge running, and after uninstall; nothing else under ~/.ssh changed (a whole-home listing at each of the three points).",
    "moved_why": "",
    "moved_by_person": "",
    "exception": "",
@@ -1033,6 +1033,38 @@
    "stand_in": "a person's home in a temporary folder (the real pinned Gitea, started as the service starts it)",
    "seen": "2026-11-23, while the census of rule 8 was built, every file left in a test home after uninstall was listed: ~/.ssh/authorized_keys was there, and nothing of ours writes it. Stock Gitea 28.4.0 writes it when it starts, even with SSH off (its default, SSH_CREATE_AUTHORIZED_KEYS_FILE): with none, it made ~/.ssh and an empty authorized_keys; with the person's own, it rewrote it as a new file, the content kept.",
    "promise": "Every program the skill starts counts as the skill. The forge never writes what may log in to this computer: its settings turn off Gitea's authorized_keys and principals files and keep any SSH file of its own inside its own folder. The person's authorized_keys is the same file (inode, time and checksum) after setup, a sync and uninstall, and with none, nothing is made in ~/.ssh."
+  },
+  {
+   "id": "M65",
+   "seen": "2026-11-23, a whole-home listing (the family's rule 23) on a fresh stock Ubuntu 24.04.5 virtual machine before setup, after a real run and after uninstall: setup made ~/.config, ~/.config/systemd and ~/.config/systemd/user, which a stock home does not have, and uninstall left them, empty; neither the dry run nor the census named them, nor the two links systemctl --user enable makes (uninstall took the links away).",
+   "promise": "Setup names first, in the dry run, the folders around its own places that this computer does not have yet and the links systemctl makes; it records those folders in its own record before it makes anything; uninstall takes each away again once it is empty, and the census names one that is not. A record that could not be read takes none of them, says so, and is never written over.",
+   "codon": "G9.9",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G9_9_uninstall_takes_away_the_folders_setup_made_once_they_are_empty",
+   "stand_in": "a person's home in a temporary folder, with the service managers stood in for (they make no links there)",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
+  },
+  {
+   "id": "M66",
+   "seen": "2026-11-23, the family's rule 24 (installed is not running): a service or timer job started before an update keeps running the older code, and nothing read-only in status says what is running now.",
+   "promise": "status says, read-only, what the running forge is (its process, the binary it runs, that binary's Gitea version against the pin) and, when a sync is running, the version of the skill it started as; a mismatch names upgrade-forge or the restart that ends it.",
+   "codon": "G9.10",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "the service manager's answer about the forge's process, and the process table",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
   }
  ],
  "declined": []

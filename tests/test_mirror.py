@@ -3015,6 +3015,60 @@ class G9(unittest.TestCase):
             self.assertEqual(w.gh.release_calls.count(True), 0, "the release was read with a key")
             self.assertGreater(len(w.gh.release_calls), 0)
 
+    def test_G9_9_uninstall_takes_away_the_folders_setup_made_once_they_are_empty(self):
+        """M65 (seen 2026-11-23 on a fresh stock machine, the family's rule 23): setup made ~/.config,
+        ~/.config/systemd and ~/.config/systemd/user, which a stock home does not have, and uninstall left them. The
+        dry run names them, and the links systemctl makes, first; setup records them before it makes anything;
+        uninstall takes each away again once it is empty, and the census names one that is not. A record that could
+        not be read takes none of them and is never written over (rule 6)."""
+        mac = mirror.system()[0] == "darwin"
+        with Home(linger="yes") as h:
+            home = os.environ["HOME"]
+            p = mirror.paths()
+            svc = os.path.dirname(p["plist"] if mac else p["unit"])
+            top = os.path.join(home, "Library" if mac else ".config")
+            chain, d = [], svc
+            while d != home:
+                chain.append(d)
+                d = os.path.dirname(d)
+            h.place_gitea()
+            rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("make the folders ", out)
+            for d in chain:
+                self.assertIn(d, out)
+            if not mac:
+                self.assertIn(f"systemctl links them in {svc}/default.target.wants and {svc}/timers.target.wants, and "
+                              "uninstall takes the units and those links away", out)
+            self.assertFalse(os.path.exists(top), "the dry run made a folder")
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            made = mirror.load_json(p["state"], {})["made_folders"]
+            for d in chain:
+                self.assertIn(d, made)
+            others = os.path.join(top, "another-programs-file")
+            with open(others, "w") as f:
+                f.write("not the skill's\n")
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            for d in chain[:-1]:
+                self.assertFalse(os.path.exists(d), f"{d}: setup made it and uninstall left it, empty")
+                self.assertIn(f"  {d}: an empty folder setup made", out)
+            self.assertTrue(os.path.exists(others), "uninstall touched another program's file")
+            self.assertIn(f"  {top}: a folder setup made, left because other files are in it now. It is yours.", out)
+        with Home(linger="yes") as h:
+            p = mirror.paths()
+            svc = os.path.dirname(p["plist"] if mac else p["unit"])
+            h.place_gitea()
+            self.assertEqual(h.setup()[0], 0)
+            with open(p["state"], "w") as f:
+                f.write("{not a record")
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertTrue(os.path.isdir(svc), "a folder setup made was taken on a record that could not be read")
+            self.assertIn(f"the record of them, {p['state']}, could not be read, so none was removed.", out)
+            with open(p["state"]) as f:
+                self.assertEqual(f.read(), "{not a record", "the record that could not be read was written over")
+
     def test_G9_8_the_census_names_everything_still_here_and_whose_it_is(self):
         """M63, the family's rule 8 (2026-11-23: an agent invents where the tool is silent): the census names
         everything still on this computer because of the skill, kept on purpose or simply left, with where it is and

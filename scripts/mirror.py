@@ -1762,8 +1762,45 @@ def set_aside_folder(here):
 
 # ---------------------------------------------------------------- commands
 
+def folders_setup_makes(p):
+    """G9.9 (M65, the family's rule 23): the folders around the skill's own places that this computer does not have
+    yet (on a stock home: ~/.config, ~/.config/systemd/user, ~/.local/share). Setup names them first, makes them,
+    records them, and uninstall takes each away again once it is empty; one that is not empty is named as left."""
+    own = {os.path.abspath(p["data"]), os.path.abspath(p["conf"])}
+    tops = [p["data"], p["conf"], os.path.dirname(p["plist"] if system()[0] == "darwin" else p["unit"])]
+    made = []
+    for d in tops:
+        d = os.path.abspath(d)
+        while not os.path.lexists(d) and os.path.dirname(d) != d:
+            if d not in own and d not in made:
+                made.append(d)
+            d = os.path.dirname(d)
+    return sorted(made)
+
+
+def record_made_folders(p, st, made):
+    """Kept in the record at once, before anything else is made, so a setup that stops halfway still leaves it."""
+    st["made_folders"] = sorted(set(st.get("made_folders") or []) | set(made))
+    save_state(p, st)
+
+
+def take_made_folders(st, removed):
+    """Uninstall: each folder setup made goes again only when it is empty and a real folder (never a link)."""
+    for d in sorted(st.get("made_folders") or [], key=len, reverse=True):
+        try:
+            if os.path.isdir(d) and not os.path.islink(d) and not os.listdir(d):
+                os.rmdir(d)
+                removed.append(f"{d}: an empty folder setup made")
+        except OSError:
+            pass
+
+
 def setup_plan(p, st):
     plan = []
+    made = folders_setup_makes(p)
+    if made:
+        plan.append("make the folders " + ", ".join(made) + " (not on this computer yet); uninstall takes each "
+                    "away again once it is empty")
     if not (os.path.exists(p["bin"]) and sha256_of(p["bin"]) == pin_for_this_system()[1]):
         plan.append(f"download Gitea {GITEA_VERSION} for {'/'.join(system())} from {GITEA_BASE} and check its "
                     "pinned SHA-256 before running it")
@@ -1778,8 +1815,13 @@ def setup_plan(p, st):
         plan.append(f"make the '{MIRROR_USER}' account that owns the copies, with a key of its own in "
                     f"{p['mirror_key']}, readable by you only")
     plan.append(f"copy this script to {p['script']}")
-    plan.append("install the forge as your own service (" +
-                ("a launch agent" if system()[0] == "darwin" else "a systemd user unit") + ") and start it")
+    if system()[0] == "darwin":
+        plan.append("install the forge as your own service (a launch agent) and start it")
+    else:
+        base = os.path.dirname(p["unit"])
+        plan.append(f"install the forge as your own service (a systemd user unit in {base}, the sync timer beside "
+                    f"it) and start them; systemctl links them in {base}/default.target.wants and "
+                    f"{base}/timers.target.wants, and uninstall takes the units and those links away")
     return plan
 
 
@@ -1814,8 +1856,10 @@ def cmd_setup(args):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
         say(LINGER_CHOICE)
         return 2
+    made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    record_made_folders(p, st, made)
     if fetch_forge(p, os.environ.get("WSM_GITEA_BASE")):
         say(f"Gitea {GITEA_VERSION} downloaded; checksum matches the pin.")
     else:
@@ -2458,8 +2502,10 @@ def setup_from(p, args):
         say(LINGER_CHOICE)
         return 2
     src = os.path.abspath(os.path.expanduser(args.from_file))
+    made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    record_made_folders(p, {}, made)
     fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
     work = scratch(p, "setup-from")
     try:
@@ -2510,7 +2556,7 @@ def setup_from(p, args):
                          "is in place, and the sync cannot reach it: open an issue with this line.")
     write_private(p["mirror_key"], secret(out.stdout.strip()) + "\n")
     st = dict(old_st, port=port, version=VERSION, gitea=GITEA_VERSION, restored_from=os.path.basename(src),
-              restored_at=now_utc())
+              restored_at=now_utc(), made_folders=made)
     st.pop("keys", None)
     save_state(p, st)
     here = os.path.abspath(__file__)
@@ -2731,7 +2777,11 @@ def cmd_uninstall(args):
         say("Needs you: deleting the copies cannot be undone, so the person does it themselves: in a terminal "
             f"window of their own, they run {line} and type the number of copies. Nothing was changed.")
         return 2
-    st = load_json(p["state"], {})
+    # Rule 6 (M65): a record that could not be read is never "setup made nothing": then no folder setup made is
+    # taken away, it is said, and the record is never written over.
+    raw = load_json(p["state"], None) if os.path.exists(p["state"]) else None
+    record = "read" if isinstance(raw, dict) else ("unreadable" if os.path.exists(p["state"]) else "none")
+    st = raw if record == "read" else {}
     # Rule 8: a sync that is running is a wait, said with what holds it, never a refusal of a person who wants to
     # leave. With no folder of the skill's left, nothing can be running, and no folder is made again.
     if os.path.exists(p["data"]):
@@ -2775,7 +2825,7 @@ def cmd_uninstall(args):
             elif st.get("linger_by_setup") is False:
                 linger_said = "Lingering was already on before setup, so it is left on."
             st.pop("linger_by_setup", None)
-            if os.path.exists(p["state"]):
+            if record == "read" and os.path.exists(p["state"]):
                 save_state(p, st)
         for d in (os.path.dirname(p["bin"]), p["cache"], p["conf"]):
             if os.path.exists(d):
@@ -2800,7 +2850,9 @@ def cmd_uninstall(args):
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
             rc = 1
-    uninstall_census(p, removed, linger_said, n, st)
+    if record == "read":
+        take_made_folders(st, removed)
+    uninstall_census(p, removed, linger_said, n, st, record)
     return rc
 
 
@@ -2815,7 +2867,7 @@ def downloaded_from(here):
     return "file", here
 
 
-def still_here(p, st):
+def still_here(p, st, record="read"):
     """G9.8 (M63, the family's rule 8, 2026-11-23: an agent invents where the tool is silent): everything still on
     this computer because of the skill that uninstall does not take, with where it is and whose it is to delete."""
     lines = []
@@ -2836,13 +2888,28 @@ def still_here(p, st):
         lines.append("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
                      "Claude Code's plugin folder): no record of where it is is left on this computer. It is yours, "
                      "or Claude Code's for a plugin; nothing runs from it now.")
+    made = [d for d in (st.get("made_folders") or []) if os.path.isdir(d)]
+    holds = [d for d in made if os.path.exists(p["data"]) and (p["data"] + os.sep).startswith(d + os.sep)]
+    if holds:
+        lines.append(", ".join(holds) + ": folders setup made to hold the folder of copies. They stay while it "
+                     "stays, and go with it once they are empty.")
+    for d in made:
+        if d not in holds:
+            lines.append(f"{d}: a folder setup made, left because other files are in it now. It is yours.")
+    if record == "unreadable":
+        lines.append(f"Folders setup made around its own (on a fresh computer, such as {os.path.dirname(p['unit'] if system()[0] != 'darwin' else p['plist'])}): "
+                     f"the record of them, {p['state']}, could not be read, so none was removed. Any of them that "
+                     "is empty is yours to delete or keep.")
+    elif record == "none":
+        lines.append("Folders setup made around its own, if any are still here: no record of them is left on this "
+                     "computer, so none was removed.")
     if system()[0] != "darwin":
         lines.append("Any lines of the service in this computer's journal (journalctl --user): the system ages them "
                      "out by itself.")
     return lines
 
 
-def uninstall_census(p, removed, linger_said, n, st=None):
+def uninstall_census(p, removed, linger_said, n, st=None, record="read"):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so."""
     say("uninstall: what is gone, and what is kept.")
@@ -2862,7 +2929,7 @@ def uninstall_census(p, removed, linger_said, n, st=None):
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
     else:
         say("Kept: nothing; there is no folder of copies and no record of the skill's on this computer now.")
-    left = still_here(p, st or {})
+    left = still_here(p, st or {}, record)
     if left:
         say("Still on this computer, and not uninstall's to take:")
         for x in left:
