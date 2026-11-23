@@ -6,7 +6,8 @@
   "When it has been seen to work on a real machine: say which kind of machine, which version and when in 'proven'. 'stand_in' says what the row's test stands in for when its verdict leans on how GitHub, git, Gitea, the system or Claude Code answers, or 'none'. A row with a stand-in is seen for real before the tag of its version, not after: on a release branch the tests refuse it while 'proven' is empty.",
   "'ship_in' moves only with a reason in 'moved_why'. A row whose owner is 'person' was seen by the person the skill is for, on their own machine: its date moves only by their word, restated in 'moved_by_person'.",
   "A row is never deleted. A promise that turns out wrong is closed by a row that says why.",
-  "A lesson that was heard and not taken goes under 'declined' with the reason, so that nothing is dropped without a word."
+  "A lesson that was heard and not taken goes under 'declined' with the reason, so that nothing is dropped without a word.",
+  "'exception' is empty, except by the owner's word: a row due in a version, leaning on a stand-in, that can only be seen for real after the tag (or waits on something only the owner can give) says here, in his words, why, and when it is seen. Its version may then be tagged before 'proven' is filled; the version after it still needs 'proven'."
  ],
  "rows": [
   {
@@ -22,7 +23,8 @@
    "proven": "2026-11-22, a Linux test account with no administrator rights, against the real GitHub on a private proof repository holding made-up data, with a broad GitHub login standing in for the read-only key the skill asks for: after four syncs, the key was found in none of the 4,201 files the account held (the forge's data, every repository config, the logs included).",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M2",
@@ -37,7 +39,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M3",
@@ -52,7 +55,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M4",
@@ -67,7 +71,8 @@
    "proven": "2026-11-22, a Linux test account with no administrator rights, against the real GitHub on a private proof repository holding made-up data, with a broad GitHub login standing in for the read-only key the skill asks for: a branch forced back on GitHub was followed by the copy at the next sync, 8 s later, and its old commit was kept in the copy as kept/2026-11-22/lab8.",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M5",
@@ -82,7 +87,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M6",
@@ -97,7 +103,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M7",
@@ -112,7 +119,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M8",
@@ -127,7 +135,8 @@
    "proven": "",
    "issue": "#23",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M9",
@@ -142,7 +151,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M10",
@@ -157,7 +167,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M11",
@@ -172,7 +183,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M12",
@@ -187,7 +199,8 @@
    "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255: after a reboot with lingering on, with nobody logged in, the person's service manager ran and the timer's next run was 2 minutes after the boot; `status` then said 'next sync' with that time.",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M13",
@@ -196,13 +209,14 @@
    "codon": "G9.2",
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
-   "ship_in": "0.1.0",
+   "ship_in": "0.1.1",
    "test": "test_G9_2_self_update_swaps_whole_and_never_during_a_sync",
    "stand_in": "GitHub (a stand-in's releases and downloads)",
    "proven": "",
    "issue": "",
-   "moved_why": "",
-   "moved_by_person": ""
+   "moved_why": "By the owner's word, 2026-11-23: a real move to a newer version needs a newer release, and there is none before 0.1.0; the tool reads releases with no key, so a private rehearsal cannot stand in. Its real proof is the first real update, 0.1.0 to 0.1.1, on a stock virtual machine, before 0.1.1 is announced. What 0.1.0 does promise of self-update is row M42.",
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M14",
@@ -217,7 +231,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M15",
@@ -232,7 +247,8 @@
    "proven": "2026-11-22, a Linux test account with no administrator rights, against the real GitHub on a private proof repository holding made-up data, with a broad GitHub login standing in for the read-only key the skill asks for: a sync with nothing changed on GitHub spent 1 API call and fetched nothing; after a force-push, the next sync fetched that repository.",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M16",
@@ -247,7 +263,8 @@
    "proven": "2026-11-22, a Linux test account with no administrator rights: with the named User-Agent, setup downloaded Gitea 28.4.0 and its checksum matched the pin.",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M17",
@@ -262,7 +279,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M18",
@@ -277,7 +295,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M19",
@@ -292,7 +311,8 @@
    "proven": "",
    "issue": "",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M20",
@@ -307,7 +327,8 @@
    "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255: after a reboot with lingering on, the next run was 2 minutes after the boot, with nobody logged in; after a reboot with lingering off, the person's service manager did not run before they logged in, and at their login the next run was 2 minutes later.",
    "issue": "#18",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M21",
@@ -322,7 +343,8 @@
    "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255, partial: three times (after setup, after a reboot with lingering on, at a login with it off) systemd's wall-clock field was empty and `status` read the next run from the boot clock. The wall-clock answer was not met: this timer keeps its runs on the boot clock.",
    "issue": "#19",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M22",
@@ -337,7 +359,8 @@
    "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255: with git removed, `setup --dry-run` and `setup --linger` each said git is not installed and how to install it, ended with exit 2 and made no folder; with git back and no git lfs, the dry run named git lfs as missing.",
    "issue": "#20",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M23",
@@ -352,7 +375,8 @@
    "proven": "2026-11-23, a stock Ubuntu 24.04.5 virtual machine (the cloud image, nothing of ours on it), a person with no administrator rights, mirror.py at aed930f, systemd 255, polkit 124: the dry run said lingering in plain words and that this computer lets the person switch it on; `setup` with no choice stopped with 'Needs you' and made nothing; `setup --linger` switched it on with no prompt and recorded that setup did. The other three answers of this computer (refused, administrator only, no pkcheck) and the no-prompt check at a real terminal were seen the same day on a stock virtual machine at 1a5393b.",
    "issue": "#21",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M24",
@@ -367,7 +391,8 @@
    "proven": "",
    "issue": "#26",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M25",
@@ -382,7 +407,8 @@
    "proven": "",
    "issue": "#38",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M26",
@@ -397,7 +423,8 @@
    "proven": "",
    "issue": "#28",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M27",
@@ -412,7 +439,8 @@
    "proven": "",
    "issue": "#30",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M28",
@@ -427,7 +455,8 @@
    "proven": "",
    "issue": "#32",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M29",
@@ -442,7 +471,8 @@
    "proven": "",
    "issue": "#34",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M30",
@@ -457,7 +487,8 @@
    "proven": "",
    "issue": "#35",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M31",
@@ -472,7 +503,8 @@
    "proven": "",
    "issue": "#37",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M32",
@@ -487,7 +519,8 @@
    "proven": "",
    "issue": "#36",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M33",
@@ -502,7 +535,8 @@
    "proven": "",
    "issue": "#44",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M34",
@@ -517,7 +551,8 @@
    "proven": "",
    "issue": "#47",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "id": "M35",
@@ -532,7 +567,8 @@
    "proven": "",
    "issue": "#49",
    "moved_why": "",
-   "moved_by_person": ""
+   "moved_by_person": "",
+   "exception": ""
   },
   {
    "owner": "maintainer",
@@ -547,7 +583,8 @@
    "stand_in": "none",
    "issue": "#51",
    "seen": "2026-11-23, two cold starts on a stock virtual machine: the smallest model told the person to run `key set` before setup, both times; the tool's refusal held ('Setup comes first ... No key was read, and nothing was kept'). Twice is our words, not the model.",
-   "promise": "The README and SKILL.md give the order so plainly that the person is not sent to a step that refuses: setup first, then each `key set`; the refusal's own line names the one next step. Seen when the next small-model cold start does not do it."
+   "promise": "The README and SKILL.md give the order so plainly that the person is not sent to a step that refuses: setup first, then each `key set`; the refusal's own line names the one next step. Seen when the next small-model cold start does not do it.",
+   "exception": ""
   },
   {
    "owner": "maintainer",
@@ -562,7 +599,8 @@
    "stand_in": "none",
    "issue": "#52",
    "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model probed GitHub with anonymous git and with SSH; both were refused there. On a person's own computer their SSH key or gh login is present and such a probe succeeds, giving the agent a road to every repository the person can reach, outside the one read-only key the tool confines.",
-   "promise": "SKILL.md says in plain words that the agent reaches GitHub through the tool only and never tries the person's own git, SSH or gh for it, and why; every cold-start write-up counts each reach outside the tool as a deviation."
+   "promise": "SKILL.md says in plain words that the agent reaches GitHub through the tool only and never tries the person's own git, SSH or gh for it, and why; every cold-start write-up counts each reach outside the tool as a deviation.",
+   "exception": ""
   },
   {
    "owner": "maintainer",
@@ -577,7 +615,8 @@
    "stand_in": "GitHub (a stand-in's key-expiry header)",
    "issue": "#53",
    "seen": "2026-11-23, a cold start on a stock virtual machine: the smallest model told the person the mirror warns two weeks before the key ends while its end date could not be read; status said 'expiry not known' but no block for the person said what that means, and SKILL.md itself promised the warning without a condition.",
-   "promise": "Each key's end has three answers: a date (the warning two weeks before is promised), no end date (said only once GitHub's way of saying it has been seen, contract C3), or could not be read: said so in the block the person hears before the go, with no warning promised and the place to read the date. SKILL.md never promises the warning itself."
+   "promise": "Each key's end has three answers: a date (the warning two weeks before is promised), no end date (said only once GitHub's way of saying it has been seen, contract C3), or could not be read: said so in the block the person hears before the go, with no warning promised and the place to read the date. SKILL.md never promises the warning itself.",
+   "exception": ""
   },
   {
    "owner": "maintainer",
@@ -592,7 +631,8 @@
    "stand_in": "none",
    "issue": "#57",
    "seen": "2026-11-23, a reading of our own text against the family's rule on Macs: the Mac's git line, in the tool and the README, described what Apple's command shows on a Mac without the developer tools, while it was only ever run on Macs that had them; and the one Mac sighting in 'Seen to work' did not say which kind of Mac or which account it was (it was the Mac's own main account, with two stand-in launch agents).",
-   "promise": "Every Mac sighting is written as what it was: a Mac that carries Apple's developer tools, and in which account; no Mac is called untouched (we have none), and no text describes what a Mac without those tools shows. The Mac's git line names the developer tools and Apple's command for them, nothing more."
+   "promise": "Every Mac sighting is written as what it was: a Mac that carries Apple's developer tools, and in which account; no Mac is called untouched (we have none), and no text describes what a Mac without those tools shows. The Mac's git line names the developer tools and Apple's command for them, nothing more.",
+   "exception": ""
   },
   {
    "owner": "maintainer",
@@ -607,7 +647,8 @@
    "stand_in": "none",
    "issue": "#59",
    "seen": "2026-11-23, the family's rule on real proof before the tag, read against our own gate: it refused a version only for a row with no test, and the version after it for a row with no proven line, so a row whose test leans on a stand-in could be tagged while seen only by that stand-in.",
-   "promise": "Every row says what its test stands in for, or 'none'; on a release branch the tests refuse each row due in that version that has a stand-in and no proven line; the check fails once on purpose with a made-up row."
+   "promise": "Every row says what its test stands in for, or 'none'; on a release branch the tests refuse each row due in that version that has a stand-in and no proven line; the check fails once on purpose with a made-up row.",
+   "exception": ""
   },
   {
    "owner": "maintainer",
@@ -622,7 +663,24 @@
    "stand_in": "the service manager (stand-ins for systemctl and launchctl); Claude Code's own plugin uninstall is not run by the test",
    "issue": "#61",
    "seen": "2026-11-23, uninstall read against the family's rule on leaving: a running sync made it refuse with a sync's words; run twice, it said the service and the rest 'are removed' with nothing under it; after the copies were deleted, it made the skill's folder again to take a lock; it said nothing of what was kept unless the copies were there; and the README did not say what goes on running after Claude Code's own plugin uninstall.",
-   "promise": "A running sync is a wait that names the process and goes on when it ends (up to 10 minutes; past that it says what runs, that nothing was removed, and to run it again); the last thing printed is a census of what is gone and what is kept (the copies and the record of what the skill did, which are the person's); run twice it is safe; what setup left takes itself off without the plugin; nothing of ours acts on the person's Claude Code sessions; the README says what keeps running after Claude Code's own plugin uninstall and the one command that takes it off."
+   "promise": "A running sync is a wait that names the process and goes on when it ends (up to 10 minutes; past that it says what runs, that nothing was removed, and to run it again); the last thing printed is a census of what is gone and what is kept (the copies and the record of what the skill did, which are the person's); run twice it is safe; what setup left takes itself off without the plugin; nothing of ours acts on the person's Claude Code sessions; the README says what keeps running after Claude Code's own plugin uninstall and the one command that takes it off.",
+   "exception": ""
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M42",
+   "codon": "G9.5",
+   "test": "test_G9_5_self_update_on_the_latest_release_says_so_with_the_checksum_it_read",
+   "stand_in": "GitHub (a stand-in's latest release)",
+   "issue": "#64",
+   "exception": "By the owner's word, 2026-11-23: the real read can only happen once the 0.1.0 release exists, so it is seen right after the tag and before the catalog is pinned to it, on a stock virtual machine, as a step of the release; if it fails, the catalog is not pinned until it is understood.",
+   "seen": "2026-11-23, the owner's ruling on row M13: before 0.1.0 there is no newer release to move to, so on the day people first depend on self-update, what can be seen is its read of the real release.",
+   "promise": "self-update on the latest release reads it with no key and says there is nothing newer, with the checksum of mirror.py the release names and whether this very file matches it; on a mismatch it changes nothing and names Claude Code's own plugin update, then setup."
   },
   {
    "owner": "maintainer",
@@ -636,6 +694,7 @@
    "test": "test_T4_mac_jobs_are_shared_so_a_pull_request_runs_one",
    "stand_in": "none",
    "issue": "#96",
+   "exception": "",
    "seen": "2026-11-23: one afternoon had 34 runs queued and none running, Mac runners being shared by the family's five repositories; changes in two of them waited about an hour each.",
    "promise": "A pull request runs one Mac job, the floor's Python; the full Mac matrix runs on main and release-*; the gate expects the reports of the event it runs on; a newer push to a pull request cancels its older runs, never a run on main or a release branch."
   }
