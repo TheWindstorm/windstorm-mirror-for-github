@@ -141,6 +141,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G2.3 | A key that can write is named for what it is. When GitHub's answer shows a classic key with write scopes, `key set` and `status` say "this key can write to GitHub; the skill never uses that, make a read-only one". | `test_G2_3_a_key_that_can_write_is_named_for_what_it_is` *(to build)* |
 | G2.4 | `status` shows each key's expiry, from GitHub's answer, on its own line, and warns 14 days before it. A key that is refused, or still waiting for an organisation's approval, turns that owner's copies to "cannot refresh", never "current", and `status` says which key it is. | `test_G2_4_each_keys_expiry_is_watched_and_a_refused_key_is_never_current` *(to build)* |
 | G2.5 | Changing a key is one step, `key set <owner>` again. The next sync proves that every repository of that owner refreshed with the new key, or names those that did not. | `test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it` |
+| G2.6 | A key is never taken before setup. Before setup, `key set` reads no key, asks GitHub nothing and keeps nothing, and says "Setup comes first: run setup, then key set <owner>", so every key lands where uninstall and the key scan already look (a cold start saw an agent give `key set` before setup, M31). | `test_G2_6_a_key_is_never_taken_before_setup` |
 
 ### G3 Find every project, and copy it
 

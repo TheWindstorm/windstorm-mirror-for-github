@@ -428,6 +428,20 @@
    "issue": "#36",
    "moved_why": "",
    "moved_by_person": ""
+  },
+  {
+   "id": "M31",
+   "seen": "2026-11-23, the cold start's run B: the agent told the person to run key set before setup, against SKILL.md's order; key set before setup checked the key with GitHub and kept it in a file before the skill that guards it was installed.",
+   "promise": "Before setup, key set reads no key, asks GitHub nothing and keeps nothing, and says setup comes first.",
+   "codon": "G2.6",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G2_6_a_key_is_never_taken_before_setup",
+   "proven": "",
+   "issue": "#37",
+   "moved_why": "",
+   "moved_by_person": ""
   }
  ],
  "declined": []

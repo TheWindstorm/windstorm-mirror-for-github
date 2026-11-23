@@ -724,6 +724,10 @@ def cmd_key_set(args):
     if not OWNER_RE.match(owner):
         say(f"'{owner}' is not a GitHub account or organisation name.")
         return 2
+    if not load_json(p["state"], {}).get("port"):
+        # G2.6: setup comes first, so every key lands where uninstall and the key scan already look. Nothing is read.
+        say(f"Setup comes first: run setup, then key set {owner}. No key was read, and nothing was kept.")
+        return 2
     key = secret(read_key_from_stdin())
     if not key or any(c.isspace() for c in key) or len(key) > 255:
         say(f"No key was read (or it was not one line). Nothing was kept. Run key set {owner} again in a terminal "
