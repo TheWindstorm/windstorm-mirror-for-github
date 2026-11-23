@@ -21,8 +21,9 @@ Follow these steps in this order. Do not skip one, and do not change the order. 
 marked **Person** and is described under "The person's steps": say what is written there, then wait.
 
 1. `M setup --dry-run`. Show the person its whole output: it says what setup would do and changes nothing.
-2. **Person**: the keys to make. One read-only key for each owner whose projects are to be copied: their own
-   account, and each organisation they name. See "Making each key".
+2. **Person**: the keys to make. Run `M key plan <their account> [<organisation> ...]` and read it to the
+   person: one read-only key for each owner whose projects are to be copied, with its page and settings. See
+   "Making each key".
 3. `M setup`. It installs the forge as the person's own service. If it prints a command for an administrator
    (lingering), that is a **Person** step: see "The administrator's command".
 4. **Person**: `key set` for each owner. The person runs it themselves, so the key never passes through you:
