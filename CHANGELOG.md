@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- G1.3 (C10): the test now shows Actions are off for the whole forge, not only set off: the runner service is not served, so no runner can join, and a project's Actions cannot be turned on. Checked against the same forge with Actions on, where a runner registers.
 - G4.8 (row M25, #38): when GitHub says the allowance is spent (or it falls below the floor), the sync says one line with the reset in your own time, asks GitHub nothing before it, even after a restart, and marks no project failed. The plan counts the calls a sync makes.
 - G2.6 (row M31, #37): `key set` before setup reads no key, asks GitHub nothing and keeps nothing; it says setup comes first.
 - G3.9 (row M32, #36): the announcement names the projects (20 by name, then "and N more", the whole list in a file only you can read), and the first copy copies exactly the list last announced. If it changed in between, nothing is copied, the list is said again, and a new go is asked.
