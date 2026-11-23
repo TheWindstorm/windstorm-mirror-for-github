@@ -969,6 +969,38 @@
    "issue": "",
    "seen": "2026-11-23, a Mac test account (macOS 13.7.8): the tool printed `python3 -I /Users/<account>/Library/Application Support/windstorm-mirror/mirror.py uninstall --delete-copies` for the person to run, which a shell splits at the space in 'Application Support'.",
    "promise": "Every command the tool prints with its own copy's path runs as printed when pasted whole into a shell: the path is quoted. The skill's instructions say the Mac path holds a space."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "",
+   "id": "M61",
+   "codon": "G3.13",
+   "test": "test_G3_13_the_person_hears_it_in_their_own_terminal_and_the_go_is_their_enter",
+   "stand_in": "the person's terminal (a stand-in whose input says it is a terminal) and GitHub (a stand-in's listing)",
+   "seen": "2026-11-23, a sister skill's fifth cold start with the smallest model: it reworded even a one-line block, dropped facts and invented a step, while the skill's text said never to reword. Read against this skill: everything the person must hear before the first copy (what will be copied, that the copy is as private as this computer, what is not copied, each key's end date, what happens after a restart) reached them only through the agent's relay of sync --announce, and the go was a yes in the conversation.",
+   "promise": "What the person must hear before the first copy is also printed by a command they run themselves, in a terminal window of their own: go prints the same block as the announcement, numbered to them, copies nothing, and keeps their go only when they press Enter alone there, for exactly that list. Anything piped in, typed otherwise or left unanswered gives no go. The first copy refuses without that go for the list it would copy, so a yes in a conversation is never the go. key set names go as the next step, and the skill's text tells the agent never to run it."
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "",
+   "id": "M62",
+   "codon": "G9.7",
+   "test": "test_G9_7_the_agent_never_deletes_or_offers_to_delete_what_uninstall_kept",
+   "stand_in": "none",
+   "seen": "2026-11-23, a sister skill's cold start with the smallest model: after an uninstall, the agent offered, unasked, to delete what the uninstall had kept. This skill's text said deleting the copies is the person's own command, but not that the agent never offers it.",
+   "promise": "The skill's text tells the agent never to delete, and never to offer to delete, the folder of copies or the record that uninstall kept, unless the person asks in their own words in that conversation; even then, the deletion is the person's own command in a terminal window of their own."
   }
  ],
  "declined": []

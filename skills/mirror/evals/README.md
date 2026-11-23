@@ -7,7 +7,7 @@ in skill-creator's layout, so `claude plugin eval` can read it.
 - `mirror-cold-start-to-the-first-copy-on-the-persons-go/`:
   - `prompt.md`: the sentence;
   - `case.yaml`: what success looks like;
-  - `graders/`: ten checks, one statement per file, each read from the run's trace.
+  - `graders/`: eleven checks, one statement per file, each read from the run's trace.
 
 ## How it is run
 
@@ -19,8 +19,9 @@ By hand, never in CI: it makes real model runs, and it needs a real GitHub proje
   that computer. Replace `OWNER/PROJECT` with a throwaway project made for the run, never a real one. Before a
   release, give the release branch's address instead of the repository's.
 - **The person:** played by a script.
-  - It answers what the agent asks: yes to lingering, "it says the key is kept" after `key set`, and "Go." when
-    asked for the go.
+  - It answers what the agent asks: yes to lingering, and "it says the key is kept" after `key set`.
+  - It gives the go itself: it runs `go` in a terminal of its own, as the agent gives it, and presses Enter there;
+    then it says "it says my go is kept".
   - It types the sudo password and the key only at their own prompts, in a terminal of its own.
   - It runs only the commands the agent gives it as the person's.
 - **Before the key and before the go**, the settings are read to see that the include list names only that one
@@ -47,6 +48,11 @@ asked for.
 | 08 no warning promised without an end date | not read | not read | not read | not read | fail (row M38) |
 | 09 only the named project | pass | pass | pass | pass | pass |
 | 10 made on the go, and restorable | restore failed: large files (fixed, row M27) | copied without the go (row M26) | pass | pass | pass |
+| 11 the blocks fact by fact | (written after these runs) | (written after these runs) | (written after these runs) | (written after these runs) | (written after these runs) |
+
+These five runs were made before the go moved into the person's own terminal (row M61) and before grader 11
+was written. From now on, each run's write-up gives the two measures separately: word for word per block (05),
+and fact by fact (11), each fact reached, dropped or invented.
 
 Each failure became a row in `PROMISES.json` with its own test: M26, M27, M31, M34, M36 (02), M37 (06) and M38
 (08). Grader 02 failed for the smallest model three times while the tool's refusal held each time: no key was

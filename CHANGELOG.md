@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- G3.13 (row M61): the go for the first copy is the person's own Enter, in their own terminal: `go` prints there the same block the agent is given, copies nothing, and keeps the go for exactly that list; the first copy refuses without it, so a yes in a conversation is not the go.
+- G9.7 (row M62): the skill tells the agent never to delete, or offer to delete, what uninstall kept, unless the person asks in their own words.
 - G6.12 (row M60): every command the tool prints with its own path is quoted, so it runs as printed where the path holds a space (a Mac's `Application Support`).
 - G3.12 (row M59): `sync --announce` asks the forge first; when it does not answer, nothing is announced and GitHub is not asked.
 - G1.16 (row M58): on a Mac, setup in an account not logged in at the screen says so in the person's words, with the next step, never launchctl's.

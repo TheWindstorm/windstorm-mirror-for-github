@@ -1061,6 +1061,12 @@ def quiet(fn, *args):
     return rc, out.getvalue()
 
 
+class AtTerminal(io.StringIO):
+    """Standing in for the person's own terminal: what is typed there."""
+    def isatty(self):
+        return True
+
+
 class World:
     """A stand-in GitHub, and a real forge of the person's own, set up and running, with the person's key kept."""
 
@@ -1106,8 +1112,19 @@ class World:
     def sync(self, *args):
         return quiet(mirror.main, ["sync", *args])
 
+    def go(self, answer="\n"):
+        """G3.13: the person's own go, typed at a terminal of their own (a stand-in terminal)."""
+        saved = sys.stdin
+        sys.stdin = AtTerminal(answer)
+        try:
+            return quiet(mirror.main, ["go"])
+        finally:
+            sys.stdin = saved
+
     def first_sync(self):
         self.tc.assertEqual(self.sync("--announce")[0], 0)
+        rc, out = self.go()
+        self.tc.assertEqual(rc, 0, out)
         return self.sync()
 
     def forge_get(self, path):
@@ -1256,6 +1273,7 @@ class G3(unittest.TestCase):
             mirror.Forge.call = no_private
             try:
                 w.sync("--announce")
+                w.go()
                 rc, out = w.sync()
             finally:
                 mirror.Forge.call = saved
@@ -1344,6 +1362,9 @@ class G3(unittest.TestCase):
             outs = [quiet(mirror.main, ["setup", "--dry-run"])[1]]
             rc, out = w.sync("--announce")
             outs.append(out)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            outs.append(out)
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             outs.append(out)
@@ -1399,7 +1420,8 @@ class G3(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("The first copy: 5 repositories from 1 owner(s), 2.0 MB as GitHub reports it", out)
             self.assertIn("as private as this computer", out)
-            self.assertIn("Nothing was copied. When the person says go, run: sync", out)
+            self.assertIn("Nothing was copied. The go for the first copy is the person's own, given in a terminal window "
+                          "of their own", out)
             self.assertEqual(w.forge_get("/user/repos")[1], [], "the announcement copied something")
             # Seen in a cold start (P1a run B, 2026-11-23): an agent ran --announce again "to re-check", and the
             # tool made the first copy without the go. Every later announcement says it all again, copies nothing.
@@ -1416,7 +1438,12 @@ class G3(unittest.TestCase):
             st = mirror.load_json(w.p["state"], {})
             self.assertTrue(st.get("announced"))
             self.assertNotIn("go", st)
-            self.assertIn("first copy: waiting for your go", quiet(mirror.main, ["status"])[1])
+            self.assertIn("first copy: waiting for your go: in a terminal window of your own, run python3 -I ",
+                          quiet(mirror.main, ["status"])[1])
+            rc, out = w.sync()                                   # the agent's sync, with no go of the person's
+            self.assertEqual(rc, 2, out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "a sync copied before the person's own go")
+            self.assertEqual(w.go()[0], 0)
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertRegex(out, r"first copy: 3 of 5 done; about \d+ min left at this pace")
@@ -1434,6 +1461,61 @@ class G3(unittest.TestCase):
             self.assertNotIn("The first copy: 5", out)
             self.assertEqual(mirror.load_json(w.p["state"], {})["go"], go, "an announcement moved the go")
             self.assertEqual(w.forge_refs("someone--r1"), before, "an announcement after the go copied")
+
+    def test_G3_13_the_person_hears_it_in_their_own_terminal_and_the_go_is_their_enter(self):
+        """M61, the family's rule 7 (2026-11-23: a small model reworded even a one-line block, dropped facts and
+        invented a step): what the person must hear before the first copy is also printed by a command they run
+        themselves, in their own terminal, before anything changes, and the copy goes on only after they press Enter
+        there. The same facts on both roads; nothing piped in, typed otherwise or left unanswered is a go; a yes in
+        a conversation (the agent's sync alone) copies nothing."""
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            rc, out = w.key_set()
+            self.assertEqual(rc, 0, out)
+            self.assertIn("the go for the first copy is yours, here in this window: run python3 -I ", out)
+            self.assertIn(" go. It shows what will be copied and waits for your Enter.", out)
+            rc, relayed = w.sync("--announce")
+            self.assertEqual(rc, 0, relayed)
+            agent_block = [x.split(": ", 1)[1] for x in relayed.splitlines() if x.startswith("tell the person ")]
+            state = lambda: mirror.load_json(w.p["state"], {})
+            saved = sys.stdin
+            try:
+                sys.stdin = io.StringIO("\n")                      # piped in, even an Enter: refused
+                rc, out = quiet(mirror.main, ["go"])
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 2, out)
+            self.assertIn("in a terminal window of their own", out)
+            self.assertNotIn("person_go", state())
+            for typed in ("yes\n", "no\n", " \n", ""):              # anything but Enter alone, or nothing at all
+                rc, out = w.go(typed)
+                self.assertEqual(rc, 1, (typed, out))
+                self.assertIn("No go was given. Nothing was copied or changed.", out)
+                self.assertNotIn("person_go", state(), typed)
+            rc, out = w.sync()                                   # the agent's sync on a yes in a conversation
+            self.assertEqual(rc, 2, out)
+            self.assertIn("it has not been given for this list", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [])
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("tell the person", out)              # said to the person, not for relaying
+            lines = out.splitlines()
+            block = [x.split(": ", 1)[1] for x in lines if re.match(r"^\d+ of \d+: ", x)]
+            self.assertEqual(block, agent_block, "the person's own terminal and the agent's block say different things")
+            for fact in (mirror.PRIVATE_AS_THIS_COMPUTER, mirror.NOT_COPIED, "The end date of the key for someone",
+                         "After a restart", "They are: someone/alpha, someone/beta."):
+                self.assertTrue(any(fact in x for x in block), fact)
+            ask = next(i for i, x in enumerate(lines) if x.startswith("Press Enter to give your go"))
+            self.assertGreater(ask, max(i for i, x in enumerate(lines) if re.match(r"^\d+ of \d+: ", x)))
+            self.assertTrue(lines[-1].startswith("Your go is kept, for these 2 repositories only."), out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [], "go copied something itself")
+            self.assertEqual(state()["person_go"]["list"], ["someone/alpha", "someone/beta"])
+            self.assertNotIn("go", state())
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(sorted(r["name"] for r in w.forge_get("/user/repos")[1]), ["someone--alpha", "someone--beta"])
 
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():
@@ -1517,6 +1599,7 @@ class G3(unittest.TestCase):
             lst = w.p["first_copy_list"]
             self.assertEqual(fread(lst), "someone/a\nsomeone/b\n")
             self.assertEqual(os.stat(lst).st_mode & 0o777, 0o600)
+            self.assertEqual(w.go()[0], 0)                       # the person's go, for a and b
 
             def refused(why, counts):
                 rc, out = w.sync()
@@ -1525,7 +1608,7 @@ class G3(unittest.TestCase):
                               "last announcement). Nothing was copied.", out)
                 self.assertEqual(w.forge_get("/user/repos")[1], [], f"{why}: copied after a change")
                 self.assertNotIn("go", mirror.load_json(w.p["state"], {}), f"{why}: a go recorded")
-                self.assertTrue(out.rstrip().endswith("when they say go to this list, run: sync"), out)
+                self.assertTrue(out.rstrip().endswith("When it says their go is kept, run: sync"), out)
                 return told(out)
 
             # 1. The include list grows between the announcement and the go.
@@ -1547,7 +1630,13 @@ class G3(unittest.TestCase):
             said = refused("another owner's key", "1 more and 0 fewer")
             self.assertTrue(said[0].startswith("The first copy: 4 repositories from 2 owner(s)"), said)
             self.assertIn("They are: acme/x, someone/a, someone/b, someone/c.", said)
+            # The person's go was for the old list: the agent's sync alone copies nothing.
+            rc, out = w.sync()
+            self.assertEqual(rc, 2, out)
+            self.assertIn("it has not been given for this list", out)
+            self.assertEqual(w.forge_get("/user/repos")[1], [])
             # The go to the list as it was last said copies exactly that list.
+            self.assertEqual(w.go()[0], 0)
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             names = sorted(r["name"] for r in w.forge_get("/user/repos")[1])
@@ -2324,6 +2413,7 @@ class G6(unittest.TestCase):
             w.gh.commit("someone/alpha", {"a": b"1"})
             w.key_set()
             self.assertEqual(w.sync("--announce")[0], 0)
+            self.assertEqual(w.go()[0], 0)
             port = w.port
 
             def stop():
@@ -2879,6 +2969,15 @@ class G9(unittest.TestCase):
             self.assertEqual(w.gh.release_calls.count(True), 0, "the release was read with a key")
             self.assertGreater(len(w.gh.release_calls), 0)
 
+    def test_G9_7_the_agent_never_deletes_or_offers_to_delete_what_uninstall_kept(self):
+        """M62, the family's rule 8 (2026-11-23: a small model offered, unasked, to delete what an uninstall kept):
+        the skill's text tells the agent never to delete it, and never to offer to, unless the person asks in their
+        own words; even then, the deletion is the person's own command at a terminal of their own."""
+        never = " ".join(fread(SKILL).split("## Never", 1)[1].split())
+        self.assertIn("Never delete, and never offer to delete, the folder of copies or the record that uninstall "
+                      "kept, unless the person asks for it in their own words in this conversation; even then, it is "
+                      "their own command (`uninstall --delete-copies`, in a terminal window of their own).", never)
+
     def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
         """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never
         run ours. Claude Code empties the plugin's row in its list of installed plugins and marks the plugin's folder
@@ -3225,7 +3324,8 @@ class G10(unittest.TestCase):
             self.assertTrue(said[3].startswith("After a restart"), said)
             self.assertEqual(said[4], mirror.key_end_line("someone", ""))
             self.assertEqual(said[5:], [mirror.NOT_COPIED, mirror.PRIVATE_AS_THIS_COMPUTER])
-            self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
+            self.assertTrue(out.splitlines()[-1].endswith("which shows them this same block and waits for their Enter. "
+                                                      "When it says their go is kept, run: sync"), out)
         _, _, body = skill_front()
         self.assertIn("Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the\nperson.",
                       body)
@@ -3276,7 +3376,8 @@ class G10(unittest.TestCase):
                     self.assertIn("administrator", restart[0])
                     self.assertIn("sudo loginctl enable-linger", restart[0])
                 self.assertEqual(mirror.lfs_missing() in said, not lfs, said)
-                self.assertEqual(out.splitlines()[-1], "Nothing was copied. When the person says go, run: sync")
+                self.assertTrue(out.splitlines()[-1].endswith("which shows them this same block and waits for their Enter. "
+                                                      "When it says their go is kept, run: sync"), out)
         _, _, body = skill_front()
         order = section(body, "The order")
         self.assertIn("what happens after a restart", order)
@@ -3536,7 +3637,8 @@ class G6Words(unittest.TestCase):
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
         data = {"SKILL_REPO", "GITEA_VERSION", "last_line",          # facts inside a line, not its words
-                "lock_holder", "UNINSTALL_WAIT", "VERSION"}                     # (which process; how long uninstall waits)
+                "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
+                "own_command"}                                                   # (the command to run, as it runs)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop"},
                          set(),
                          "a stop line is built from something this test does not check")

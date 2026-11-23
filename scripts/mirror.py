@@ -116,13 +116,14 @@ def say(msg=""):
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
-def tell(lines):
+def tell(lines, to_the_person=False):
     """G10.5: what the person must hear goes out as one numbered block, "tell the person 1 of N: ..." to "N of N",
     so a line dropped, shortened or merged on its way to the person shows (a cold start saw the smallest model
-    shorten the dry run to one line and drop a sentence of the privacy line)."""
+    shorten the dry run to one line and drop a sentence of the privacy line). G3.13: in the person's own terminal
+    the same lines go out numbered "1 of N: ...", to them directly."""
     lines = [x for x in lines if x]
     for i, x in enumerate(lines, 1):
-        say(f"tell the person {i} of {len(lines)}: {x}")
+        say(f"{'' if to_the_person else 'tell the person '}{i} of {len(lines)}: {x}")
 
 
 def load_json(path, default):
@@ -836,6 +837,9 @@ def cmd_key_set(args):
     write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
     say(f"The key for {owner} ({'your account' if kind == 'user' else 'organisation'}) is kept in "
         f"{key_path(p, owner)}, readable by you only. It is used for {owner}'s repositories and nothing else.")
+    if not load_json(p["state"], {}).get("go"):
+        say("Once a key is kept for every owner to copy, the go for the first copy is yours, here in this window: run "
+            f"{own_command(p, 'go')}. It shows what will be copied and waits for your Enter.")
     return 0
 
 
@@ -1385,10 +1389,10 @@ def restart_line(st):
             f"with one command: {LINGER_COMMAND.format(user=getpass.getuser())} ({LINGER_MEANS}).")
 
 
-def announce_first_copy(p, st, picked, complete):
+def announce_first_copy(p, st, picked, complete, to_the_person=False):
     """G3.7, G3.9: what the person says yes to, named: how many, which (the first ANNOUNCE_NAMES by name, the whole
     list in a file of the person's own), how big, where they go, what is not copied, how private. It is kept, and the
-    go copies exactly this list."""
+    go copies exactly this list. G3.13: `go` prints the same block in the person's own terminal."""
     names = first_copy_names(picked)
     size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
     write_file(p["first_copy_list"], "".join(n + "\n" for n in names), 0o600)
@@ -1402,10 +1406,37 @@ def announce_first_copy(p, st, picked, complete):
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
           restart_line(st), lfs_missing() if not has_git_lfs() else "",
           *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
-          NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
+          NOT_COPIED, PRIVATE_AS_THIS_COMPUTER], to_the_person)
     st["announced"] = st.get("announced") or now_utc()
     st["announced_list"] = names
     save_state(p, st)
+
+
+def ask_go(p, st, names):
+    """G3.13 (M61): the person's own go, after the block was printed in their own terminal: Enter alone gives it,
+    for exactly this list; anything else, or nothing (the end of input), gives nothing."""
+    say(f"Press Enter to give your go for the first copy of exactly these {len(names)} repositories. Type anything "
+        "else first, and no go is given.")
+    answer = sys.stdin.readline()
+    if answer != "\n" and answer != "\r\n":
+        say(f"No go was given. Nothing was copied or changed. To give it later, run this again: {own_command(p, 'go')}")
+        return 1
+    st["person_go"] = {"at": now_utc(), "list": names}
+    save_state(p, st)
+    say(f"Your go is kept, for these {len(names)} repositories only. The first copy starts with the next sync: tell "
+        f"your agent, or run it here yourself: {own_command(p, 'sync')}")
+    return 0
+
+
+def cmd_go(args):
+    """G3.13 (M61, the family's rule 7): what the person must hear before the first copy is printed by a command they
+    run themselves, in their own terminal, and the copy goes on only after they press a key. Nothing piped in counts."""
+    p = paths()
+    if not sys.stdin.isatty():
+        say("Needs you: the go for the first copy is the person's own: in a terminal window of their own, they run "
+            f"{own_command(p, 'go')}, read what it shows and press Enter. No go was given, and nothing was changed.")
+        return 2
+    return cmd_sync(argparse.Namespace(announce=False, go=True, from_timer=False))
 
 
 def left_out_line(skipped):
@@ -1469,7 +1500,8 @@ def sync(p, args):
     s = load_json(p["settings"], {})
     owners = s.get("owners") or {}
     if getattr(args, "from_timer", False) and not st.get("go"):
-        say("waiting for the person's go: nothing is copied until they say go and a sync is run on their word")
+        say("waiting for the person's go: nothing is copied until they give it in a terminal of their own (go) and "
+            "a sync is run")
         return 0
     if not st.get("port") or not os.path.exists(p["mirror_key"]):
         say("Run setup first.")
@@ -1483,7 +1515,8 @@ def sync(p, args):
         return 2
     # G3.12 (M59): nothing is announced that cannot then be done. The announcement asks the forge first, as the sync
     # does, and asks GitHub nothing when the forge does not answer.
-    if args.announce and not st.get("go") and Forge(p, st).call("GET", "/version")[0] != 200:
+    person_go = getattr(args, "go", False)
+    if (args.announce or person_go) and not st.get("go") and Forge(p, st).call("GET", "/version")[0] != 200:
         say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so the first copy is not announced: it "
             "could not be made now. Nothing was changed, and GitHub was not asked. It is your own service on this "
             "computer: run status; if it still does not answer, run setup, which starts it again, then run sync "
@@ -1542,18 +1575,24 @@ def sync(p, args):
             "the names (owner/name, as GitHub shows them) with config include, or clear the list with config "
             "include --clear.")
         return 2
-    if args.announce:
-        # G3.7: the announcement never copies, the first time or any time after; only a plain sync is the go.
+    if args.announce or person_go:
+        # G3.7: the announcement never copies, the first time or any time after. G3.13: neither does `go`; it keeps
+        # the person's go for exactly this list, and the copy is made by a sync.
         if st.get("go"):
             say(f"The first copy was made on {local_time(st['go'])}, on the person's go; there is nothing to "
                 "announce, and nothing was copied now. The timer keeps the copies current.")
             return 0
         if len(complete) < len(owners):
             say("The first copy is not announced: the list of projects could not be read for "
-                + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
+                + "; ".join(problems) + ". Nothing was changed. Run "
+                + ("go" if person_go else "sync --announce") + " again when GitHub answers.")
             return 1
-        announce_first_copy(p, st, picked, complete)
-        say("Nothing was copied. When the person says go, run: sync")
+        announce_first_copy(p, st, picked, complete, person_go)
+        if person_go:
+            return ask_go(p, st, first_copy_names(picked))
+        say("Nothing was copied. The go for the first copy is the person's own, given in a terminal window of their "
+            f"own: they run {own_command(p, 'go')}, which shows them this same block and waits for their Enter. When "
+            "it says their go is kept, run: sync")
         return 0
     if not st.get("announced"):
         say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
@@ -1573,7 +1612,17 @@ def sync(p, args):
             say(f"Needs you: the first copy would not be what the person was told ({more} more and {fewer} fewer "
                 "than the last announcement). Nothing was copied. It is said again here:")
             announce_first_copy(p, st, picked, complete)
-            say("Give the person the block above; when they say go to this list, run: sync")
+            say("Give the person the block above. Their go, if they gave one, was for the old list: in a terminal "
+                f"window of their own, they run {own_command(p, 'go')}, which shows the new list and waits for their "
+                "Enter. When it says their go is kept, run: sync")
+            return 2
+        # G3.13 (M61, rule 7): the go is the person's own Enter, in their own terminal, after the same block was
+        # printed there; an agent's relay is never the only road for what they must hear, and a yes in a
+        # conversation is not the go.
+        if (st.get("person_go") or {}).get("list") != names:
+            say("Needs you: the go for the first copy is the person's own, given in a terminal window of their own, "
+                f"and it has not been given for this list. They run {own_command(p, 'go')}: it shows what will be "
+                "copied and waits for their Enter. Nothing was copied.")
             return 2
     forge = Forge(p, st)
     # G6.10 (M48): a forge that does not answer is said by the sync itself, even when nothing changed on GitHub, so
@@ -2084,7 +2133,8 @@ def cmd_status(args):
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
         + (f", {no_lfs} without its large files" if no_lfs else ""))
     say(f"first copy: made on {local_time(st['go'])}, on your go" if st.get("go") else
-        "first copy: waiting for your go (sync --announce says what will be copied; a sync on your word starts it)")
+        "first copy: waiting for your go: in a terminal window of your own, run " + own_command(p, "go")
+        + " (it shows what will be copied and waits for your Enter); a sync then starts it")
     for x in notes:
         say(x)
     say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "
@@ -2804,6 +2854,8 @@ def main(argv=None):
     y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
     y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
+    g = sub.add_parser("go", help="the person's own go for the first copy, in a terminal of their own")
+    g.set_defaults(fn=cmd_go)
     lo = sub.add_parser("left-out", help="the names of the projects your include list and exclude patterns leave out")
     lo.set_defaults(fn=cmd_left_out)
     st_ = sub.add_parser("status", help="what is copied, what is behind, and when the next sync runs")
