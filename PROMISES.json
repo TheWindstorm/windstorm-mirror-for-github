@@ -1367,8 +1367,8 @@
    "test": "",
    "stand_in": "none",
    "moved_why": "By the maintainer's word, 2026-11-24: read in the code while fixing row M84; written the day it was read; due 0.1.1.",
-   "seen": "2026-11-24, read in the code, not seen: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen; the service is installed and started, the forge's health check never answers, setup says only that the forge was not answering yet, \"run `status` in 5 minutes\", and that its own words are in gitea.log, and setup answers 0.",
-   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then."
+   "seen": "2026-11-24, read in the code, not seen: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen; the service is installed and started, the forge's health check never answers, setup says only that the forge was not answering yet, \"run `status` in 5 minutes\", and that its own words are in gitea.log, and setup answers 0. Read too (2026-11-24): setup and restore read that a forge answers on the port, not that it is this skill's own; with another forge on the kept port they would say it runs.",
+   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then. Setup and restore say the forge runs only when the listener on the port is this skill's own forge (the listening process is the one the service started, of this account), never from an answer alone."
   },
   {
    "owner": "maintainer",
