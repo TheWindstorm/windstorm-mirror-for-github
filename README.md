@@ -240,6 +240,10 @@ with no key; a sync and a restore on a Mac are not seen yet.
     version or environment. If that program is moved or removed, the forge and the sync stop: `status` says the forge
     does not answer, with its one step, setup again, which writes the python3 it is run with. Seen on Linux with
     a python3 taken away; not seen on a Mac.
+  - on Linux, uninstall can sit without a word while systemd stops the forge's service. With the service as setup
+    writes it, systemd's own default ends that stop after 90 seconds (read in systemd's settings, not seen by us); a
+    stop setting of your own for that service can make it longer (seen: 17 minutes, with one that never ended the
+    stop);
   - a line that says to run the command again can come back with the same words at the second run, and the tool does
     not yet say what to do then. It is then not a wait: do not run it a third time, and do not work round it by
     hand; report the line at https://github.com/TheWindstorm/windstorm-mirror-for-github/issues (you may leave out
