@@ -32,6 +32,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: The mode of each folder above the Python that runs the tests (the skill's walk reads them)
+        run: |
+          python -I - <<'PY'
+          import os, stat, sys
+          d = os.path.dirname(sys.executable)
+          while True:
+              s = os.stat(d)
+              print(stat.filemode(s.st_mode), "uid", s.st_uid, d)
+              if os.path.dirname(d) == d:
+                  break
+              d = os.path.dirname(d)
+          PY
       - name: The tests, with the real pinned Gitea (downloaded and checked against its pin by the tests)
         env:
           WSM_REQUIRE_GITEA: "1"
@@ -61,6 +73,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: The mode of each folder above the Python that runs the tests (the skill's walk reads them)
+        run: |
+          python -I - <<'PY'
+          import os, stat, sys
+          d = os.path.dirname(sys.executable)
+          while True:
+              s = os.stat(d)
+              print(stat.filemode(s.st_mode), "uid", s.st_uid, d)
+              if os.path.dirname(d) == d:
+                  break
+              d = os.path.dirname(d)
+          PY
       - name: The tests, with the real pinned Gitea (downloaded and checked against its pin by the tests)
         env:
           WSM_REQUIRE_GITEA: "1"

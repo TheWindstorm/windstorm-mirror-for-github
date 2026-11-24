@@ -1193,6 +1193,22 @@
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
+  },
+  {
+   "id": "M75",
+   "seen": "2026-11-24, the checks of the code's pull request: on the Ubuntu 24.04 job with Python 3.13, which set that Python up fresh, 12 of 114 tests failed on one sentence of the tool's, \"<the runner's Python folder> is open: every account on this computer can write in it ... chmod go-w ...\"; the jobs with 3.9 and 3.10 did not see it. The suite had taken the folder of the Python that runs it as closed: a test that passes here and fails on a stock runner leans on this machine (rule 17). Seen again here with a Python in a folder opened to all outside the home: the same failures, gone with the suite's own answer.",
+   "promise": "the walk's sentence for an open folder above the Python the service names is held on every machine by a planted case (a Python in a folder opened to all: named with the one command, and not named once that command, as printed, has run); the suite's answer for a folder outside its own temporary folders is closed, so no test leans on the runner's modes; the workflow prints the mode of each folder above the Python that runs the tests. Decided for a person whose Python sits in such a folder (a version manager's download can): the copies go on refreshing, since a mirror that stops is worse than a named risk; setup, its dry run and the go's lines name the folder with the one command, and status says it as a problem, exit 1, each time until it is closed.",
+   "codon": "G9.12",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G9_12_setup_and_uninstall_do_nothing_against_another_homes_install",
+   "stand_in": "none",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
   }
  ],
  "declined": []
