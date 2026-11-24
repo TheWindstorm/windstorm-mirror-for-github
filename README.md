@@ -148,6 +148,9 @@ The copy is as private as this computer. Anyone who can read this account's file
 
 ## Seen to work
 
+With 0.1.0's own tool, Linux is seen; a Mac is not seen yet. What was seen on a Mac is below: earlier versions
+of the tool, and the tests.
+
 - **Ubuntu 24.04.5 LTS on x86-64.** Seen on a stock virtual machine with nothing of ours on it, and in accounts
   with no administrator rights:
   - setup;
@@ -166,7 +169,7 @@ The copy is as private as this computer. Anyone who can read this account's file
   stand-in launch agents, shaped like the skill's forge and timer, coming back after a restart, with automatic
   login on and FileVault off. The skill itself was not run there.
 - **macOS 27.2.1 on Apple Silicon: a test account that is not an administrator, on a Mac that carries Apple's
-  developer tools** (its python3 3.9.6). Seen: the skill's dry run, setup (the pinned Gitea for that Mac, run as
+  developer tools** (its python3 3.9.6), with an earlier version of the tool (2026-11-23), not 0.1.0's. Seen: the skill's dry run, setup (the pinned Gitea for that Mac, run as
   the account's own launch agent on this computer's own address), status and uninstall; the dry run and setup said
   the copy stands still after a restart until the person logs in, because that Mac does not log anyone in by itself.
   No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS runners the tests
@@ -176,6 +179,8 @@ The copy is as private as this computer. Anyone who can read this account's file
   listed, with the skill in place. The short form (`TheWindstorm/windstorm-mirror-for-github`) worked the same
   way on 2.1.280. Versions older than 2.1.280: not seen.
 - **Not seen yet:**
+  - 0.1.0's own tool on a Mac in a person's account: setup, a sync, status, restore --check and uninstall, not
+    seen by us. Seen with it on a Mac: the test suite on GitHub's macOS runners, against a stand-in for GitHub;
   - a fine-grained read-only key on a real account: not seen by us. On the rounds against the real GitHub, a
     broader key of ours stood in for it; the tool asks GitHub the same questions with either;
   - GitHub's own answer about when such a key ends: not seen by us. The tests use a stand-in for that answer; when
@@ -189,6 +194,11 @@ The copy is as private as this computer. Anyone who can read this account's file
   - Windows (not supported in 0.1);
   - `self-update` moving to a newer version: none exists before 0.1.0. Its read of the latest release is seen at
     the release. The road that always works: Claude Code's own plugin update, then `setup`;
+- **Known, and not right yet (due 0.1.1):**
+  - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
+    the copy could not be read;
+  - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were
+    not installed; the next sync that hears git lfs mends it.
 
 ## Taking it off
 
