@@ -24,6 +24,42 @@ import unittest
 import urllib.error
 import urllib.request
 
+GIT_TRAP = "[[[ this home's git config is a trap: a git call of the suite read it instead of GIT_CONFIG_GLOBAL\n"
+
+
+SESSION_AND_MOVED = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TMUX", "WSM_HOME", "XDG_DATA_HOME",
+                     "XDG_STATE_HOME", "XDG_CACHE_HOME")
+
+
+def _a_home_of_the_suites_own():
+    """T6, rule 17: the suite reads and writes nothing of the account that runs it. Before the skill is imported,
+    the test process gets a home of its own and its own XDG_CONFIG_HOME, git's global config at an empty file and
+    git's system config off; it loses this account's lines to its session (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS,
+    TMUX) and any setting that would put the tool's folders outside that home. The home is the base: git older than 2.32 does not know GIT_CONFIG_GLOBAL and reads
+    the home's config instead, which is this empty home's. Where git knows it, the home's own git config is a trap,
+    so a git call that drops GIT_CONFIG_GLOBAL fails its test. Home, below, still gives each World test its own."""
+    home = tempfile.mkdtemp(prefix="wsm-suite-home-")
+    empty = os.path.join(home, "gitconfig-empty")
+    open(empty, "w").close()
+    os.environ.update(HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"), GIT_CONFIG_GLOBAL=empty,
+                      GIT_CONFIG_NOSYSTEM="1")
+    for k in SESSION_AND_MOVED:          # the account's session, and any setting that would move the tool's folders
+        os.environ.pop(k, None)
+    try:
+        got = subprocess.run(["git", "version"], capture_output=True, text=True, timeout=30).stdout
+        knows = tuple(int(x) for x in re.findall(r"\d+", got)[:2]) >= (2, 32)
+    except (OSError, subprocess.TimeoutExpired):
+        knows = False
+    if knows:
+        for f in (os.path.join(home, ".gitconfig"), os.path.join(home, ".config", "git", "config")):
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(GIT_TRAP)
+    return home, empty, knows
+
+
+SUITE_HOME, SUITE_GITCONFIG, GIT_TRAP_SET = _a_home_of_the_suites_own()
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "mirror.py")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -60,6 +96,7 @@ def v(s):
 
 STARTED = []           # every forge process a test started, stopped whatever way the suite ends
 TEMPS = []
+TEMPS.append(SUITE_HOME)
 
 
 def _no_road_to_github(real):
@@ -4734,6 +4771,41 @@ class Strand(unittest.TestCase):
         for why, (rows, ver) in wrong.items():
             self.assertNotEqual(to_build_wrong(plan, rows, ver), [], why)
         self.assertNotEqual(to_build_wrong("text `test_G2_1_x` *(to build)*\n", [row], "0.1.0"), [], "off a codon's line")
+
+    def test_T6_the_suite_reads_nothing_of_the_home_of_the_account_that_runs_it(self):
+        """M72, rule 17 (seen 2026-11-24 in a run with the home at a trap: two tests ran git outside Home and read
+        the git config of the account running the suite, which can name hooks, signing or address rewrites). The
+        test process runs in a home of its own, with git's global config at an empty file and its system config off;
+        where git knows GIT_CONFIG_GLOBAL (2.32 and newer), a git call that drops it reads the home's trap and fails,
+        and so would the two calls the trap run found."""
+        import pwd
+        own = pwd.getpwuid(os.getuid()).pw_dir
+        self.assertEqual(os.environ["HOME"], SUITE_HOME)
+        self.assertNotEqual(os.path.realpath(SUITE_HOME), os.path.realpath(own))
+        self.assertEqual((os.environ["GIT_CONFIG_GLOBAL"], os.environ["GIT_CONFIG_NOSYSTEM"]), (SUITE_GITCONFIG, "1"))
+        self.assertEqual(os.environ["XDG_CONFIG_HOME"], os.path.join(SUITE_HOME, ".config"))
+        self.assertEqual(fread(SUITE_GITCONFIG), "")
+        self.assertEqual([k for k in SESSION_AND_MOVED if k in os.environ], [])
+        self.assertTrue(mirror.paths()["data"].startswith(SUITE_HOME + os.sep), mirror.paths()["data"])
+        read = subprocess.run(["git", "config", "--global", "--list"], capture_output=True, text=True)
+        self.assertEqual((read.stdout, read.stderr), ("", ""), "git reads a global config that is not the empty one")
+        d = tempfile.mkdtemp(prefix="wsm-t6-")
+        self.addCleanup(shutil.rmtree, d, True)
+        subprocess.run(["git", "-C", d, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q",
+                        "--allow-empty", "-m", "one"], check=True)
+        self.assertIsNotNone(git_commit_of(d)("HEAD"))
+        if not GIT_TRAP_SET:
+            return        # git older than 2.32 reads the home's config, and the home is the suite's own and empty
+        saved = os.environ.pop("GIT_CONFIG_GLOBAL")
+        try:
+            dropped = subprocess.run(["git", "config", "--global", "--list"], capture_output=True, text=True)
+            self.assertNotEqual(dropped.returncode, 0, "a git call that drops GIT_CONFIG_GLOBAL does not fail")
+            self.assertIn("bad config", dropped.stderr)
+            self.assertIsNone(git_commit_of(d)("HEAD"), "git_commit_of read the home's config and went on")
+            self.assertFalse(mirror.has_git_lfs(), "has_git_lfs read the home's config and went on")
+        finally:
+            os.environ["GIT_CONFIG_GLOBAL"] = saved
 
     def test_every_proof_named_in_the_plan_is_a_real_test_and_every_test_has_a_codon(self):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))

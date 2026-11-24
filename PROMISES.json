@@ -1145,6 +1145,22 @@
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
+  },
+  {
+   "id": "M72",
+   "seen": "2026-11-24, a run of the whole suite with the home at a trap folder whose git config could not be read: two tests failed only for that (G10.13's helper git_commit_of and G3.8's has_git_lfs ran git outside Home, in the test process itself), so on any other run they read the git config of the account running the suite. A person's global git config can name hooks, signing or address rewrites, which a commit or push of the suite would then run. Nothing was written in the home; every connection went to this computer's own addresses.",
+   "promise": "the test process runs in a home of its own, made before the skill is imported, with its own XDG_CONFIG_HOME, git's global config at an empty file and git's system config off, and without this account's session lines (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, TMUX) or a setting that would put the tool's folders outside that home; a git call that drops GIT_CONFIG_GLOBAL reads the home's trap and fails its test (git 2.32 and newer).",
+   "codon": "T6",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_T6_the_suite_reads_nothing_of_the_home_of_the_account_that_runs_it",
+   "stand_in": "none",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
   }
  ],
  "declined": []
