@@ -65,6 +65,24 @@ SCRIPT = os.path.join(ROOT, "scripts", "mirror.py")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import mirror  # noqa: E402
+
+_REAL_LOOSE = mirror.loose
+_SUITES_OWN = tuple({os.path.realpath(tempfile.gettempdir()), os.path.realpath(SUITE_HOME)})
+
+
+def _suites_answer(d, accts):
+    """Rule 17 (seen 2026-11-24 on a stock runner: its freshly downloaded Python sat in a folder every account could
+    write in, and eleven tests that do not test the walk heard of it): a folder outside the suite's own temporary
+    folders, such as the folder of the Python that runs the suite, is the machine's, and the suite does not lean on
+    its modes; its answer for such a folder is closed. G9.12 plants open folders inside its own, the Python's
+    folder included, so the walk's sentences are held on every machine."""
+    r = os.path.realpath(d)
+    if not any(r == t or r.startswith(t + os.sep) for t in _SUITES_OWN):
+        return None
+    return _REAL_LOOSE(d, accts)
+
+
+mirror.loose = _suites_answer
 from fake_github import FakeGitHub  # noqa: E402
 
 
@@ -3608,6 +3626,25 @@ class G9(unittest.TestCase):
             rc, out = h.setup()
             self.assertEqual(rc, 0, out)
             self.assertEqual(os.stat(ini_dir).st_mode & 0o022, 0, "setup closes the forge's settings folder")
+            # The Python the service names, in a folder every account can write in (seen on a stock runner, where a
+            # freshly downloaded Python sat in one): planted here, so the sentence is held on every machine, and the
+            # one command it prints closes it.
+            pybin = os.path.join(h.tmp, "python-download", "bin")
+            os.makedirs(pybin)
+            with open(os.path.join(pybin, "python3"), "w") as f:
+                f.write("")
+            os.chmod(pybin, 0o777)
+            real_py = sys.executable
+            sys.executable = os.path.join(pybin, "python3")
+            try:
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(f"{pybin} is open: every account on this computer can write in it", out)
+                self.assertIn(f"chmod go-w {shlex.quote(pybin)}", out)
+                subprocess.run(["chmod", "go-w", pybin], check=True)     # the command as printed
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertNotIn(f"{pybin} is", out)
+            finally:
+                sys.executable = real_py
             os.chmod(theirs, 0o755)                               # the person runs the one command
             rc, out = quiet(mirror.main, ["status"])
             self.assertNotIn(" is open: ", out)
