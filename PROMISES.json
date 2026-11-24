@@ -1321,6 +1321,22 @@
    "moved_why": "By the maintainer's word, 2026-11-24 (family rule 6, an exit code can say no for could not ask): written the day it was read; due 0.1.1.",
    "moved_by_person": "",
    "exception": ""
+  },
+  {
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "proven": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "id": "M83",
+   "codon": "G6.6",
+   "test": "test_G6_6_status_says_when_a_newer_release_pins_a_newer_forge",
+   "stand_in": "GitHub (a stand-in's latest release)",
+   "issue": "#109",
+   "exception": "By the maintainer's word, 2026-11-24: the real read can only happen once the 0.1.0 release exists, so right after the release is published, and before the catalog is pinned to it, one status with --check-release is run on a stock virtual machine as a step of the release, and its newer-release line is read. Until then every status says \"newer release: not known (GitHub gave 404 ...)\", as expected: no release exists.",
+   "seen": "2026-11-24: the release check has only ever read a stand-in's answer or GitHub's 404, since no release of this skill exists yet; the tool reads \"Pins Gitea X.Y.Z\" out of the release's body, and the release steps now carry that line from 0.1.0 on.",
+   "promise": "status reads the real latest release with no key, at most once a day or when asked with --check-release, and says what it read: a newer tag, and a newer Gitea when the release's body carries \"Pins Gitea X.Y.Z\", with whether that line names a security fix; an answer it could not read is said as not known, never as none."
   }
  ],
  "declined": []
