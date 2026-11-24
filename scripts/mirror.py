@@ -3183,7 +3183,10 @@ def cmd_status(args):
     if shut:
         problems.append(shut)
     elif not up:
-        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}")
+        # M105 (the family's rule 7): the problem line ends with its one step. Setup starts the forge again and keeps
+        # every copy, or stops with its own reason (seen 2026-11-24 with the service's python3 taken away).
+        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}; run setup again, which starts it and "
+                        f"keeps every copy: {own_command(p, 'setup')}")
     elif (ver or {}).get("version") != GITEA_VERSION:
         problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, and this release pins {GITEA_VERSION}"
                         + ("; `upgrade-forge` moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
@@ -3282,7 +3285,13 @@ def cmd_status(args):
         say(f"last sync: {last.get('at')}, {last.get('copied', 0)} copied, {last.get('unchanged', 0)} unchanged, "
             f"{last.get('problems', 0)} problem(s), {last.get('calls', 0)} GitHub API call(s)"
             + (f"; stopped: {last['stopped']}" if last.get("stopped") else ""))
-    say(f"next sync: {when}" if not tproblem else "next sync: none (see the problem above)")
+    if tproblem:
+        say("next sync: none (see the problem above)")
+    elif not up:                                    # M105: a time is not a promise while the forge does not answer
+        say(f"next sync: {when if system()[0] == 'darwin' else 'tried at ' + when}; it cannot work until the forge "
+            "answers")
+    else:
+        say(f"next sync: {when}")
     say(f"key scan: {n} file(s) read, " + (f"{len(found)} with a key in them" if found else "no key found"))
     for x in rel:
         say(x)
@@ -4164,11 +4173,14 @@ def still_here(p, st, record="read"):
         # G9.14 (M104, the family's rule 29 (e)): named by Claude Code's own list, never by a version folder; the one
         # command whole, with the names the list or the record holds.
         key = key or (f"{PLUGIN}@{catalog}" if catalog else None)
-        how = (f"with its own plugin uninstall: claude plugin uninstall {key}" if key and system()[0] != "darwin"
-               else "with its own plugin uninstall")
+        how = (f"`claude plugin uninstall {key}`" if key and system()[0] != "darwin" else "plugin uninstall")
         unread = "" if listed else f", if Claude Code still has them (its list of plugins, {reg}, could not be read)"
+        # Seen 2026-11-24 (Claude Code 2.1.331, Linux, a stock virtual machine): its uninstall takes the plugin off its
+        # list at once and leaves the folder, marked; the folder's removal 14 days later is its documentation's word.
         lines.append(f"Claude Code's folder for this skill as a plugin, and its entry in Claude Code{unread}. They "
-                     f"are Claude Code's; it removes both {how}. Nothing runs from them now.")
+                     f"are Claude Code's. Claude Code's own {how} takes this plugin off Claude Code's list at once; its "
+                     "folder in Claude Code's cache stays, and Claude Code's documentation says it removes that folder "
+                     "14 days later. Nothing runs from them now.")
     elif root and os.path.isdir(root):
         lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
                      "delete it like any folder when you want. Nothing runs from it now.")

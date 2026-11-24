@@ -241,6 +241,13 @@ class Home:
                         cmd[:2] == ["launchctl", "bootstrap"] and cmd[-1] == mirror.paths()["plist"]):
                     self.start_forge()
                     return subprocess.CompletedProcess(cmd, 0, "", "")
+                # setup's own start (M105): `enable --now` starts a service that is not running, as systemd does
+                # (seen 2026-11-24 on a stock virtual machine: the forge came back after setup run again); a running
+                # one is left as it is.
+                if cmd == ["systemctl", "--user", "enable", "--now", mirror.SERVICE]:
+                    if not any(pr.poll() is None for pr in self.procs):
+                        self.start_forge()
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
             if cmd[:3] == ["systemctl", "--user", "show"]:
                 if self.timer_next is None:
                     return subprocess.CompletedProcess(cmd, 0, "ActiveState=inactive\nNextElapseUSecRealtime=\n", "")
@@ -2798,6 +2805,62 @@ class G6(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn("tell the person 1 of", out)
 
+    def test_G6_10_status_ends_the_forge_does_not_answer_line_with_its_step_taken_as_printed(self):
+        """M105 (the family's rule 7; seen 2026-11-24 on a stock virtual machine, the service's python3 taken away):
+        status's problem line for a forge that does not answer ends with its one step, setup again by its own command
+        line. The step is taken exactly as printed, with no reset between: then status answers 0, the forge answers
+        and every copy is kept."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.home.forge_follows = True
+            pr = w.home.procs[-1]
+            pr.terminate()
+            pr.wait(60)
+            rc, out = status()
+            self.assertEqual(rc, 1, out)
+            step = mirror.own_command(w.p, "setup")
+            self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{w.port}; run setup again, which starts it "
+                          f"and keeps every copy: {step}", out.splitlines())
+            argv = shlex.split(step)
+            self.assertEqual(argv[:3], ["python3", "-I", w.p["script"]], "the step names the skill's own copy")
+            rc, said = quiet(mirror.main, argv[3:])
+            self.assertEqual(rc, 0, said)
+            mirror.DOOR_SEEN.clear()                # status is a process of its own; setup's door read is not reused
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("does not answer", out)
+            self.assertIn("next sync: " + ("every 15 min" if mirror.system()[0] == "darwin" else w.home.timer_next), out)
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"), "every copy kept")
+
+    def test_G6_10_next_sync_is_no_promise_while_the_forge_does_not_answer(self):
+        """M105 (seen 2026-11-24 on a stock virtual machine: with the forge's service failing, status still said
+        "next sync: <time>" as if a sync would run there): while the forge does not answer, the line says the time a
+        sync is tried and that it cannot work until the forge answers; once it answers, the line is the time alone."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            when = "every 15 min" if mirror.system()[0] == "darwin" else w.home.timer_next
+            def next_sync(out):
+                lines = [x for x in out.splitlines() if x.startswith("next sync: ")]
+                self.assertEqual(len(lines), 1, out)
+                return lines[0]
+            up = next_sync(status()[1])
+            self.assertTrue(up.startswith(f"next sync: {when}") and "cannot work" not in up, up)
+            pr = w.home.procs[-1]
+            pr.terminate()
+            pr.wait(60)
+            mirror.DOOR_SEEN.clear()
+            rc, out = status()
+            self.assertEqual(rc, 1, out)
+            down = next_sync(out)
+            self.assertTrue(down.startswith(f"next sync: {'' if mirror.system()[0] == 'darwin' else 'tried at '}{when}"), down)
+            self.assertTrue(down.endswith("; it cannot work until the forge answers"), down)
+
     def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
         """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said
         "0 problem(s)" and ended with 0, though no copy had been read. The sync asks the forge first. A forge that
@@ -5186,9 +5249,11 @@ class G9(unittest.TestCase):
             st.pop("setup_from", None)
             st["plugin_registry"], st["plugin_catalog"] = reg, "thewindstorm"
             mirror.save_state(p, st)
-            whose = ("They are Claude Code's; it removes both with its own plugin uninstall"
-                     + (f": claude plugin uninstall {mirror.PLUGIN}@thewindstorm" if mirror.system()[0] != "darwin" else "")
-                     + ". Nothing runs from them now.")
+            whose = ("They are Claude Code's. Claude Code's own "
+                     + (f"`claude plugin uninstall {mirror.PLUGIN}@thewindstorm`" if mirror.system()[0] != "darwin"
+                        else "plugin uninstall")
+                     + " takes this plugin off Claude Code's list at once; its folder in Claude Code's cache stays, and "
+                       "Claude Code's documentation says it removes that folder 14 days later. Nothing runs from them now.")
             with open(reg, "w") as f:
                 json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [{"scope": "user"}]}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
@@ -5334,10 +5399,13 @@ class G9(unittest.TestCase):
             p = mirror.paths()
             lines = mirror.still_here(p, st)
             self.assertIn("Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
-                          f"still has them (its list of plugins, {gone}, could not be read). They are Claude Code's; it "
-                          "removes both with its own plugin uninstall"
-                          + (f": claude plugin uninstall {mirror.PLUGIN}@thewindstorm" if mirror.system()[0] != "darwin" else "")
-                          + ". Nothing runs from them now.", lines)
+                          f"still has them (its list of plugins, {gone}, could not be read). They are Claude Code's. "
+                          "Claude Code's own "
+                          + (f"`claude plugin uninstall {mirror.PLUGIN}@thewindstorm`" if mirror.system()[0] != "darwin"
+                             else "plugin uninstall")
+                          + " takes this plugin off Claude Code's list at once; its folder in Claude Code's cache stays, "
+                            "and Claude Code's documentation says it removes that folder 14 days later. Nothing runs "
+                            "from them now.", lines)
 
     def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
         """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never

@@ -1529,6 +1529,22 @@
    "moved_why": "",
    "seen": "2026-11-24, in a test before the 0.1.0 tag: setup run from Claude Code's plugin folder kept that version folder in its record as setup_from. Claude Code makes a new folder at each plugin update and removes the old one later, so after an update uninstall's list of what is still on this computer named the old folder, or, once it was gone, said nothing of Claude Code's folder for the skill. Whether the plugin was removed was never read from it (that is read from Claude Code's own list), so nothing was deleted and nothing was wrongly called removed. A reading of the code that day had said setup wrote no such path; the test said otherwise. The test seen red three ways: at the code before the change, on setup_from; on the change with the forge's unit pointed at the plugin's own file by hand, on that unit file; on the change with a list that is not there taken for one that names the plugin nowhere, on that answer.",
    "promise": "Nothing setup writes (a unit, a timer, a launch agent, a setting or a state value) names a path inside a plugin cache version folder: the script is copied to the skill's own place and run from there, and the plugin is kept by Claude Code's own list (<its folder>/plugins/installed_plugins.json) and its catalog's name alone. Uninstall names Claude Code's folder and entry from that list: one line with the whole command when the list names the plugin, the same line naming the list's path when it could not be read, and no line when it was read and names the plugin nowhere. A list that is not on this computer is one that could not be read, never one that names the plugin nowhere. A record an earlier build wrote, still holding a version folder, is read without error, and no path from it is said."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#131",
+   "id": "M105",
+   "codon": "G6.10",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G6_10_status_ends_the_forge_does_not_answer_line_with_its_step_taken_as_printed",
+   "stand_in": "the service manager (the suite's stand-in starts the forge when setup's `enable --now` finds it stopped, as systemd was seen to)",
+   "moved_why": "",
+   "seen": "2026-11-24, on a stock Ubuntu 24.04 virtual machine before the 0.1.0 tag (a rehearsal, no key): setup run by a python3 at a path of its own, that program then removed and the forge's service restarted. The service failed to start again and again (systemd: status=203/EXEC). status answered 1 with \"problem: the forge does not answer on 127.0.0.1:N\" and no next step, and its \"next sync\" line still gave a time as if a sync would work then. setup run again by the same command line wrote the python3 it was run with, and status answered 0. Naming the cause and writing a python3 path that lasts is a row due 0.1.1.",
+   "promise": "While the forge does not answer, status's problem line ends with its one step, setup again by its own command line, and the \"next sync\" line says the time a sync is tried and that it cannot work until the forge answers. The step is taken exactly as printed, with no reset between: then status answers 0, the forge answers and every copy is kept."
   }
  ],
  "declined": []

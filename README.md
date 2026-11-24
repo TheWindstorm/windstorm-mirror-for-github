@@ -20,8 +20,9 @@ does not tell you to do.
 git clone --branch v0.1.0 https://github.com/TheWindstorm/windstorm-mirror-for-github
 ```
 
-**Or keep it as a Claude Code plugin**, so the skill is there in every session. A plugin installed during a
-session loads only after Claude Code is restarted.
+**Or keep it as a Claude Code plugin**, so the skill is there in every session. To have it in a session, start
+Claude Code again after installing the plugin (seen by us); by Claude Code's documentation, `/reload-plugins`
+typed in a running session also loads it (not tried by us). The same holds after a plugin update.
 
 ```bash
 claude plugin marketplace add https://github.com/TheWindstorm/windstorm-mirror-for-github.git
@@ -230,7 +231,12 @@ with no key; a sync and a restore on a Mac are not seen yet.
     setup made, except the folder of copies, which it keeps and names, as it always does;
   - for a key that ends in less than two weeks, the line before the go still says the mirror warns two weeks
     before it ends, and `status` names the key as a problem from its first day; make the key for longer than
-    two weeks.
+    two weeks;
+  - the forge and the sync run the python3 that ran setup, by the path that program gives for itself: on a Mac
+    that carries Apple's developer tools, one inside them; with pyenv, mise or conda, one inside a folder of that
+    version or environment. If that program is moved or removed, the forge and the sync stop: `status` says the forge
+    does not answer, with its one step, setup again, which writes the python3 it is run with. Seen on Linux with
+    a python3 taken away; not seen on a Mac.
 
 ## Taking it off
 
