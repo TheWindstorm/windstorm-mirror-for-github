@@ -210,7 +210,12 @@ with no key; a sync and a restore on a Mac are not seen yet.
   - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
     the copy could not be read;
   - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were
-    not installed; the next sync that hears git lfs mends it.
+    not installed; the next sync that hears git lfs mends it;
+  - after a restore, until `key set` is run again for each owner, `status` counts the copies as current for up to
+    half an hour and says nothing about the missing key; `sync` says "no key is kept for it" and answers 1;
+  - setup can answer 0 while the forge does not answer, for example when another program holds the forge's port;
+    `status` is the read: it then says the forge does not answer. Once the port is free, the forge starts by
+    itself.
 
 ## Taking it off
 

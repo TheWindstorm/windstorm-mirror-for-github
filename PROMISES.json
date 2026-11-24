@@ -1188,7 +1188,7 @@
    "ship_in": "0.1.0",
    "test": "test_G3_14_the_fetch_stays_on_the_road_the_read_only_key_travels",
    "stand_in": "GitHub (a stand-in on loopback over http; real GitHub's scheme is https)",
-   "proven": "",
+   "proven": "2026-11-24, a fresh stock Ubuntu 24.04.5 virtual machine, an account with no administrator rights and a lived-in git profile named by GIT_CONFIG_GLOBAL in the shell and in the user manager: url.\"git@github.com:\".insteadOf https://github.com/ and core.sshCommand set to a command that writes a mark and fails; 0.1.0's mirror.py (sha256 e45385ae3961f237); real GitHub, a broad login in place of the read-only key, one project. The person's own git would fetch from git@github.com:...; the go at a real terminal, then sync: \"1 copied now\", exit 0, and 0 marks (no ssh ran); status, and restore --check 1 whole. Then the second form, url.\"ssh://git@github.com/\".insteadOf, with the copy taken off by uninstall --delete-copies and set up again so that it was fetched anew: \"1 copied now\", exit 0, 0 marks, restore --check 1 whole. The person's git config file read the same bytes before and after each sync.",
    "issue": "",
    "moved_why": "",
    "moved_by_person": "",
@@ -1220,7 +1220,7 @@
    "ship_in": "0.1.0",
    "test": "test_G8_6_the_skills_own_roads_take_no_proxy_and_run_no_hook_of_the_persons",
    "stand_in": "GitHub (a stand-in on loopback, exempted from the dead proxy as a working proxy would carry GitHub)",
-   "proven": "",
+   "proven": "2026-11-24, the same machine, profile and runs as row M74's (0.1.0's mirror.py (sha256 e45385ae3961f237); real GitHub, a broad login in place of the read-only key, one project): http.proxy and http_proxy, https_proxy and their capitals at a dead address, GitHub exempted as a working proxy would carry it (the controls: a host not exempted got no answer, GitHub's API answered); core.hooksPath to 11 hooks and init.templateDir with 11 hooks, each writing a mark. The forge started as the service with the four dead proxy settings in its environment and none of the person's git settings; both syncs copied (\"1 copied now\", exit 0); status and restore --check answered from the skill's own forge; 0 template hooks were copied into the skill's own git folders, and 0 marks were written by the end: no hook of the person's ran.",
    "issue": "",
    "moved_why": "",
    "moved_by_person": "",
@@ -1340,7 +1340,7 @@
   },
   {
    "owner": "maintainer",
-   "proven": "",
+   "proven": "2026-11-24, a fresh stock Ubuntu 24.04.5 virtual machine, an account with no administrator rights, its real systemd and lingering switched on by setup. With no copies (the tool at b89a927, mirror.py sha256 85a1da45c7924c6f, nothing asked of GitHub): after an uninstall that kept the folder of copies, setup run again answered 0 and said the person's Gitea account was there from before and unchanged, and that the mirror account has a new key; status answered 0 and no command said \"Run setup first.\"; that leave held 0 copies. Seen the same with 0.1.0's mirror.py (sha256 e45385ae3961f237). With a copy (0.1.0's mirror.py (sha256 e45385ae3961f237), real GitHub, a broad login in place of the read-only key, one project): the copy read through the forge before (1 copy, 2 branch heads, a digest over name, branch and head); uninstall keeping the copies; setup again answered 0 with the same two sentences; status said no \"Run setup first.\" (it answered 1 for one problem only: the sync timer, stopped for the round); one sync answered 0, \"0 copied now, 1 unchanged\"; the same copy with the same heads read through the forge after with the new key (the key file differed from the one before); restore --check 1 whole.",
    "moved_by_person": "",
    "exception": "",
    "issue": "#110",
@@ -1367,8 +1367,8 @@
    "test": "",
    "stand_in": "none",
    "moved_why": "By the maintainer's word, 2026-11-24: read in the code while fixing row M84; written the day it was read; due 0.1.1.",
-   "seen": "2026-11-24, read in the code, not seen: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen; the service is installed and started, the forge's health check never answers, setup says only that the forge was not answering yet, \"run `status` in 5 minutes\", and that its own words are in gitea.log, and setup answers 0.",
-   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then."
+   "seen": "2026-11-24, read in the code: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen; the service is installed and started, the forge's health check never answers, setup says only that the forge was not answering yet, \"run `status` in 5 minutes\", and that its own words are in gitea.log, and setup answers 0. Seen 2026-11-24 on a fresh stock Ubuntu 24.04.5 virtual machine (0.1.0's mirror.py (sha256 e45385ae3961f237)): a throwaway listener held the kept port; setup run again answered 0, printed \"was not answering yet ... after 90 s ... run `status` in 5 minutes\" and also \"After a restart it starts by itself.\"; the service was activating, with 29 restarts; status answered 1, \"the forge does not answer\". With the listener stopped and nothing run, 30 s later the service was active by itself and status answered 0; setup again answered 0, \"The forge runs as your own service\". Nobody is stuck: freeing the port is the way out. Read too (2026-11-24): setup and restore read that a forge answers on the port, not that it is this skill's own; with another forge on the kept port they would say it runs.",
+   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then. Setup and restore say the forge runs only when the listener on the port is this skill's own forge (the listening process is the one the service started, of this account), never from an answer alone."
   },
   {
    "owner": "maintainer",
@@ -1404,7 +1404,7 @@
   },
   {
    "owner": "maintainer",
-   "proven": "",
+   "proven": "2026-11-24, three runs on one stock Ubuntu 24.04.5 virtual machine image, two accounts with no administrator rights, the first gone first; 0.1.0's mirror.py (sha256 e45385ae3961f237); real GitHub, a broad login in place of the read-only key, one project. The first account made one copy, took a backup (a minute old when restored) and uninstalled: 0 listeners on its forge's port and 0 forge processes of that account before the restore. The second account, entered by a real ssh login and given only the backup file, ran setup --from: exit 0, \"1 copies are back, on http://127.0.0.1:PORT/ (this computer only), counted in the forge itself.\", \"The forge runs as your own service.\", \"After a restart it starts by itself.\"; the forge's own count, read with the restored account's new key: 1; the listener on that port belonged to the second account; status exit 0; restore --check 1 whole. Status there printed \"1 on GitHub, 1 copied, 0 behind\" and said nothing about the GitHub key that a backup does not hold (row M92). In the second and third runs the restored account's first sync with no key said \"problem: OWNER: no key is kept for it\", made 0 GitHub calls and answered 1; the copy's record was unchanged and restore --check still 1 whole. The leak count over both accounts' homes, /tmp and the log: the key in 0 files in each run; the organisation's other project names read and found in 0 files outside the tool's own archives in the first and third runs; of the second, its log is clean of them and its machine's files were not scanned for them.",
    "moved_by_person": "",
    "exception": "",
    "issue": "#114",
@@ -1465,6 +1465,22 @@
    "moved_why": "By the maintainer's word, 2026-11-24: found in the rule 24 read of every line that says yes, set up, running, current or comes back; not met on a person's normal road with a false yes; due 0.1.1.",
    "seen": "2026-11-24, read in the code: uninstall says lingering \"is switched off again\" from the exit code of the command that switches it off, without reading lingering back; \"already on before setup, so it is left on\" is said from the record alone.",
    "promise": "uninstall reads lingering back after switching it off, and says what it read."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#118",
+   "id": "M92",
+   "codon": "G6.1",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "moved_why": "By the maintainer's word, 2026-11-24: seen in a restore on a stock virtual machine; due 0.1.1.",
+   "seen": "2026-11-24, on a fresh stock Ubuntu 24.04.5 virtual machine: after setup --from with a backup a minute old, restore printed \"Until then, `status` shows them behind.\"; status a minute later printed \"1 copied, 0 behind\", answered 0 and said nothing about the key. A copy is behind only by age (older than twice the sync interval) or by a recorded problem, and status's key lines walk only the keys that are kept. The restored account's first sync said \"no key is kept for it\" and answered 1, and its line began \"sync: 0 on GitHub\" for an owner that was not asked.",
+   "promise": "status names at once every owner in the settings with no key kept, with the one step (`key set OWNER`); restore's sentence says what status shows at that moment; with an owner that was not asked, the sync line does not print \"0 on GitHub\": a number never stands for a read that was not made. Its test restores a fresh backup and reads status."
   }
  ],
  "declined": []
