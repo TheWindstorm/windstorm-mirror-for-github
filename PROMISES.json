@@ -1625,6 +1625,38 @@
    "moved_why": "",
    "seen": "2026-11-24, read in 0.1.0's code before its tag by the skill's owner, not met by a person: when an upgrade fails after the new forge was started, upgrade-forge stops the service, waits, and copies the database and the settings file back without reading the wait's answer, so a new forge that has not stopped by then has the old database written under it. No one on 0.1.0 can reach that road: 0.1.0 pins Gitea 28.4.0 and setup installs exactly the pin, so upgrade-forge says \"Nothing to do\" before it stops anything; the road opens with the first release that pins a newer Gitea.",
    "promise": "upgrade-forge's way back copies nothing back until the stop wait says the forge has stopped: no listener on the forge's port AND no process of this account running this forge on this folder (the stop wait's own rule, row M102). On \"running\", \"another program\" or \"could not be read\", nothing is copied back: the tool says what was seen, keeps the copy of the database it made before the upgrade, and names the one next step. A test: the new forge does not stop at the way back, and the database file is the same bytes after as before."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#134",
+   "id": "M108",
+   "codon": "G1.4",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "the outside commands (the suite stands in for systemctl, launchctl, Gitea and git, and for what each writes on its two streams)",
+   "moved_why": "",
+   "seen": "2026-11-24, read in 0.1.0's code before its tag by the skill's owner and the maintainer, not met by a person: every outside command runs with its two streams kept apart, and almost every read a decision hangs on takes standard output alone. Two do not: setup finds a new Gitea account's first password in Gitea's standard output and standard error joined (a warning line cannot make that search match; which stream Gitea prints the line on is not read); and uninstall tells \"no user bus\" from the first line of systemctl's error output alone, so a warning line printed before systemd's own words would hide them and name the wrong next step (nothing is removed on either step).",
+   "promise": "A read that is parsed takes the stream the program answers on, never the two joined; the other stream is kept for a refusal's words. (a) setup reads the password line from the stream Gitea is seen to print it on; (b) the no-bus read searches every line of systemctl's error output and names the line it matched; (c) a test: a warning line on standard error with exit 0 at every outside command the suite stands in for, and every command still prints the same lines and ends the same way."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#135",
+   "id": "M109",
+   "codon": "G9.3",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "the service manager (what systemd does with a running service whose unit file is gone)",
+   "moved_why": "",
+   "seen": "2026-11-24, not seen, raised by the skill's owner from systemd's documented behaviour: what `systemctl --user disable --now` does to a running service whose unit file is no longer there. If disable answers an error for the missing file and the stop behind --now is never sent, uninstall would read the forge as still running, remove nothing, and say \"Not now ... run uninstall again in a minute\" at every run over such a forge. No road of 0.1.0 is known to lead there: uninstall stops every unit and reads it stopped before it removes any file. The state was made once on a test machine by an earlier build whose uninstall removed the files from a shell with no user bus while the forge ran (row M107); systemd then still read the unit as loaded and running.",
+   "promise": "Seen first on a stock Linux virtual machine: the forge's unit file removed by hand under a running forge, then uninstall run from the person's own login. If the forge is not stopped, uninstall also sends a plain stop to the forge's service by name, then reads every unit stopped as it does now. A test holds that road."
   }
  ],
  "declined": []
