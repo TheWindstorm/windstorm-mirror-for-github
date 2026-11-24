@@ -33,6 +33,10 @@ whose folders one of them moved says so first.
 Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
 forge on this computer; it still carries the mirror's calls to GitHub.
 
+`status` asks GitHub, at most once a day and with no key, for this skill's newest release, to say whether a newer
+one is out. That one request carries your computer's address and the skill's name and version, nothing else of
+yours, and it installs nothing.
+
 After `restore --to`, check the new home yourself: the restore pushes from the mirror's own copy, so a
 pre-push hook of yours does not check that push.
 
