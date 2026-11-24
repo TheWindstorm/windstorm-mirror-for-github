@@ -2978,6 +2978,59 @@ class G8(unittest.TestCase):
             own = [os.path.join(r, f) for r, _, fs in os.walk(forge) for f in fs if f == ".gitconfig"]
             self.assertTrue(any("name = Gitea" in fread(x) for x in own), f"the forge's own git settings: {own}")
             self.assertFalse(any("person@example.invalid" in fread(x) for x in own), "the forge followed the person's")
+        # Git's other global file: the person's XDG_CONFIG_HOME holding git/config, and no GIT_CONFIG_GLOBAL set.
+        with Home(linger="yes") as h:
+            xdg = os.path.join(os.environ["HOME"], "my-xdg")
+            mine = os.path.join(xdg, "git", "config")
+            os.makedirs(os.path.dirname(mine))
+            with open(mine, "w") as f:
+                f.write("[user]\n\temail = person@example.invalid\n")
+            before = os.stat(mine)
+            was = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME", "GIT_CONFIG_COUNT")}
+            os.environ.pop("GIT_CONFIG_GLOBAL")
+            try:
+                h.place_gitea()
+                rc, out = h.setup()
+                self.assertEqual(rc, 0, out)
+                os.environ["XDG_CONFIG_HOME"] = xdg             # set for the forge's start, as a person's shell may
+                os.environ["GIT_CONFIG_COUNT"] = "0"
+                _, pr = h.start_forge()
+                time.sleep(2)
+                if os.path.exists(f"/proc/{pr.pid}/environ"):    # Linux: what the running forge was handed
+                    names = [x.split(b"=", 1)[0].decode() for x in fread_bytes(f"/proc/{pr.pid}/environ").split(b"\0") if x]
+                    self.assertEqual([n for n in names if n.upper().startswith("GIT_") or n == "XDG_CONFIG_HOME"], [],
+                                     "the forge's start hands on git's settings")
+                    self.assertIn("GITEA_WORK_DIR", names)
+            finally:
+                for k, v in was.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            after = os.stat(mine)
+            self.assertEqual(fread(mine), "[user]\n\temail = person@example.invalid\n", "the forge wrote git's XDG file")
+            self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+            forge = mirror.paths()["forge"]
+            own = [os.path.join(r, f) for r, _, fs in os.walk(forge) for f in fs if f == ".gitconfig"]
+            self.assertTrue(any("name = Gitea" in fread(x) for x in own), f"the forge's own git settings: {own}")
+        # Each of the forge's two roads holds by itself: the forge commands setup runs hand the forge none of git's
+        # settings either (the service's start is the road above).
+        seen = []
+        real_run = mirror.run
+        mirror.run = lambda cmd, **kw: seen.append(kw.get("env")) or subprocess.CompletedProcess(cmd, 0, "", "")
+        os.environ["GIT_CONFIG_GLOBAL_PROBE"] = "x"
+        try:
+            with Home() as h:
+                os.environ["GIT_DIR"] = os.path.join(h.tmp, "not-the-forges")
+                try:
+                    mirror.gitea(mirror.paths(), "--version")
+                finally:
+                    os.environ.pop("GIT_DIR")
+                self.assertIn("XDG_CONFIG_HOME", os.environ)
+        finally:
+            mirror.run = real_run
+            os.environ.pop("GIT_CONFIG_GLOBAL_PROBE")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(sorted(k for k in seen[0] if k.upper().startswith("GIT_") or k == "XDG_CONFIG_HOME"), [],
+                         "gitea() hands on git's settings")
+        self.assertIn("GITEA_WORK_DIR", seen[0])
 
     def test_G8_2_exposing_the_forge_is_left_to_the_person(self):
         src = fread(SCRIPT)
