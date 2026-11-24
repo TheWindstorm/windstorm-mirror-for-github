@@ -33,6 +33,9 @@ whose folders one of them moved says so first.
 Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
 forge on this computer; it still carries the mirror's calls to GitHub.
 
+After `restore --to`, check the new home yourself: the restore pushes from the mirror's own copy, so a
+pre-push hook of yours does not check that push.
+
 ## Family
 
 Part of the Windstorm skills: [Pit Stop](https://github.com/TheWindstorm/windstorm-pit-stop),
