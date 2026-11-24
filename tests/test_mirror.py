@@ -11,6 +11,7 @@ import inspect
 import io
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -317,6 +318,7 @@ class Home:
         not answer, the failure carries the forge's own last log lines, not only that it did not answer."""
         seconds = mirror.FIRST_START_WAIT if seconds is None else seconds
         p = mirror.paths()
+        below_short_lived_ports(p)
         script = p["script"] if os.path.exists(p["script"]) else SCRIPT
         pr = subprocess.Popen([sys.executable, "-I", script, "run-forge"], env=dict(os.environ),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -336,6 +338,43 @@ class Home:
                 if time.monotonic() > end:
                     raise AssertionError(f"the forge did not answer in {seconds} s" + forge_log_tail(p))
                 time.sleep(0.5)
+
+
+def short_lived_ports_start():
+    """Where the system's short-lived ports begin: the ones it hands out for a bind to port 0 and for outgoing
+    connections (Linux: ip_local_port_range, 32768 by default; macOS: 49152)."""
+    try:
+        return int(fread("/proc/sys/net/ipv4/ip_local_port_range").split()[0])
+    except (OSError, ValueError, IndexError):
+        return 49152
+
+
+def below_short_lived_ports(p):
+    """The suite's own forges listen below the short-lived range. Seen on a GitHub runner (2026-11-24, release
+    0.1.0's pull_request run, job test 3.9): setup's port came from that range, and in the seconds between run-forge's
+    check and Gitea's bind a listener that is none of the suite's (it answered 407, which no stand-in here sends) was
+    handed the same number; Gitea could not bind, and the test waited 90 s on a stranger. Below that range the
+    system hands the number to no one, so only a program that asks for it by name can take it. The tool is not
+    changed: this is where the suite's forge listens, read and written as restore writes them (HTTP_PORT, ROOT_URL,
+    and the state's port)."""
+    port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT") or 0)
+    first = short_lived_ports_start()
+    if 0 < port < first and port >= 20000:
+        return port
+    for cand in random.Random().sample(range(20000, min(first, 30000)), 200):
+        if mirror.port_is_free(cand):
+            break
+    else:
+        raise AssertionError("no free port below the short-lived range for the suite's forge")
+    ini = fread(p["app_ini"])
+    ini = re.sub(r"^HTTP_PORT\s*=.*$", f"HTTP_PORT = {cand}", ini, flags=re.M)
+    ini = re.sub(r"^ROOT_URL\s*=.*$", f"ROOT_URL = http://127.0.0.1:{cand}/", ini, flags=re.M)
+    mirror.write_file(p["app_ini"], ini, 0o600)
+    st = mirror.load_json(p["state"], {})
+    if st.get("port"):
+        st["port"] = cand
+        mirror.save_state(p, st)
+    return cand
 
 
 MAC_COPY_UNSEEN = ("No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS "
