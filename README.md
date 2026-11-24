@@ -51,12 +51,13 @@ automatic-login account, `fdesetup status`), both read-only, on a Mac `netstat`,
 read who holds the forge's port, and Python itself to check a self-update.
 
 Before anything carrying the forge's key or a copy goes to the forge's port, the mirror asks this computer who holds
-that port, and sends only to its own forge. On Linux it reads the kernel's own tables (`/proc/net/tcp` and
-`/proc/net/tcp6`) and its own processes; on a Mac, `netstat -anv` and `ps`. Each is read by its column names, and
-only names this release has seen are trusted. Where that read cannot be made (another system, or a layout this
-release has not seen), `setup` stops as its first act and makes nothing, and the mirror does not run there. When
-another program holds the port, `sync` and `status` say so and send it nothing; `setup` then moves the forge to a
-free port and says the new address. The forge's port is picked below the range the system hands out by itself.
+that port, and sends only to its own forge; when nothing listens there, it sends nothing either. On Linux it reads the
+kernel's own tables (`/proc/net/tcp` and `/proc/net/tcp6`) and its own processes; on a Mac, `netstat -anv` and `ps`.
+Each is read by its column names, and only names this release has seen are trusted. Where that read cannot be made
+(another system, or a layout this release has not seen), `setup` stops as its first act and makes nothing, and the
+mirror does not run there; a read that did not answer once is said as that, and `setup` is run again. When another
+program holds the port, `sync` and `status` say so and send it nothing; `setup` then moves the forge to a free port
+and says the new address. The forge's port is picked below the range the system hands out by itself.
 
 `status` asks GitHub, at most once a day and with no key, for this skill's newest release, to say whether a newer
 one is out. That one request carries your computer's address and the skill's name and version, nothing else of
@@ -222,9 +223,6 @@ with no key; a sync and a restore on a Mac are not seen yet.
     not installed; the next sync that hears git lfs mends it;
   - after a restore, until `key set` is run again for each owner, `status` counts the copies as current for up to
     half an hour and says nothing about the missing key; `sync` says "no key is kept for it" and answers 1;
-  - setup can answer 0 while the forge does not answer, for example when another program holds the forge's port;
-    `status` is the read: it then says the forge does not answer. Once the port is free, the forge starts by
-    itself;
   - a backup made before the first copy exists fails with Gitea's own words; nothing is lost, as there is
     nothing to keep yet;
   - in an account with no user service manager (one that was never logged in, entered with `sudo -u`), setup

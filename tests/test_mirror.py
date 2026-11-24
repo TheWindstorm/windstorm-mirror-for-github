@@ -4033,8 +4033,170 @@ class G8(unittest.TestCase):
         finally:
             mirror.read_door, mirror.install_service, mirror.SETUP_WAIT = real_read, real_install, wait
 
+    def test_G8_7_on_no_listener_nothing_is_sent_even_to_one_that_comes_after_the_read(self):
+        """The owner's ruling F1 (11-24): "nothing listens" is exactly when another program can take the number, so on
+        "none" nothing is sent: the API call answers as no answer (0, said "it did not answer") from the read itself,
+        and git is not run at all. A listener that appears between the read and the call receives 0 requests; the
+        same listener, read as "mine", is sent both, so the 0 is the door's doing and not the listener's."""
+        port = mirror.free_port()
+        f = object.__new__(mirror.Forge)
+        f.p, f.port, f.base = {"app_ini": "/nowhere/app.ini"}, port, f"http://127.0.0.1:{port}"
+        f.key, f.user = "forge-key-" + "b2" * 10, "mirror"
+        url = f.base + "/mirror/alpha.git"
+        real = mirror.read_door
+        s = Stranger(port)                                 # it came after the read below was made
+        h = Home().__enter__()                             # a person's own home: git reads its settings there
+        try:
+            mirror.DOOR_SEEN.clear()
+            mirror.read_door = lambda p, port: ("none", "nothing listens")
+            code, body = f.call("GET", "/version")
+            self.assertEqual((code, body), (0, {"message": f"nothing listens on 127.0.0.1:{port}"}))
+            self.assertEqual(mirror.Forge.why(code, body), "it did not answer")
+            out = mirror.forge_call(f, None, "ls-remote", url)
+            self.assertEqual(out.returncode, 128)
+            self.assertIn(f"nothing listens on 127.0.0.1:{port}", out.stderr)
+            self.assertEqual(s.close(), [], "a request reached a listener the door read as none")
+            s = Stranger(port)
+            mirror.DOOR_SEEN.clear()
+            mirror.read_door = lambda p, port: ("mine", "this mirror's own forge holds it")
+            self.assertEqual(f.call("GET", "/version")[0], 200)
+            mirror.forge_call(f, None, "ls-remote", url)
+            seen = s.close()                               # git may ask again by the older road (its own choice)
+            self.assertEqual(seen[:2], ["REQ GET /api/v1/version auth=1", "REQ GET /mirror/alpha.git/info/refs auth=1"])
+            self.assertTrue(all(x.endswith(" auth=1") for x in seen), seen)
+        finally:
+            mirror.read_door = real
+            mirror.DOOR_SEEN.clear()
+            s.close()
+            h.__exit__(None, None, None)
 
-PINS_28_3 = {("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
+    def test_G8_7_a_stranger_beside_our_running_forge_is_not_taken_for_stopped(self):
+        """The owner's ruling F2 (11-24): read_door says "other" as soon as ONE listener on the number is not our
+        forge, at any address, so a stranger on ::1 while our forge still runs on 127.0.0.1 reads "other". The stop
+        wait takes that for "stopped" only when no process of this account runs this forge on this folder; while
+        ours runs, backup dumps nothing and upgrade-forge never says "the forge stopped". A real listener on ::1,
+        opened as the service is told to stop, beside the real forge that does not stop."""
+        real_read, real_own = mirror.read_door, mirror.own_forge_running
+        try:                                   # the wait's three answers on "other", by what our own processes read
+            mirror.read_door = lambda p, port: ("other", "a program of another account holds it")
+            for ours, kind in ((True, "running"), (None, "unread"), (False, "other")):
+                mirror.own_forge_running = lambda p, ours=ours: ours
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.wait_stopped({"app_ini": "/nowhere/app.ini"}, 20001, seconds=1), kind, ours)
+        finally:
+            mirror.read_door, mirror.own_forge_running = real_read, real_own
+            mirror.DOOR_SEEN.clear()
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            beside, stops, at = [], [], [1]
+            real_service, waits, real_fetch = mirror.service, mirror.wait_stopped.__defaults__, mirror.fetch_forge
+
+            def service(p, verb):
+                if verb == "stop":
+                    stops.append(verb)
+                    # at the chosen stop: our forge runs on (it is told to stop and does not), and a stranger
+                    # takes the number on ::1; at any other stop the forge stops as told
+                    w.home.forge_follows = len(stops) != at[0]
+                    if len(stops) == at[0]:
+                        s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                        s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                        s6.bind(("::1", w.port))
+                        s6.listen(1)
+                        beside.append(s6)
+                return real_service(p, verb)
+            backups = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(backups)
+            try:
+                mirror.service, mirror.wait_stopped.__defaults__ = service, (3,)
+                rc, out = quiet(mirror.main, ["backup", backups])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The forge did not stop, so no backup was made (a backup of a running forge can be "
+                              "torn). Run backup again; if the forge still does not stop, run status.", out)
+                self.assertEqual(os.listdir(backups), [])
+                self.assertTrue(beside)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(w.p, w.port)[0], "other")     # the stranger is there, beside ours
+                self.assertTrue(mirror.own_forge_running(w.p))
+                beside.pop().close()
+                mirror.DOOR_SEEN.clear()
+                # upgrade-forge: its backup's stop goes as told (the backup is made), and at its own stop the
+                # stranger comes beside our forge that runs on. The new binary is not what is read here.
+                stops[:], at[0] = [], 2
+                mirror.fetch_forge = lambda *a, **k: None
+                with pinned("28.4.1", mirror.PINS):
+                    rc, out = quiet(mirror.main, ["upgrade-forge"])
+                self.assertEqual(rc, 1, out)
+                self.assertEqual((len(stops), len(beside)), (2, 1), out)
+                self.assertIn("The forge did not stop, so it was not upgraded. Run upgrade-forge again; if the forge "
+                              "still does not stop, run status.", out)
+                self.assertNotIn("the forge stopped", out)
+                self.assertNotIn("migrat", out.lower())
+                self.assertEqual(mirror.load_json(w.p["state"], {})["gitea"], mirror.GITEA_VERSION)
+            finally:
+                mirror.service, mirror.wait_stopped.__defaults__ = real_service, waits
+                mirror.fetch_forge = real_fetch
+                w.home.forge_follows = True
+                for s6 in beside:
+                    s6.close()
+                mirror.DOOR_SEEN.clear()
+            self.assertEqual(mirror.read_door(w.p, w.port)[0], "mine")
+            self.assertEqual(w.sync()[0], 0)
+
+    def test_G8_7_setups_floor_says_its_unread_by_kind(self):
+        """The owner's ruling F3 (11-24): the floor's line follows the kind of unread. A read that is not there, or
+        names columns this release does not know: "cannot be read on this computer". A read that did not answer
+        this time (a netstat that failed or timed out once, a table that could not be read once): "could not be read
+        this time", and the next step is setup again, not that this computer cannot run the mirror."""
+        never = (r"^problem: who holds the forge's port 127\.0\.0\.1:\d+ cannot be read on this computer \(%s\), so "
+                 r"nothing was sent to it: no key, no copy\. The mirror needs that read to run; the README's section "
+                 r"\"What it runs\" says where it can\.$")
+        again = (r"^problem: who holds the forge's port 127\.0\.0\.1:\d+ could not be read this time \(%s\), so "
+                 r"nothing was sent to it: no key, no copy\. Run setup again\.")
+        real_system, real_netstat, real_run, real_ll = mirror.system, mirror.NETSTAT, subprocess.run, mirror.linux_listeners
+
+        def times_out(cmd, *a, **k):
+            if cmd == mirror.NETSTAT:
+                raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+            return real_run(cmd, *a, **k)
+
+        def once(port, files=None):
+            raise mirror.DoorUnread(False, "/proc/net/tcp could not be read")
+        cases = [("darwin", [sys.executable, "-I", "-c", "import sys; sys.exit(1)"], None, None,
+                  again % "netstat did not answer"),
+                 ("darwin", [sys.executable, "-I", "-c", "pass"], times_out, None, again % "netstat did not answer"),
+                 ("darwin", ["/nowhere/netstat"], None, None, never % "netstat is not there"),
+                 ("darwin", [sys.executable, "-I", "-c", "print('Proto Recv-Q Local Address (state) pid')"], None,
+                  None, never % "netstat names columns this release does not know"),
+                 ("linux", real_netstat, None, once, again % "/proc/net/tcp could not be read")]
+        for os_name, netstat, run, ll, want in cases:
+            try:
+                mirror.system = lambda os_name=os_name: (os_name, "x86_64")
+                mirror.NETSTAT = netstat
+                if run:
+                    mirror.subprocess.run = run
+                if ll:
+                    mirror.linux_listeners = ll
+                line = mirror.door_floor()
+            finally:
+                mirror.system, mirror.NETSTAT, mirror.linux_listeners = real_system, real_netstat, real_ll
+                mirror.subprocess.run = real_run
+            self.assertRegex(line or "", want + ("" if want.endswith("$") else "$"), (os_name, netstat))
+        with Home() as h:                              # and through setup itself: made nothing, run setup again
+            try:
+                mirror.linux_listeners = once
+                mirror.system = lambda: ("linux", "x86_64")
+                rc, out = h.setup()
+            finally:
+                mirror.system, mirror.linux_listeners = real_system, real_ll
+            self.assertEqual(rc, 2, out)
+            self.assertRegex(said(out), (again % "/proc/net/tcp could not be read") + r" Setup made nothing\.$")
+            self.assertFalse(os.path.exists(mirror.paths()["app_ini"]))
+
+
+PINS_28_3 ={("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
              ("darwin", "x86_64"): ("darwin-amd64", "4420bb44df8047cd4f3bec9162d559c0245dee7ef3b58bc5540d7a1eefd8b94f"),
              ("darwin", "arm64"): ("darwin-arm64", "0aca8f1f1d6a0b31abc2c7e5c40feec18f3e45ab0c7b11deaef259794ce45812")}
 

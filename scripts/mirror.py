@@ -1420,10 +1420,12 @@ class CouldNotRead(RuntimeError):
 # there or with columns this release does not know, a process gone between two reads). Only "mine" is sent to; an
 # "other" is never said on a guess, since setup acts on it. Every road reaches the port through Forge.call,
 # forge_call or wait_forge, and each reads the door first (the suite lists every caller).
-# THE EDGE, written down and not solved (the owner's ruling, 11-24): between the read and the request there is a
-# moment (the read is reused for up to DOOR_FRESH_S seconds, then the request itself) in which our forge could stop
-# and another program take its port. The port is picked below the system's short-lived range, so the system never
-# hands it out by itself; only a program that asks for that number by name can take it in that moment.
+# On "none" nothing is sent either (the owner's ruling F1): no listener is exactly when another program can take the
+# number, so a request then could only fail or reach a stranger; it is answered as no answer, from the read itself.
+# THE EDGE, written down and not solved (the owner's ruling, 11-24): one case only. Our own forge, read as "mine",
+# dies while a call is under way (a push makes more than one connection, and a read is reused for up to
+# DOOR_FRESH_S seconds), and another program takes its number in that moment. The port is picked below the system's
+# short-lived range, so the system never hands it out by itself; only a program that asks for it by name can.
 
 DOOR_FRESH_S = 2.0
 DOOR_SEEN = {}
@@ -1634,8 +1636,8 @@ def door_line(kind, port, why, never=False, again="status"):
 
 
 def door(p, port, fresh=False, again="status"):
-    """The one place every road to the forge passes: 'mine' or 'none' (no listener: the old "does not answer"
-    lines stay); DoorShut on 'other' or unread, with its one line. A read is reused for DOOR_FRESH_S seconds."""
+    """The one place every road to the forge passes: 'mine' or 'none' (no listener: nothing is sent, and the old
+    "does not answer" lines stay; the owner's ruling F1); DoorShut on 'other' or unread, with its one line. A read is reused for DOOR_FRESH_S seconds."""
     key = (int(port), p["app_ini"])
     seen = DOOR_SEEN.get(key)
     if fresh or not seen or time.monotonic() - seen[0] > DOOR_FRESH_S:
@@ -1653,7 +1655,9 @@ def door(p, port, fresh=False, again="status"):
 
 def door_floor():
     """Setup's first act (the owner's ruling: a floor is checked, not only named): a listener of its own for a
-    moment, and the door read on it. None when this computer says who holds a port; otherwise the line."""
+    moment, and the door read on it. None when this computer says who holds a port; otherwise the line, by kind
+    (the owner's ruling F3, 11-24): a read that is not there or names columns this release does not know "cannot be
+    read on this computer"; a read that did not answer this time "could not be read this time", run setup again."""
     s = socket.socket()
     try:
         s.bind(("127.0.0.1", 0))
@@ -1664,7 +1668,7 @@ def door_floor():
             if system()[0] == "darwin":
                 out = subprocess.run(NETSTAT, capture_output=True, text=True, timeout=20)
                 if out.returncode != 0:
-                    raise DoorUnread(True, "netstat did not answer")
+                    raise DoorUnread(False, "netstat did not answer")
                 pids = mac_listeners(port, out.stdout)
                 ok = pids == [os.getpid()] and mac_proc(os.getpid())[0] == me
             else:
@@ -1677,9 +1681,11 @@ def door_floor():
         except FileNotFoundError:
             return door_line("unread", port, "netstat is not there", True)
         except DoorUnread as e:
-            return door_line("unread", port, str(e), True)
-        except (OSError, subprocess.SubprocessError) as e:
-            return door_line("unread", port, "the read could not be made", True)
+            return door_line("unread", port, str(e), e.never, again="setup")
+        except subprocess.TimeoutExpired:
+            return door_line("unread", port, "netstat did not answer", False, again="setup")
+        except (OSError, subprocess.SubprocessError):
+            return door_line("unread", port, "the read could not be made", False, again="setup")
         return None
     finally:
         s.close()
@@ -1730,7 +1736,8 @@ class Forge:
         self.user = st.get("mirror_user", MIRROR_USER)
 
     def call(self, method, path, body=None):
-        door(self.p, self.port)                  # G8.7: nothing with the key goes to a port that is not ours
+        if door(self.p, self.port) != "mine":    # G8.7: the key goes only to our own forge; on "none" nothing is
+            return 0, {"message": f"nothing listens on 127.0.0.1:{self.port}"}   # sent (F1), as no answer
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + "/api/v1" + path, data=data, method=method,
                                      headers={"Authorization": f"token {self.key}", "Content-Type": "application/json",
@@ -1818,7 +1825,10 @@ def forge_call(forge, cache, *args, env=None, timeout=GIT_TIMEOUT):
     forge is on this computer, so no proxy of the person's is asked to reach it: no_proxy names this computer, and
     git and git-lfs both keep to it, for a proxy in git's settings and one in the environment alike; the forge's
     key only in this one process's environment."""
-    door(forge.p, forge.port)                    # G8.7: nothing with the key or a copy to a port that is not ours
+    if door(forge.p, forge.port) != "mine":      # G8.7: the key and a copy go only to our own forge; on "none"
+        return subprocess.CompletedProcess(       # nothing is sent (F1): git's own no-answer shape, nothing run
+            ["git"] + list(args), 128, "",
+            f"fatal: unable to access 'http://127.0.0.1:{forge.port}/': nothing listens on 127.0.0.1:{forge.port}")
     e = dict(forge.git_env(), **(env or {}))
     e.update(no_proxy=THIS_COMPUTER, NO_PROXY=THIS_COMPUTER)     # the call reaches only this computer
     return git(cache, *args, env=e, timeout=timeout)
@@ -3696,9 +3706,10 @@ def wait_forge(p, port, seconds=FIRST_START_WAIT, again="status"):
 
 
 def wait_stopped(p, port, seconds=30):
-    """After the service is told to stop: 'stopped' (no listener), 'other' (our forge is gone and another program
-    holds the port: the forge did stop), 'running' (ours still listens at the end), 'unread' (the door stayed
-    unread to the end, so neither is said)."""
+    """After the service is told to stop: 'stopped' (no listener), 'other' (another program holds the port AND no
+    process of this account runs this forge on this folder: the forge did stop), 'running' (ours still runs at the
+    end), 'unread' (the door or our own processes stayed unread to the end, so neither is said). "other" alone is
+    not "stopped" (the owner's ruling F2): a stranger can sit on ::1 while our forge still runs on 127.0.0.1."""
     kind = "unread"
     for _ in range(seconds * 2):
         try:
@@ -3707,8 +3718,12 @@ def wait_stopped(p, port, seconds=30):
             kind = "running"
         except DoorShut as e:
             if e.kind == "other":
-                return "other"
-            kind = "unread"
+                ours = own_forge_running(p)
+                if ours is False:
+                    return "other"
+                kind = "running" if ours else "unread"
+            else:
+                kind = "unread"
         time.sleep(0.5)
     return kind
 
