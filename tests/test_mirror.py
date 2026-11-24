@@ -83,6 +83,22 @@ def _suites_answer(d, accts):
 
 
 mirror.loose = _suites_answer
+
+
+class _PassableAbove:
+    """os for the skill, but a folder above `top` reads as one every account may pass (its group's and others' x bits set)."""
+    def __init__(self, top):
+        self._top = top
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def stat(self, path, *a, **k):
+        s_ = os.stat(path, *a, **k)
+        r = os.path.realpath(path) if isinstance(path, (str, bytes, os.PathLike)) else None
+        if r is not None and r != self._top and self._top.startswith(r.rstrip(os.sep) + os.sep):
+            return os.stat_result((s_.st_mode | 0o011,) + tuple(s_)[1:])
+        return s_
 from fake_github import FakeGitHub  # noqa: E402
 
 
@@ -3474,13 +3490,15 @@ class G9(unittest.TestCase):
             # (Two of the stand-ins bear the skill's own file names; those setup refuses above. Here, the rest.)
             later = set(stand) - {"data/mirror.py", "config/settings.json"}
             plant(root, later)
-            unit = w.p["unit"]
+            darwin = mirror.system()[0] == "darwin"               # a launch agent on a Mac, a user unit on Linux
+            unit = w.p["plist" if darwin else "unit"]
             self.assertTrue(os.path.exists(unit))
             rc, out = uninstall()
             # Rule 8: the leave goes to its end for everything that is the skill's; what it did not make stays,
             # named as the person's, with each folder that stayed for it; exit 0; the last line says so.
             self.assertEqual(rc, 0, out)
-            self.assertIn(["systemctl", "--user", "disable", "--now", mirror.SERVICE, mirror.SYNC_UNIT + ".timer"],
+            self.assertIn(["launchctl", "bootout", f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"] if darwin else
+                          ["systemctl", "--user", "disable", "--now", mirror.SERVICE, mirror.SYNC_UNIT + ".timer"],
                           w.home.calls)
             self.assertFalse(os.path.exists(unit), "the unit goes")
             self.assertFalse(os.path.exists(w.p["bin"]), "the forge's binary goes")
@@ -3684,6 +3702,11 @@ class G9(unittest.TestCase):
             # is passable (755), so a folder in it that others can write in is reachable.
             saved_accounts, mirror.accounts = mirror.accounts, lambda: []
             stack.callback(setattr, mirror, "accounts", saved_accounts)
+            # The folders above the suite's own are the machine's (rule 17): every account may pass them, as /tmp
+            # lets it on Linux. A Mac's temporary folder is the account's alone (700), so there nobody could reach a
+            # folder below it and the walk rightly names none (seen on a stock macOS runner); stood in here.
+            stack.callback(setattr, mirror, "os", mirror.os)
+            mirror.os = _PassableAbove(os.path.realpath(h.tmp))
             os.chmod(h.tmp, 0o755)
             os.chmod(h.env["HOME"], 0o755)
             h.place_gitea()
