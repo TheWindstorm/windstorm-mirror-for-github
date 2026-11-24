@@ -1431,10 +1431,12 @@ PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
 LINUX_TCP_HEADS = ("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode",
                    "sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode")
 # netstat -anv -p tcp on macOS, by its header: only the headers read on a real Mac are known; any other = unread.
-# Read 2026-11-24 on macOS 27.2.1 arm64.
+# Read 2026-11-24 on macOS 27.2.1 arm64 (process:pid) and on macOS 13.7.8 Intel (pid, then epid).
 MAC_NETSTAT_HEADS = (
     "Proto Recv-Q Send-Q Local Address Foreign Address (state) rxbytes txbytes rhiwat shiwat process:pid state "
     "options gencnt flags flags1 usecnt rtncnt fltrs",
+    "Proto Recv-Q Send-Q Local Address Foreign Address (state) rhiwat shiwat pid epid state options gencnt flags "
+    "flags1 usscnt rtncnt fltrs",
 )
 NETSTAT = ["netstat", "-anv", "-p", "tcp"]
 
@@ -1529,7 +1531,8 @@ def mac_listeners(port, text):
     if head is None or " ".join(lines[head].split()) not in MAC_NETSTAT_HEADS:
         raise DoorUnread(True, "netstat names columns this release does not know")
     cols = lines[head].split()
-    after = len(cols) - cols.index("process:pid") - 1
+    col = "process:pid" if "process:pid" in cols else "pid"
+    after = len(cols) - cols.index(col) - 1
     pids = []
     for line in lines[head + 1:]:
         c = line.split()
@@ -1538,7 +1541,7 @@ def mac_listeners(port, text):
         if c[5] != "LISTEN" or c[3].rsplit(".", 1)[-1] != str(port):
             continue
         try:
-            pids.append(int(c[-(after + 1)].rsplit(":", 1)[1]))
+            pids.append(int(c[-(after + 1)].rsplit(":", 1)[-1]))
         except (IndexError, ValueError):
             raise DoorUnread(True, "netstat named a process this release cannot read")
     return pids

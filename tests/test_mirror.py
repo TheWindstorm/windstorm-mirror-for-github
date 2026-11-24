@@ -3861,9 +3861,25 @@ class G8(unittest.TestCase):
         self.assertEqual(mirror.mac_listeners(21000, text), [812, 913])
         self.assertEqual(mirror.mac_listeners(2100, text), [77])
         self.assertEqual(mirror.mac_listeners(9, text), [])
-        for changed in (head.replace("process:pid", "pid"), head + " newcolumn", "nothing like a header"):
+        # macOS 13.7.8 Intel, read 11-24: a plain pid column, then epid
+        head13 = ("Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)      rhiwat  shiwat    "
+                  "pid   epid state  options           gencnt    flags   flags1 usscnt rtncnt fltrs")
+        rows13 = [
+            "tcp4       0      0  127.0.0.1.21000        *.*                    LISTEN       131072  131072    812      0 "
+            "00000 00000006 0000000000a1b2c3 00000000 00000800      1      0 000000",
+            "tcp46      0      0  *.21000                *.*                    LISTEN       131072  131072    913      0 "
+            "00000 00000006 0000000000a1b2c4 00000000 00000800      1      0 000000",
+            "tcp4       0      0  127.0.0.1.2100         *.*                    LISTEN       131072  131072     77      0 "
+            "00000 00000006 0000000000a1b2c6 00000000 00000800      1      0 000000",
+        ]
+        text13 = "Active Internet connections (including servers)\n" + head13 + "\n" + "\n".join(rows13) + "\n"
+        self.assertEqual(mirror.mac_listeners(21000, text13), [812, 913])
+        self.assertEqual(mirror.mac_listeners(2100, text13), [77])
+        for changed in (head.replace("process:pid", "pid"), head + " newcolumn", "nothing like a header",
+                        head13.replace("epid", "xpid")):
             with self.assertRaises(mirror.DoorUnread) as e:
-                mirror.mac_listeners(21000, text.replace(head, changed))
+                mirror.mac_listeners(21000, text.replace(head, changed) if "xpid" not in changed else
+                                     text13.replace(head13, changed))
             self.assertTrue(e.exception.never, changed)
         # our forge: our pinned binary (any version beside it), on our settings file; nothing else
         with Home():
