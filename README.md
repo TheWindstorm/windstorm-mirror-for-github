@@ -2,6 +2,8 @@
 
 **A second, always-current copy of all your GitHub projects on a computer you own.**
 
+Status: 0.1.0 (2026-11-25)
+
 This is not made, endorsed or supported by GitHub. GitHub is a trademark of GitHub, Inc.
 
 ## Set it up
@@ -10,12 +12,12 @@ Say this to your AI agent (Claude Code, or any agent that can run commands on yo
 
 > Set up https://github.com/TheWindstorm/windstorm-mirror-for-github on this computer.
 
-**If you are the agent:** clone this repository, read `skills/mirror/SKILL.md` and follow its steps in order.
+**If you are the agent:** clone this release with the line below, read `skills/mirror/SKILL.md` and follow its steps in order.
 Stop at each step marked **Person**, say what it gives you to say, and wait for the person. Do nothing that it
 does not tell you to do.
 
 ```bash
-git clone https://github.com/TheWindstorm/windstorm-mirror-for-github
+git clone --branch v0.1.0 https://github.com/TheWindstorm/windstorm-mirror-for-github
 ```
 
 **Or keep it as a Claude Code plugin**, so the skill is there in every session. A plugin installed during a
@@ -53,7 +55,8 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
 
 - It downloads Gitea 28.4.0, a free, open-source program much like GitHub, from dl.gitea.com, and checks it
   against a pinned SHA-256. Gitea runs from `~/.local/share/windstorm-mirror/` and listens on this computer only
-  (127.0.0.1), with sign-up closed. Setup needs no administrator rights.
+  (127.0.0.1), with sign-up closed. Setup needs no administrator rights. Setup and its dry run check the program
+  against the pinned SHA-256 each time they run; the service's start does not check it again.
 - It makes two Gitea accounts: yours, and `mirror`, which owns the copies. Each password and each key is kept in a
   file that only you can read.
 - It runs Gitea as your own service, and syncs every 15 minutes. On Linux that is a systemd user unit, with the
@@ -62,6 +65,27 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
 - Where a folder these go in is not on your computer yet (a fresh Linux account has no `~/.config` or
   `~/.local/share`), setup names it in the dry run, makes it and keeps a note of it; uninstall takes it away again
   once it is empty.
+- **Settings you can set.** `WSM_HOME` moves every folder of the skill's under it (`data/` and `config/`). On
+  Linux, `XDG_DATA_HOME` and `XDG_CONFIG_HOME` move the data and the settings folders as they do for other
+  programs. A command whose folders one of them moved says so first; setup and uninstall stop, having changed
+  nothing, when this computer's service already runs the skill from another home, and say which. Setup also stops
+  at your home folder, or at a folder that already holds anything the skill did not make. The skill reads no other
+  setting of yours.
+- **Only what it made.** The skill keeps a record of every file and folder it writes in its folders. Uninstall
+  takes only what that record holds, a folder only once it is empty. Anything else it finds in its folders when it
+  runs stays where it is: uninstall names it as yours, with each folder that stayed because of it, and still goes
+  to its end for everything that is the skill's.
+- **The folders above it.** A file is only as closed as the folders above it. Setup reads every folder from your
+  home down to what the skill runs (its service files, its own copy, the forge's program) and to what decides what
+  runs (the forge's settings, the skill's settings and state, the Python its service names). A folder of the skill's
+  own that others may write in, setup closes. One of yours, it never changes; when another account on this computer
+  can really reach it and write in it, setup, its dry run, the go's lines and `status` name it, with the one
+  command that closes it (`chmod go-w` and the folder), until it is closed. A folder in your own group with nobody
+  else in it is not named, nor anything inside a home only you can enter. A folder on the way that is not yours is
+  named with whose it is and no command: you cannot change it, only the computer's administrator can. Two names
+  with one user number are one account; an account whose groups cannot be read is said as that, and the others are
+  still worked out. What is read is the folders' mode bits and who is in their groups; access
+  lists (ACLs) are not read.
 - **After a restart.** On Linux, setup can switch on *lingering* for your account. That means the mirror keeps
   running when you are logged out and after a restart, because your account's background services are allowed to
   start without you. The dry run asks your computer whether you may switch lingering on yourself, and says what it
@@ -86,6 +110,9 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
   agent: whatever runs inside an agent's session, even a command you start yourself, is shown to the agent. The
   key is then kept in a file only your account can read. An agent that runs as you could read that file; the
   skill tells it never to, and never to put a key in its output.
+- **Watch each key's end date yourself**, on GitHub's key page. 0.1.0 says a key is ending only in `status`, two
+  weeks before, and only when it could read the end date; before your go it says, for each key, whether it could. A
+  key that stops working is said as that, and its copies as not refreshed since their last good refresh.
 - **Give the go for the first copy, yourself, in a terminal window of your own**: run `go` there (the agent
   gives you the line). It shows you which projects they are (by name, the first 20, with the whole list in a
   file), how big they are, where they go, what is not copied, what happens after a restart, when each key ends,

@@ -1,8 +1,8 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "windstorm-mirror-for-github",
-  "version": "0.0.0",
-  "description": "Windstorm Mirror for GitHub: a second, always-current copy of all your GitHub projects on a computer you own. Release candidate for 0.1.0, for test runs: it may change before the release.",
+  "version": "0.1.0",
+  "description": "Windstorm Mirror for GitHub: a second, always-current copy of all your GitHub projects on a computer you own.",
   "author": {
     "name": "The Windstorm",
     "url": "https://github.com/TheWindstorm"

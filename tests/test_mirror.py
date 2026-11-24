@@ -62,6 +62,19 @@ STARTED = []           # every forge process a test started, stopped whatever wa
 TEMPS = []
 
 
+def _no_road_to_github(real):
+    """The suite never reaches GitHub itself: a read of github.com from any test fails that test at once."""
+    def urlopen(req, *a, **k):
+        host = (urllib.parse.urlsplit(getattr(req, "full_url", req)).hostname or "").lower()
+        if host == "github.com" or host.endswith(".github.com"):
+            raise AssertionError(f"a test reached GitHub itself ({host}); the suite stands GitHub in on loopback")
+        return real(req, *a, **k)
+    return urlopen
+
+
+urllib.request.urlopen = _no_road_to_github(urllib.request.urlopen)
+
+
 def _stop_everything(*_):
     for pr in STARTED:
         if pr.poll() is None:
@@ -181,6 +194,10 @@ class Home:
 
     def __enter__(self):
         os.environ.update(self.env)
+        # G9.12: the second key of the test-only settings, written by the suite in the temporary home it made
+        os.makedirs(self.env["WSM_HOME"], mode=0o700, exist_ok=True)        # the person's own folder, theirs alone
+        with open(os.path.join(self.env["WSM_HOME"], mirror.SUITE_MARKER), "w") as f:
+            f.write("made by tests/test_mirror.py for one test\n")
         mirror.run = self.fake_run
         self.saved_wait, mirror.SETUP_WAIT = mirror.SETUP_WAIT, 0     # no forge follows a stand-in service start
         return self
@@ -212,6 +229,7 @@ class Home:
         os.makedirs(os.path.dirname(p["bin"]), exist_ok=True)
         shutil.copyfile(g, p["bin"])
         os.chmod(p["bin"], 0o755)
+        mirror.claim(p["bin"])          # what the skill's own download records (rule 23)
         return p
 
     def setup(self, *args, choose=True):
@@ -943,6 +961,8 @@ def files_holding(root, needle):
 
 class G2(unittest.TestCase):
     def setUp(self):
+        self.home = Home().__enter__()       # the suite's own home: the stand-in GitHub is taken only there (G9.12)
+        self.addCleanup(self.home.__exit__, None, None, None)
         self.gh_root = tempfile.mkdtemp(prefix="wsm-gh-")
         self.gh = FakeGitHub(self.gh_root, key="ghkey-0123456789abcdef")
         self.gh.add_repo("someone", "alpha")
@@ -1165,15 +1185,16 @@ class G3(unittest.TestCase):
         saved, env = mirror.gh_get, os.environ.get("WSM_PAGE_SIZE")
         mirror.gh_get = lambda key, url, *a, **k: (asked.append(url), (500, {}, None))[1]
         try:
-            for val, want in ((None, 100), ("3", 3), ("1", 1), ("100", 100), ("0", 100), ("101", 100), ("x", 100),
-                              ("-5", 100)):
-                os.environ.pop("WSM_PAGE_SIZE", None)
-                if val is not None:
-                    os.environ["WSM_PAGE_SIZE"] = val
-                for kind in ("user", "org"):
-                    asked.clear()
-                    mirror.list_owner("someone", kind, "k")
-                    self.assertIn(f"per_page={want}", asked[0], (val, kind))
+            with Home():       # the suite's own home: WSM_PAGE_SIZE is read only there (G9.12)
+                for val, want in ((None, 100), ("3", 3), ("1", 1), ("100", 100), ("0", 100), ("101", 100),
+                                  ("x", 100), ("-5", 100)):
+                    os.environ.pop("WSM_PAGE_SIZE", None)
+                    if val is not None:
+                        os.environ["WSM_PAGE_SIZE"] = val
+                    for kind in ("user", "org"):
+                        asked.clear()
+                        mirror.list_owner("someone", kind, "k")
+                        self.assertIn(f"per_page={want}", asked[0], (val, kind))
         finally:
             mirror.gh_get = saved
             os.environ.pop("WSM_PAGE_SIZE", None)
@@ -2256,6 +2277,53 @@ class G6(unittest.TestCase):
             self.assertTrue(any(x.startswith("problem: someone/b: cannot refresh: the fetch from GitHub failed") for x in problems))
             self.assertIn("problem: someone/c: the copy's branches and tags differ from what GitHub last showed", problems)
 
+    def test_G6_2_a_refused_key_reads_as_not_refreshed_since_the_last_good_one(self):
+        """The skill's name promises a current copy (the maintainer's condition for 0.1.0, 2026-11-23): when a refresh
+        fails because GitHub refuses the key, expired, revoked or narrowed, status and the sync say the copy is not
+        refreshed since its last good refresh, and why; never current, and the last good sync stays where it was.
+        GitHub refuses with a 401 (a key that stopped) or a 403 that is not the allowance; both are taken here."""
+        refusals = {"a key changed on GitHub (401)": None,
+                    "a 403 that is not the allowance": (403, {}, {"message": "Resource not accessible by personal access token"}),
+                    "a 401 for an expired key": (401, {}, {"message": "Bad credentials"})}
+        for why, answer in refusals.items():
+            with World(self) as w:
+                w.gh.add_repo("someone", "alpha")
+                w.gh.commit("someone/alpha", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0, why)
+                rc, out = status()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("copies: 1 on GitHub, 1 copied, 0 behind, 0 unreadable", out)
+                st = mirror.load_json(w.p["state"], {})
+                good, good_sync = next(iter(st["repos"].values()))["last_good"], st["last_good_sync"]
+                time.sleep(1.1)
+                real = mirror.gh_get
+                if answer is None:
+                    w.gh.key = "ghkey-" + "d4" * 10                      # the key stops working on GitHub
+                else:
+                    mirror.gh_get = lambda key, path, a=answer: a
+                try:
+                    rc, out = w.sync()
+                    self.assertEqual(rc, 1, (why, out))
+                    self.assertRegex(out, r"problem: someone: (GitHub refused the key for someone \((401)\)|the listing of "
+                                          r"someone failed at page 1 \(GitHub answered 403\))", why)
+                    self.assertIn("sync: 0 on GitHub, 0 copied now, 0 unchanged, 1 problem(s)", out)
+                    rc, out = status()
+                finally:
+                    mirror.gh_get = real
+                self.assertEqual(rc, 1, (why, out))
+                self.assertIn("copies: 1 on GitHub, 1 copied, 1 behind, 0 unreadable", out, why)
+                line = [x for x in out.splitlines() if x.startswith("problem: someone/alpha: ")]
+                self.assertEqual(len(line), 1, (why, out))
+                self.assertIn("cannot refresh: ", line[0], why)
+                self.assertTrue(line[0].endswith(f"; not refreshed since {good}"), (why, line[0]))
+                self.assertIn(f"last good sync: {good_sync}", out, why)
+                self.assertNotIn("0 behind", out, why)
+                st = mirror.load_json(w.p["state"], {})
+                self.assertEqual(st["last_good_sync"], good_sync, why)
+                self.assertEqual(next(iter(st["repos"].values()))["last_good"], good, why)
+                self.assertFalse(mirror.copy_state(next(iter(st["repos"].values())), w.forge_refs("someone--alpha"), 10 ** 9)[0])
+
     def test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current(self):
         fresh = mirror.now_utc()
         good = {"last_good": fresh, "refs": {"refs/heads/main": "1" * 40}}
@@ -2899,6 +2967,551 @@ def forge_version(w):
 
 
 class G9(unittest.TestCase):
+    def test_G9_12_a_test_only_setting_needs_the_suites_marker_and_never_sends_a_key_off_this_computer(self):
+        """Rule 27: WSM_GITHUB_API, WSM_GITHUB_GIT, WSM_PAGE_SIZE and WSM_GITEA_BASE need two keys, the setting and
+        the marker the suite writes in the home it made. The setting alone is found and ignored, said first, and the
+        command goes on against GitHub itself; with both, a GitHub address that is not this computer's loopback
+        stops the command having done nothing. No key is ever sent to a host that is not GitHub's API or loopback."""
+        vals = {"WSM_GITHUB_API": "http://127.0.0.1:9", "WSM_GITHUB_GIT": "http://localhost:9",
+                "WSM_PAGE_SIZE": "3", "WSM_GITEA_BASE": "http://[::1]:9/gitea"}
+        saved, real_open, sent = {k: os.environ.get(k) for k in vals}, urllib.request.urlopen, []
+
+        def no_road(req, *a, **k):          # every read the tool would make, recorded; none leaves this test
+            sent.append(urllib.parse.urlsplit(getattr(req, "full_url", req)).netloc)
+            raise urllib.error.URLError("no road in this test")
+        urllib.request.urlopen = no_road
+        try:
+            with Home():
+                marker = os.path.join(os.environ["WSM_HOME"], mirror.SUITE_MARKER)
+                os.environ.update(vals)
+                # The control: with both keys, each setting is taken (the suite leans on this).
+                self.assertEqual((mirror.github_api(), mirror.github_git(), mirror.page_size(),
+                                  mirror.test_setting("WSM_GITEA_BASE")),
+                                 (vals["WSM_GITHUB_API"], vals["WSM_GITHUB_GIT"], 3, vals["WSM_GITEA_BASE"]))
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertNotIn("ignored", out)
+                self.assertTrue(out.startswith(f"WSM_HOME is set: this skill's folders are under "
+                                               f"{os.environ['WSM_HOME']}."), out)
+                # The setting alone: nothing is replaced; said first; the command goes on.
+                os.remove(marker)
+                self.assertEqual((mirror.github_api(), mirror.github_git(), mirror.page_size(),
+                                  mirror.test_setting("WSM_GITEA_BASE")),
+                                 (mirror.GITHUB_API, mirror.GITHUB_GIT, 100, None))
+                rc, out = quiet(mirror.main, ["status"])
+                lines = out.splitlines()
+                self.assertTrue(lines[0].startswith("WSM_HOME is set:"), out)
+                for i, name in enumerate(vals, 1):
+                    self.assertTrue(lines[i].startswith(f"{name} was found and ignored"), out)
+                self.assertIn("Run setup first.", out)
+                self.assertEqual([n for n in vals if n in os.environ], [], "handed on to what the tool starts")
+                sent.clear()
+                mirror.gh_get("k", "/user")
+                mirror.gh_public("/repos/x/y/releases/latest")      # self-update's read
+                self.assertEqual(sent, ["api.github.com", "api.github.com"])
+                # Both keys, a GitHub address that is not loopback: stopped first, nothing done, no key sent there.
+                with open(marker, "w"):
+                    pass
+                for bad in ("https://example.com", "http://10.0.0.1:3000", "https://127.0.0.1.example.com",
+                            "http://localhost.example.com:80", "ftp://127.0.0.1", "https://api.github.com.example.com"):
+                    for name in ("WSM_GITHUB_API", "WSM_GITHUB_GIT"):
+                        os.environ[name] = bad
+                        before = sorted(os.listdir(os.environ["WSM_HOME"]))
+                        for cmd in (["setup", "--linger"], ["self-update"], ["status"]):
+                            sent.clear()
+                            rc, out = quiet(mirror.main, cmd)
+                            self.assertEqual(rc, 2, (bad, name, cmd, out))
+                            self.assertIn(f"Stopped: {name} names an address that is not this computer's own", out)
+                            self.assertEqual((sent, sorted(os.listdir(os.environ["WSM_HOME"]))), ([], before))
+                        self.assertIn(mirror.github_api(), (mirror.GITHUB_API, vals["WSM_GITHUB_API"]))
+                        self.assertIn(mirror.github_git(), (mirror.GITHUB_GIT, vals["WSM_GITHUB_GIT"]))
+                        sent.clear()
+                        mirror.gh_get("k", "/user")
+                        self.assertNotIn(urllib.parse.urlsplit(bad).netloc, sent)
+                        os.environ[name] = vals[name]
+                # A next page on another host than GitHub's API is never asked with the key.
+                sent.clear()
+                self.assertEqual(mirror.gh_get("k", "https://example.com/user/repos?page=2")[0], 0)
+                os.environ.pop("WSM_GITHUB_API")
+                self.assertEqual(mirror.gh_get("k", "https://example.com/user/repos?page=2")[0], 0)
+                self.assertEqual(sent, [])
+                mirror.gh_get("k", "https://api.github.com/user/repos?page=2")
+                self.assertEqual(sent, ["api.github.com"])
+        finally:
+            urllib.request.urlopen = real_open
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        for f in (SKILL, os.path.join(ROOT, "README.md")):
+            for name in vals:
+                self.assertNotIn(name, fread(f))
+
+    def test_G9_12_every_setting_the_tool_reads_is_on_one_of_the_three_lists(self):
+        """Rule 27's gate: every environment read in the released code is a person's setting (named in the README),
+        a fact from the host, the skill's own marker, or a two-key test setting read only through test_setting."""
+        src = fread(os.path.join(ROOT, "scripts", "mirror.py"))
+        read = set(re.findall(r'(?:os\.environ(?:\.get)?\s*[\(\[]|os\.getenv\()\s*"([A-Za-z0-9_]+)"', src))
+        lists = set(mirror.PERSON_SETTINGS) | set(mirror.HOST_FACTS) | set(mirror.OWN_MARKERS)
+        self.assertEqual(sorted(read - lists), [], "read, and on none of the lists")
+        self.assertEqual(sorted(set(re.findall(r'test_setting\("([A-Z0-9_]+)"\)', src)) - set(mirror.TEST_SETTINGS)), [])
+        self.assertEqual(sorted(read & set(mirror.TEST_SETTINGS)), [], "a test setting read without its second key")
+        self.assertNotIn("getenv(", src.replace('os.getenv("', ""), "a read this test cannot name")
+        self.assertEqual(len(re.findall(r"os\.environ(?:\.get)?\s*[\(\[]\s*(?!\")", src)),
+                         len(re.findall(r"os\.environ\.get\(name\)", src)), "a read by a name this test cannot see")
+        readme = fread(os.path.join(ROOT, "README.md"))
+        for name in mirror.PERSON_SETTINGS:
+            self.assertIn(f"`{name}`", readme)
+        # A moved folder is said by the command it changed.
+        with Home():
+            os.environ["XDG_DATA_HOME"] = os.path.join(os.environ["HOME"], "elsewhere")
+            os.environ.pop("WSM_HOME")
+            try:
+                rc, out = quiet(mirror.main, ["status"])
+            finally:
+                os.environ.pop("XDG_DATA_HOME")
+            if mirror.system()[0] == "linux":
+                self.assertTrue(out.startswith("XDG_DATA_HOME is set: this skill's data folders are under "), out)
+
+    def test_G9_12_only_what_the_skill_made_is_written_over_or_taken_away(self):
+        """Rule 23: setup refuses the home folder and a folder holding a person's things. Uninstall and the delete
+        take only what the record holds, by name, read when they run (a person's file may arrive after setup); rule
+        8: a person's file never stops the leave. It goes to its end (the service off, its files and everything on
+        the record gone), the person's things and the folders above them stay and are named as theirs, it exits 0,
+        and its last line says the mirror is off and what stayed is named. The census never says "Kept: nothing"
+        over them."""
+        stand = {"data/notes.txt": "my notes\n", "data/mirror.py": "print('mine')\n", "data/cache/photo.jpg": "J\n",
+                 "data/bin/tool.sh": "echo mine\n", "data/forge/readme.txt": "mine\n", "config/app.conf": "x=1\n",
+                 "config/settings.json": '{"mine": true}\n', "config/keys/ssh-note.txt": "note\n"}
+
+        def plant(root, only=None):
+            for rel, txt in stand.items():
+                if only is None or rel in only:
+                    f = os.path.join(root, rel)
+                    os.makedirs(os.path.dirname(f), exist_ok=True)
+                    with open(f, "w") as fh:
+                        fh.write(txt)
+
+        def kept(root, only=None):
+            for rel, txt in stand.items():
+                if only is None or rel in only:
+                    self.assertEqual(fread(os.path.join(root, rel)), txt, rel)
+
+        def listing(root):
+            return sorted(os.path.relpath(os.path.join(d, x), root) for d, ds, fs in os.walk(root) for x in ds + fs)
+
+        def uninstall(*args, typed=None):
+            saved = sys.stdin
+            sys.stdin = AtTerminal(typed or "")
+            try:
+                return quiet(mirror.main, ["uninstall", *args])
+            finally:
+                sys.stdin = saved
+
+        # Setup refuses the home folder, and a folder that holds things it did not make; nothing changes.
+        for where in ("", "theirs"):
+            h = Home()
+            root = os.path.join(h.env["HOME"], where) if where else h.env["HOME"]
+            h.env["WSM_HOME"] = root
+            plant(root)
+            with h:
+                before = listing(root)
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                self.assertIn("is your home folder" if not where else "already holds things the skill did not make",
+                              out)
+                self.assertIn("Nothing was changed.", out)
+                self.assertEqual(listing(root), before)
+                kept(root)
+        # Fine at setup; a person's files arrive later, in every place the skill uses.
+        with World(self) as w:
+            root = os.environ["WSM_HOME"]
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            self.assertEqual(mirror.not_ours(w.p), [])
+            # (Two of the stand-ins bear the skill's own file names; those setup refuses above. Here, the rest.)
+            later = set(stand) - {"data/mirror.py", "config/settings.json"}
+            plant(root, later)
+            unit = w.p["unit"]
+            self.assertTrue(os.path.exists(unit))
+            rc, out = uninstall()
+            # Rule 8: the leave goes to its end for everything that is the skill's; what it did not make stays,
+            # named as the person's, with each folder that stayed for it; exit 0; the last line says so.
+            self.assertEqual(rc, 0, out)
+            self.assertIn(["systemctl", "--user", "disable", "--now", mirror.SERVICE, mirror.SYNC_UNIT + ".timer"],
+                          w.home.calls)
+            self.assertFalse(os.path.exists(unit), "the unit goes")
+            self.assertFalse(os.path.exists(w.p["bin"]), "the forge's binary goes")
+            self.assertFalse(os.path.exists(os.path.join(root, "config", "keys", "someone.key")), "the skill's key goes")
+            kept(root, later)
+            self.assertIn("Not the skill's, so left where they are", out)
+            theirs = out.split("Not the skill's, so left where they are")[1]
+            for rel in later:
+                self.assertIn(os.path.join(root, rel), theirs)
+                self.assertNotIn(os.path.join(root, rel), out.split("Not the skill's")[0])
+            self.assertIn("Folders of the skill's that stayed because they hold those:", out)
+            self.assertIn(f"  {os.path.join(root, 'config', 'keys')}: holds ssh-note.txt", out)
+            self.assertIn(f"  {os.path.join(root, 'data', 'bin')}: holds tool.sh", out)
+            self.assertNotIn("Kept: nothing", out)
+            self.assertNotIn("run uninstall again", out)
+            self.assertEqual(out.strip().splitlines()[-1],
+                             "The mirror is off this computer. What stayed, and why, is named above; it is yours, to "
+                             "keep or delete after you look at it.")
+            self.assertTrue(os.path.isdir(w.p["forge"]), "the copies stay without --delete-copies")
+            self.assertIn("Kept: the folder of copies", out)
+            # Run again: safe, and still true.
+            rc, out = uninstall()
+            self.assertEqual(rc, 0, out)
+            kept(root, later)
+            # The delete, with the person's files still there (one at the forge's own top): only what the record
+            # holds goes; theirs and the folders above them stay, and are named.
+            rc, out = uninstall("--delete-copies", typed="1\n")
+            self.assertEqual(rc, 0, out)
+            kept(root, later)
+            self.assertFalse(os.path.exists(os.path.join(w.p["forge"], "data")), "the forge's own folders go")
+            # The record stays while folders of the skill's stand (they hold the person's things), and is said.
+            self.assertTrue(os.path.exists(os.path.join(w.p["data"], mirror.MADE_RECORD)), out)
+            self.assertIn(f"Kept: {w.p['data']}, the record of what the skill did here.", out)
+            self.assertIn(f"  {w.p['forge']}: the 1 copies (the forge's own folders in it)", out)
+            self.assertIn(f"  {w.p['forge']}: holds readme.txt", out)
+            self.assertNotIn("Kept: nothing", out)
+            self.assertNotIn("Kept: the folder of copies", out)
+            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+            for rel in later:
+                os.remove(os.path.join(root, rel))
+            self.assertEqual(uninstall()[0], 0)
+        # A file arriving between the check and the removal (the check stood in to see nothing): the removal
+        # itself still takes only what the record holds, never a whole folder holding something else.
+        with World(self) as w2:
+            root2 = os.environ["WSM_HOME"]
+            w2.gh.add_repo("someone", "alpha")
+            w2.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w2.key_set()[0], 0)
+            self.assertEqual(w2.first_sync()[0], 0)
+            plant(root2, later)
+            saved_check, mirror.not_ours = mirror.not_ours, lambda p: []
+            try:
+                rc, out = uninstall()
+                kept(root2, later)
+                rc, out = uninstall("--delete-copies", typed="1\n")
+            finally:
+                mirror.not_ours = saved_check
+            kept(root2, later)
+            self.assertFalse(os.path.exists(os.path.join(root2, "config", "keys", "someone.key")))
+            for rel in later:
+                os.remove(os.path.join(root2, rel))
+            rc, out = uninstall("--delete-copies", typed="1\n")
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(w2.p["data"]), out)
+            self.assertIn("Kept: nothing", out)
+            self.assertEqual(listing(root2), [mirror.SUITE_MARKER])
+        # No line the tool prints, the README or the skill's text deletes a folder recursively or by a pattern.
+        for f in (os.path.join(ROOT, "scripts", "mirror.py"), os.path.join(ROOT, "README.md"), SKILL):
+            self.assertIsNone(re.search(r"\brm\s+-[a-zA-Z]*[rR]|(?<![.\w])rmdir\s|\bfind\b[^\n]*-delete|\brm\s+[^\n]*\*",
+                                        fread(f)), f)
+
+    def test_G9_12_nothing_of_the_skill_runs_with_admin_rights(self):
+        """The family's rule 28: no command the tool runs is sudo, doas, pkexec or su, and the README says the
+        skill needs no administrator rights (it prints sudo only in an install line the person reads and runs)."""
+        src = fread(os.path.join(ROOT, "scripts", "mirror.py"))
+        self.assertIsNone(re.search(r'\[\s*"(sudo|doas|pkexec|su|runas)"', src))
+        self.assertIsNone(re.search(r'(subprocess\.\w+|run)\(\s*f?"(sudo|doas|pkexec|su) ', src))
+        self.assertIn("needs no administrator rights", fread(os.path.join(ROOT, "README.md")))
+
+    def test_G9_12_setup_and_uninstall_do_nothing_against_another_homes_install(self):
+        """WSM_HOME is a person's setting. Setup and uninstall refuse it when this computer's service for the skill
+        runs another home's copy: nothing changed, the home that install uses said, and the one next step."""
+        def service_text(root):
+            was = os.environ.get("WSM_HOME")
+            os.environ.pop("WSM_HOME", None) if root is None else os.environ.__setitem__("WSM_HOME", root)
+            try:
+                q = mirror.paths()
+                return mirror.plist_text(q) if mirror.system()[0] == "darwin" else mirror.unit_text(q)
+            finally:
+                os.environ["WSM_HOME"] = was
+        with Home() as h:
+            p = mirror.paths()
+            f = p["plist"] if mirror.system()[0] == "darwin" else p["unit"]
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            other = os.path.join(h.tmp, "other home")
+            for text, want in ((service_text(other), f"WSM_HOME={shlex.quote(other)} python3 -I "
+                                f"{shlex.quote(mirror.paths(other)['script'])}"),
+                               (service_text(None), "unset WSM_HOME, then run python3 -I "
+                                f"{shlex.quote(mirror.paths(None)['script'])}"),
+                               ("[Service]\n", "could not be read")):
+                with open(f, "w") as fh:
+                    fh.write(text)
+                for cmd in (["setup", "--linger"], ["setup", "--dry-run"], ["uninstall"]):
+                    rc, out = quiet(mirror.main, cmd)
+                    self.assertEqual(rc, 2, (cmd, out))
+                    self.assertIn("Nothing was changed.", out)
+                    self.assertIn(want, out)
+                    self.assertEqual(fread(f), text)
+                    self.assertFalse(os.path.exists(p["data"]), "nothing made")
+            # The control: the service of this home's own copy, as the skill wrote it, is no reason to stop.
+            with open(f, "w") as fh:
+                fh.write(service_text(os.environ["WSM_HOME"]))
+            mirror.claim(f)                                       # what setup records when it writes it
+            rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+            self.assertNotIn("uses another home", out)
+            self.assertEqual(rc, 0, out)
+            # Rule 23: the same file changed since (by the person, or by something else) is not written over by
+            # setup, nor removed by uninstall: it is named and left. Setup stops there; uninstall goes to its end
+            # (rule 8: a person who wants to leave is never refused because of the state of their own files).
+            with open(f, "a") as fh:
+                fh.write("# the person's own line\n")
+            changed = fread(f)
+            for cmd in (["setup", "--dry-run"], ["uninstall"]):
+                rc, out = quiet(mirror.main, cmd)
+                if cmd[0] == "setup":
+                    self.assertNotEqual(rc, 0, (cmd, out))
+                else:
+                    self.assertEqual(rc, 0, (cmd, out))
+                    self.assertIn("It is switched off; look at it, and keep or delete it as you choose.", out)
+                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+                self.assertIn("not as the skill wrote it", out)
+                self.assertIn(f, out)
+                self.assertEqual(fread(f), changed)
+                self.assertNotIn("Kept: nothing", out)
+            os.remove(f)
+            # Rule 28: a folder of the skill's that other accounts can write in, or that another account owns, is
+            # refused before anything is written there.
+            os.makedirs(p["data"], exist_ok=True)
+            mode = os.stat(p["data"]).st_mode
+            try:
+                os.chmod(p["data"], 0o777)
+                rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"Stopped: {p['data']} is not yours alone (other accounts can write in it)", out)
+            finally:
+                os.chmod(p["data"], mode & 0o777)
+        # Rule 28: whatever umask the tool is started with (000 in some containers and job runners), it makes
+        # nothing other accounts can write, so its own next run never refuses a folder it made itself.
+        def everything(h):
+            return {os.path.join(d, y) for top in (os.environ["WSM_HOME"], h.env["HOME"])
+                    for d, ds, fs in os.walk(top) for y in ds + fs}
+        with Home() as h:
+            h.place_gitea()                                       # the suite's stand-in download, as the person's
+            before = everything(h)
+            saved = os.umask(0)
+            try:
+                for _ in (1, 2):
+                    rc, out = h.setup()
+                    self.assertEqual(rc, 0, out)
+            finally:
+                os.umask(saved)
+            made = sorted(everything(h) - before)
+            self.assertTrue(made)
+            for x in made:
+                if not os.path.islink(x):
+                    self.assertEqual(os.lstat(x).st_mode & 0o022, 0, (x, oct(os.lstat(x).st_mode)))
+            # A file that holds a secret is made 0600 by name, before a byte is written into it, whatever the umask,
+            # and a .tmp an earlier run left (here 0666) is never written into.
+            opened, real_fdopen = [], os.fdopen
+
+            def seen_fdopen(fd, *a, **k):
+                opened.append(os.fstat(fd).st_mode & 0o777)
+                return real_fdopen(fd, *a, **k)
+            saved = os.umask(0)
+            try:
+                for write in (mirror.write_private, lambda f, t: mirror.write_file(f, t, 0o600)):
+                    f = os.path.join(mirror.paths()["conf"], "a-secret")
+                    with open(f + ".tmp", "w") as fh:
+                        fh.write("left by an earlier run\n")
+                    os.chmod(f + ".tmp", 0o666)
+                    opened.clear()
+                    os.fdopen = seen_fdopen
+                    try:
+                        write(f, "s3cret\n")
+                    finally:
+                        os.fdopen = real_fdopen
+                    self.assertEqual(opened, [0o600])
+                    self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+                    self.assertFalse(os.path.exists(f + ".tmp"))
+                    os.remove(f)
+            finally:
+                os.umask(saved)
+        # Rule 28: a file is only as closed as the folders above it. Every folder from the home down to what the
+        # skill runs is read: one of the skill's own, opened since, setup closes; one of the person's that another
+        # account can write in is never changed, only named with the one command, by setup, its dry run, the go's
+        # block and status, until it is closed; one that cannot be read is said as that.
+        with Home() as h, contextlib.ExitStack() as stack:
+            os.environ["WSM_GITHUB_API"] = "http://127.0.0.1:9"     # status reads the latest release: not here
+            stack.callback(os.environ.pop, "WSM_GITHUB_API", None)
+            # This computer's other accounts, stood in: none but a stranger in no group of these folders. The home
+            # is passable (755), so a folder in it that others can write in is reachable.
+            saved_accounts, mirror.accounts = mirror.accounts, lambda: []
+            stack.callback(setattr, mirror, "accounts", saved_accounts)
+            os.chmod(h.tmp, 0o755)
+            os.chmod(h.env["HOME"], 0o755)
+            h.place_gitea()
+            darwin = mirror.system()[0] == "darwin"
+            service_dir = os.path.dirname(mirror.paths()["plist" if darwin else "unit"])
+            theirs = os.path.dirname(service_dir) if darwin else os.path.dirname(os.path.dirname(service_dir))
+            os.makedirs(theirs, exist_ok=True)
+            os.chmod(theirs, 0o777)                               # the person's, there before setup, open to all
+            want = (f"{theirs} is open: every account on this computer can write in it, so another account could "
+                    "replace the skill's service or program in it, or below it.")
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(want, out)
+            self.assertIn(f"The one command that closes it: chmod go-w {shlex.quote(theirs)}", out)
+            self.assertEqual(os.stat(theirs).st_mode & 0o777, 0o777, "the person's folder is never changed")
+            for cmd in (["setup", "--dry-run"], ["status"]):
+                rc, out = quiet(mirror.main, cmd)
+                self.assertIn(want, out, cmd)
+            self.assertIn(service_dir, mirror.load_json(mirror.paths()["state"], {}).get("made_folders") or [])
+            os.chmod(service_dir, 0o777)                         # a folder setup made, opened since
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(os.stat(service_dir).st_mode & 0o022, 0, "setup closes a folder of its own")
+            self.assertNotIn(f"{service_dir} is open", out)
+            # What runs includes what decides what runs: the walk starts from the forge's settings (app.ini), the
+            # tool's settings and state, and the Python the service's files name, too. The forge's settings folder,
+            # inside the forge the skill made, opened since: named as the skill's own, and setup closes it.
+            above = mirror.folders_above(mirror.paths())
+            for f in (mirror.paths()["app_ini"], mirror.paths()["settings"], mirror.paths()["state"], sys.executable):
+                self.assertIn(os.path.dirname(os.path.abspath(f)), above, f)
+            ini_dir = os.path.dirname(mirror.paths()["app_ini"])
+            os.chmod(ini_dir, 0o777)
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertIn(f"{ini_dir} is a folder of the skill's own that others may write in: setup closes it "
+                          "(chmod go-w).", out)
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(os.stat(ini_dir).st_mode & 0o022, 0, "setup closes the forge's settings folder")
+            os.chmod(theirs, 0o755)                               # the person runs the one command
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertNotIn(" is open: ", out)
+            # 775 in the person's own group with nobody else in it: the ordinary Linux home, not named.
+            os.chmod(theirs, 0o775)
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertNotIn(theirs + " is", out)
+            # The same group with a second member, the home passable: named, with that account.
+            mirror.accounts = lambda: [("someone-else", 99999, frozenset({os.stat(theirs).st_gid}))]
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertIn(f"{theirs} is open: another account on this computer can write in it (someone-else), so "
+                          "another account could replace the skill's service or program in it, or below it.", out)
+            # A home at 700 keeps everyone out: nothing under it is named, even open to all.
+            os.chmod(theirs, 0o777)
+            os.chmod(h.env["HOME"], 0o700)
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertNotIn(theirs + " is", out)
+            os.chmod(h.env["HOME"], 0o755)
+            # Who is in the group could not be read: said as that, never taken as nobody.
+            os.chmod(theirs, 0o775)
+            mirror.accounts = lambda: None
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertIn(f"{theirs} is writable by group {mirror.group_name(os.stat(theirs).st_gid)}; who is in "
+                          "that group could not be read", out)
+            mirror.accounts = lambda: []
+            os.chmod(theirs, 0o755)
+            real_stat = os.stat
+
+            def unreadable(path, *a, **k):
+                if path == theirs:
+                    raise PermissionError(13, "Permission denied")
+                return real_stat(path, *a, **k)
+            os.stat = unreadable
+            try:
+                lines = mirror.open_folders(mirror.paths())
+            finally:
+                os.stat = real_stat
+            self.assertIn(f"{theirs} could not be read (Permission denied), so whether another account can write in "
+                          "it is not known; the skill's service or program is in it, or below it.", lines)
+            # An account is its number, not its name: a second name with the person's number (and one with the
+            # administrator's) is the person (or the administrator), not another account, so a passable home and a
+            # folder open to the person's group name nothing. Read through accounts() itself, the list stood in.
+            import pwd
+            me = pwd.getpwuid(os.getuid())
+            mirror.accounts = saved_accounts
+            saved_getpwall = pwd.getpwall
+            pwd.getpwall = lambda: [pwd.struct_passwd(("my-second-name", "x", os.getuid(), me.pw_gid, "", me.pw_dir,
+                                                       "/bin/sh")),
+                                    pwd.struct_passwd(("toor", "x", 0, 0, "", "/root", "/bin/sh"))]
+            try:
+                os.chmod(theirs, 0o775)
+                self.assertEqual(mirror.accounts(), [])
+                self.assertFalse([x for x in mirror.open_folders(mirror.paths()) if x.startswith(theirs + " ")])
+            finally:
+                pwd.getpwall = saved_getpwall
+                os.chmod(theirs, 0o755)
+            # On a Mac, the account list carries group 4294967294 (nobody's, -2 to the system's call, which takes a
+            # signed number and refuses a larger one): read as the folder reads it, never a crash (seen on macOS 13:
+            # setup and its dry run stopped with OverflowError there). The call stood in as the Mac's.
+            real_getgrouplist = os.getgrouplist
+
+            def macs(name, gid):
+                if gid > 2 ** 31 - 1:
+                    raise OverflowError("Python int too large to convert to C int")
+                return [gid % 2 ** 64, 12]
+            mirror.accounts = saved_accounts
+            pwd.getpwall = lambda: [pwd.struct_passwd(("nobody", "*", 4294967294, 4294967294, "", "/var/empty",
+                                                       "/usr/bin/false"))]
+            os.getgrouplist = macs
+            try:
+                self.assertEqual(mirror.accounts(), [("nobody", 4294967294, frozenset({4294967294, 12}))])
+                rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                self.assertNotIn("Traceback", out)
+            finally:
+                os.getgrouplist = real_getgrouplist
+                pwd.getpwall = saved_getpwall
+            # One account whose groups cannot be read is said for that account, and every other one is still
+            # worked out: never the whole list lost, never an error out of setup or status.
+            def one_unreadable(name, gid):
+                if name == "groups-unread":
+                    raise OSError(5, "Input/output error")
+                return [gid]
+            pwd.getpwall = lambda: [pwd.struct_passwd(("groups-unread", "*", 99997, 99997, "", "/", "/bin/sh")),
+                                    pwd.struct_passwd(("plain", "*", 99996, 99996, "", "/", "/bin/sh"))]
+            os.getgrouplist = one_unreadable
+            try:
+                self.assertEqual(mirror.accounts(), [("groups-unread", 99997, None),
+                                                     ("plain", 99996, frozenset({99996}))])
+                os.chmod(theirs, 0o775)
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(f"{theirs}: whether another account can write in it is not fully known: the groups of 1 "
+                              "account on this computer could not be read; the skill's service or program is in it, "
+                              f"or below it. If it is not only yours: chmod go-w {shlex.quote(theirs)}", out)
+                os.chmod(theirs, 0o777)
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(f"{theirs} is open: every account on this computer can write in it", out)
+                os.chmod(theirs, 0o755)
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertNotIn(theirs + ":", out)
+                self.assertNotIn(theirs + " is", out)
+            finally:
+                os.getgrouplist = real_getgrouplist
+                pwd.getpwall = saved_getpwall
+                os.chmod(theirs, 0o755)
+            # A folder that is not the person's gets no command (the person cannot change it): one another account
+            # owns and can reach is named with that account; one of the administrator's, open to all, with root.
+            def owned_by(uid):
+                def fake(path, *a, **k):
+                    s = real_stat(path, *a, **k)
+                    if path != theirs:
+                        return s
+                    f = list(s[:10])
+                    f[4] = uid
+                    return os.stat_result(f)
+                return fake
+            mirror.accounts = lambda: [("the-other", 99998, frozenset())]
+            for uid, mode, want in (
+                    (99998, 0o755, f"{theirs} belongs to the account the-other, which could replace the skill's service "
+                     "or program in it, or below it. You cannot change a folder that is not yours: only the computer's "
+                     "administrator can hand it back to you. The skill leaves it as it is."),
+                    (0, 0o777, f"{theirs} is open: every account on this computer can write in it, so another account "
+                     "could replace the skill's service or program in it, or below it. It belongs to root, not to you: "
+                     "only the computer's administrator can change it. The skill leaves it as it is.")):
+                os.chmod(theirs, mode)
+                os.stat = owned_by(uid)
+                try:
+                    lines = mirror.open_folders(mirror.paths())
+                finally:
+                    os.stat = real_stat
+                self.assertIn(want, lines)
+                self.assertEqual([x for x in lines if x.startswith(theirs + " ") and "chmod" in x], [], uid)
+            os.chmod(theirs, 0o755)
+
     def test_G9_1_a_forge_upgrade_backs_up_first_and_rolls_back_on_failure(self):
         if not real_gitea():
             if os.environ.get("WSM_REQUIRE_GITEA"):
@@ -3096,7 +3709,8 @@ class G9(unittest.TestCase):
                                             "the system ages them out by itself.")
             self.assertNotIn("Nothing of the skill's is left", out)
             left = [os.path.join(d, f) for d, _, fs in os.walk(w.home.tmp) for f in fs]
-            self.assertEqual([x for x in left if not x.startswith(p["data"] + os.sep)], [],
+            self.assertEqual([x for x in left if not x.startswith(p["data"] + os.sep)
+                              and os.path.basename(x) != mirror.SUITE_MARKER], [],
                              "a file of the skill's is left that the census does not name as kept")
             # A plugin: Claude Code's folder and entry are Claude Code's, with its own command where it was seen.
             st = mirror.load_json(p["state"], {})
@@ -3550,8 +4164,8 @@ class G10(unittest.TestCase):
 
     def test_G10_9_one_version_in_every_place(self):
         """The family's rule 10: one version, in every place it is written: the manifest, the script, the
-        changelog's first heading ('Unreleased' only while nothing is released) and this repository's own catalog
-        entry."""
+        changelog's first heading ('Unreleased' only while nothing is released), this repository's own catalog
+        entry, and the README's own status line and every clone line (rule 15, at the tag; G10.14)."""
         ver = version()
         self.assertEqual(mirror.VERSION, ver, "the script")
         entry = [p for p in jload(os.path.join(ROOT, ".claude-plugin", "marketplace.json"))["plugins"]
@@ -3565,6 +4179,29 @@ class G10(unittest.TestCase):
         else:
             self.assertRegex(heads[0], "^" + re.escape(ver) + r"(?: \(\d{4}-\d{2}-\d{2}\))?$", "the changelog's heading")
             self.assertNotIn("Unreleased", heads[:1])
+        self.assertIsNone(readme_release_wrong(fread(os.path.join(ROOT, "README.md")), ver), "the README")
+
+    def test_G10_14_the_tagged_readme_states_the_release_and_clones_the_tag(self):
+        """M67 (the family's rule 15, at the tag, 2026-11-23): the README that is tagged states the release and its
+        clone lines name the tag, never the branch, so a person cloning from it gets what was tagged. Seen to refuse
+        each way it can be wrong."""
+        good = "Status: 0.1.0 (2026-11-25)\n\n```bash\ngit clone --branch v0.1.0 https://github.com/TheWindstorm/x\n```\n"
+        self.assertIsNone(readme_release_wrong(good, "0.1.0"))
+        self.assertIsNone(readme_release_wrong("Nothing here can be installed yet.\ngit clone https://e/x\n", "0.0.0"))
+        wrong = {"no status": (good.replace("Status: 0.1.0 (2026-11-25)", "Released."), "0.1.0"),
+                 "an older status": (good.replace("Status: 0.1.0", "Status: 0.0.9"), "0.1.0"),
+                 "two status lines": ("Status: 0.1.0\n" + good, "0.1.0"),
+                 "a status before any release": (good, "0.0.0"),
+                 "a clone of main": (good.replace("--branch v0.1.0 ", ""), "0.1.0"),
+                 "a clone of the release branch": (good.replace("v0.1.0", "release-0.1.0"), "0.1.0"),
+                 "a clone of another tag": (good.replace("--branch v0.1.0", "--branch v0.1.01"), "0.1.0"),
+                 "a second clone line of main": (good + "git clone https://github.com/TheWindstorm/x\n", "0.1.0"),
+                 "no clone line": ("Status: 0.1.0\n", "0.1.0"),
+                 "a link to the release branch": (good + "See https://github.com/TheWindstorm/x/tree/release-0.1.0\n",
+                                                  "0.1.0")}
+        for why, (readme, ver) in wrong.items():
+            self.assertIsNotNone(readme_release_wrong(readme, ver), why)
+        self.assertIsNone(readme_release_wrong(fread(os.path.join(ROOT, "README.md")), version()), "this README")
 
     def test_G10_10_public_text_names_roles_never_our_own_labels(self):
         """The family's rule 18: public text names kinds and roles ('another program sharing the login', 'a sister
@@ -3717,7 +4354,8 @@ class G10(unittest.TestCase):
         with Home() as h:
             rc, out = quiet(mirror.main, ["key", "set", "someone"])
             self.assertEqual(rc, 2)
-            self.assertEqual(out.strip(), line)
+            self.assertEqual("\n".join(x for x in out.strip().splitlines() if not x.startswith("WSM_HOME is set:")),
+                             line)
 
     def test_G10_8_the_agent_reaches_github_through_the_tool_only(self):
         """A cold start (2026-11-23): the smallest model probed GitHub with anonymous git and with SSH. On the VM
@@ -3783,7 +4421,7 @@ class G6Words(unittest.TestCase):
                     if words(arg).strip() == "STOPPED:":
                         mine.add("HardStop")                  # says a HardStop's words: every raise is checked
                     built |= mine
-                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop"}:
+                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>"}:
                         continue                              # checked below, where the words are built
                     if not self.NEXT.search(words(arg)):
                         lacking.append((a.lineno, words(arg)[:90]))
@@ -3798,6 +4436,10 @@ class G6Words(unittest.TestCase):
         self.assertTrue(self.NEXT.search(mirror.LINGER_CHOICE))
         self.assertTrue(self.NEXT.search(mirror.git_missing_sentence()))
         self.assertTrue(self.NEXT.search(words(funcs["git_out_of_service_reach"])))
+        for fn in ("other_install_stop", "home_is_not_ours"):          # G9.12: each stop it returns, one by one
+            for r in ast.walk(funcs[fn]):
+                if isinstance(r, ast.Return) and r.value is not None and words(r.value):
+                    self.assertTrue(self.NEXT.search(words(r.value)), (fn, words(r.value)[:90]))
         for r in ast.walk(funcs["check_key"]):
             if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
@@ -3805,7 +4447,8 @@ class G6Words(unittest.TestCase):
         data = {"SKILL_REPO", "GITEA_VERSION", "last_line",          # facts inside a line, not its words
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
                 "own_command"}                                                   # (the command to run, as it runs)
-        self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop"},
+        self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
+                                         "<other>"},
                          set(),
                          "a stop line is built from something this test does not check")
 
@@ -3894,6 +4537,49 @@ def git_commit_of(root):
                            capture_output=True, text=True)
         return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
     return commit_of
+
+
+def to_build_wrong(plan, rows, ver):
+    """Each proof the plan marks *(to build)* that may not stand at version `ver` (the maintainer's ruling,
+    2026-11-23): before the first release any may; after it, only one whose codon has a row due in a later version
+    than `ver`, a row not marked built (no test named). Returns [(test, why)]."""
+    wrong = []
+    for line in plan.splitlines():
+        m = re.match(r"\| (G\d+\.\d+) \|", line)
+        for t in re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", line):
+            if ver == "0.0.0":
+                continue
+            if not m:
+                wrong.append((t, "not on a codon's line")); continue
+            mine = [r for r in rows if m.group(1) in [c.strip() for c in r.get("codon", "").split(",")]]
+            if not mine:
+                wrong.append((t, f"{m.group(1)} has no row")); continue
+            for r in mine:
+                if r.get("test"):
+                    wrong.append((t, f"{r['id']} is marked built"))
+                elif v(r.get("ship_in") or "0.0.0") <= v(ver):
+                    wrong.append((t, f"{r['id']} is due in {r.get('ship_in')}, not after {ver}"))
+    return wrong
+
+
+def readme_release_wrong(readme, ver):
+    """Why the README does not match version `ver`, or None (the family's rule 15, at the tag; G10.14, M67). Once a
+    version is released the README states it on one line of its own, 'Status: X.Y.Z', and every `git clone` line
+    names that version's tag with --branch, never a release branch; before the first release it claims no status."""
+    status = re.findall(r"^Status: (\S+)", readme, re.M)
+    clones = [l.strip() for l in readme.splitlines() if "git clone" in l and not l.lstrip().startswith(("#", ">"))]
+    if ver == "0.0.0":
+        return f"a status line before any release: {status}" if status else None
+    if status != [f"{ver}"] and not (len(status) == 1 and re.fullmatch(re.escape(ver) + r",?", status[0])):
+        return f"the status line says {status or 'nothing'}, not {ver}"
+    if not clones:
+        return "no clone line"
+    for l in clones:
+        if f"--branch v{ver} " not in l + " " or re.search(r"release-\d", l):
+            return f"a clone line that does not name the tag v{ver}: {l}"
+    if re.search(r"/tree/release-\d|--branch release-\d", readme):
+        return "the README names a release branch"
+    return None
 
 
 def catalog_entry_wrong(entry, ver, heads, commit_of=None):
@@ -4029,6 +4715,26 @@ class Strand(unittest.TestCase):
                       "format('run-{0}', github.run_id) }}", wf)
         self.assertIn(f"cancel-in-progress: ${{{{ {pr} }}}}", wf)
 
+    def test_T5_a_proof_to_build_stands_after_a_release_only_for_a_row_due_later(self):
+        """The maintainer's ruling, 2026-11-23 (rules 1 and 4): once a version is released, the plan may still mark
+        a proof *(to build)*, but only where its codon's row is due in a later version and not yet built; so nothing
+        planned for this version stays unbuilt. Seen to refuse: no row, a row due now or earlier, a row marked built;
+        and a mark not on a codon's line."""
+        plan = "| G2.1 | the skill lists the keys | `test_G2_1_x` *(to build)* |\n"
+        row = {"id": "X1", "codon": "G2.1", "ship_in": "0.1.1", "test": ""}
+        self.assertEqual(to_build_wrong(plan, [row], "0.1.0"), [])
+        self.assertEqual(to_build_wrong(plan, [], "0.0.0"), [])
+        self.assertEqual(to_build_wrong(plan, [dict(row, codon="G1.1, G2.1")], "0.1.0"), [])
+        wrong = {"no row": ([], "0.1.0"),
+                 "a row of another codon": ([dict(row, codon="G2.10")], "0.1.0"),
+                 "a row due now": ([dict(row, ship_in="0.1.0")], "0.1.0"),
+                 "a row due earlier": ([dict(row, ship_in="0.1.0")], "0.1.1"),
+                 "a row marked built": ([dict(row, test="test_G2_1_x")], "0.1.0"),
+                 "one of two rows due now": ([row, dict(row, id="X2", ship_in="0.1.0")], "0.1.0")}
+        for why, (rows, ver) in wrong.items():
+            self.assertNotEqual(to_build_wrong(plan, rows, ver), [], why)
+        self.assertNotEqual(to_build_wrong("text `test_G2_1_x` *(to build)*\n", [row], "0.1.0"), [], "off a codon's line")
+
     def test_every_proof_named_in_the_plan_is_a_real_test_and_every_test_has_a_codon(self):
         plan = fread(os.path.join(ROOT, "DNA-STRAND-MASTER-PLAN.md"))
         named = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", plan))
@@ -4036,8 +4742,8 @@ class Strand(unittest.TestCase):
         real = set(collected_tests())
         codon_tests = {n for n in real if re.match(r"test_(?:G|INV|T\d)", n)}
         self.assertEqual(to_build & real, set(), "a test marked 'to build' exists: remove the mark")
-        if to_build:
-            self.assertEqual(version(), "0.0.0", "a proof may be marked 'to build' only while nothing is released")
+        self.assertEqual(to_build_wrong(plan, jload(os.path.join(ROOT, "PROMISES.json"))["rows"], version()), [],
+                         "a proof marked 'to build' after the first release needs its codon's row due later")
         self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
         self.assertEqual(codon_tests - named, set(), "tests with no codon in the plan")
 
