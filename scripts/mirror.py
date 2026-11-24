@@ -692,9 +692,10 @@ def running_bin(p):
 
 def forge_env(p):
     """What the forge runs with: this environment without any of git's own settings (GIT_CONFIG_GLOBAL, GIT_DIR and
-    the rest), so the forge's git keeps its settings in the forge's own git home and never writes them into a git
-    config of the person's, nor follows one (seen: an inherited GIT_CONFIG_GLOBAL took the forge's user.name)."""
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    the rest) and without XDG_CONFIG_HOME (git's other global file is $XDG_CONFIG_HOME/git/config), so the forge's
+    git keeps its settings in the forge's own git home and never writes them into a git config of the person's, nor
+    follows one (seen: an inherited GIT_CONFIG_GLOBAL took the forge's user.name)."""
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_") and k != "XDG_CONFIG_HOME"}
     env["GITEA_WORK_DIR"] = p["forge"]
     return env
 
