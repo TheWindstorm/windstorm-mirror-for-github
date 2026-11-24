@@ -1609,6 +1609,22 @@
    "moved_why": "",
    "seen": "2026-11-24, by reading 0.1.0's code before its tag: the line said before the go promises a warning two weeks before the key ends for any end date that reads cleanly, with no clock; for a key that ends in less than 14 days (GitHub offers 7 days, and the steps leave the expiration to the person) the sentence is untrue, and status names the key as a problem from its first day.",
    "promise": "The line before the go takes the clock into account: a key that ends in less than 14 days is said as that, with its date and the one step (make a key for longer, then key set), and no warning two weeks before is promised; a key already ended is said as ended. A test holds a 7-day key, a 30-day key and an ended key."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#129",
+   "id": "M103",
+   "codon": "G9.1",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "the service manager (the suite stops and starts the forge itself where the service would)",
+   "moved_why": "",
+   "seen": "2026-11-24, read in 0.1.0's code before its tag by the skill's owner, not met by a person: when an upgrade fails after the new forge was started, upgrade-forge stops the service, waits, and copies the database and the settings file back without reading the wait's answer, so a new forge that has not stopped by then has the old database written under it. No one on 0.1.0 can reach that road: 0.1.0 pins Gitea 28.4.0 and setup installs exactly the pin, so upgrade-forge says \"Nothing to do\" before it stops anything; the road opens with the first release that pins a newer Gitea.",
+   "promise": "upgrade-forge's way back copies nothing back until the stop wait says the forge has stopped: no listener on the forge's port AND no process of this account running this forge on this folder (the stop wait's own rule, row M102). On \"running\", \"another program\" or \"could not be read\", nothing is copied back: the tool says what was seen, keeps the copy of the database it made before the upgrade, and names the one next step. A test: the new forge does not stop at the way back, and the database file is the same bytes after as before."
   }
  ],
  "declined": []
