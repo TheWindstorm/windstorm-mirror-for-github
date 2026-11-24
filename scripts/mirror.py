@@ -1656,7 +1656,9 @@ def mac_proc(pid):
     except (OSError, subprocess.SubprocessError):
         raise DoorUnread(False, "ps could not be asked")
     uid, _, exe = a.stdout.strip().partition(" ")
-    if a.returncode != 0 or not uid.isdigit() or not exe.strip():
+    # macOS prints the account `nobody` as uid -2 (seen 2026-11-24 on a Mac and in GitHub's Mac runner, M102's
+    # stranger): a uid with its sign is a uid, another account's.
+    if a.returncode != 0 or not re.fullmatch(r"-?\d+", uid) or not exe.strip():
         raise DoorUnread(False, "a process holding it could not be read")
     return int(uid), exe.strip(), b.stdout.strip()
 

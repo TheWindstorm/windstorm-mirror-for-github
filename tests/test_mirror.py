@@ -3182,7 +3182,7 @@ class G6(unittest.TestCase):
             w.gh.commit("someone/alpha", {"a": b"1"})
             w.key_set()
             self.assertEqual(w.first_sync()[0], 0)
-            when = "every 15 min" if mirror.system()[0] == "darwin" else w.home.timer_next
+            when = "every 15 min (launchd keeps no next-run time)" if mirror.system()[0] == "darwin" else w.home.timer_next
             def next_sync(out):
                 lines = [x for x in out.splitlines() if x.startswith("next sync: ")]
                 self.assertEqual(len(lines), 1, out)
@@ -4049,6 +4049,26 @@ class G8(unittest.TestCase):
             self.assertIn(sentence, out)
             self.assertEqual(w.forge_get("/user/repos")[1], [], "something was copied before the person was told")
 
+
+    def test_G8_7_a_mac_process_of_the_account_nobody_is_another_programs(self):
+        """Seen 2026-11-24 in GitHub's Mac runner (M102's stranger, run as `nobody`): `ps -o uid=` prints that account
+        as -2 on macOS (read on a fleet Mac too: `id -u nobody` 4294967294, ps -2), and the door read said "could not
+        be read" of a port another program held. A uid with its sign is read as a uid, another account's; anything
+        that is not a number stays "could not be read"."""
+        saved = mirror.subprocess.run
+        answers = {}
+        def fake(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, answers["uid" if "uid=" in cmd else "args"], "")
+        mirror.subprocess.run = fake
+        try:
+            answers.update(uid="   -2 /usr/bin/python3\n", args="python3 stranger.py\n")
+            self.assertEqual(mirror.mac_proc(4242), (-2, "/usr/bin/python3", "python3 stranger.py"))
+            for bad in ("   - /usr/bin/python3\n", "  x2 /usr/bin/python3\n", "   -2\n", ""):
+                answers["uid"] = bad
+                with self.assertRaises(mirror.DoorUnread, msg=bad):
+                    mirror.mac_proc(4242)
+        finally:
+            mirror.subprocess.run = saved
 
     def test_G8_7_nothing_with_the_key_goes_to_a_port_that_is_not_the_forges_own(self):
         """M102 (the owner's ruling, 11-24): every road reads who holds the forge's port first; another program there,
