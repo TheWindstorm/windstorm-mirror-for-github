@@ -2640,31 +2640,57 @@ def own_command(p, *args):
     return " ".join(["python3", "-I", shlex.quote(p["script"]), *args])
 
 
-def plugin_registry_for(here):
+def plugin_place(here):
     """Claude Code keeps an installed plugin in <its folder>/plugins/cache/<catalog>/<plugin>/<version>/, and its
-    list of installed plugins in <its folder>/plugins/installed_plugins.json. None when `here` is not in such a
-    folder (a clone, or the copy setup made)."""
+    list of installed plugins in <its folder>/plugins/installed_plugins.json. (that list's path, the catalog's name)
+    when `here` is inside such a folder of this plugin; (None, None) otherwise (a clone, or the copy setup made)."""
     parts = os.path.abspath(here).split(os.sep)
     for i in range(len(parts) - 3, 0, -1):
         if parts[i] == "cache" and parts[i - 1] == "plugins" and parts[i + 2] == PLUGIN:
-            return os.sep.join(parts[:i] + ["installed_plugins.json"])
-    return None
+            return os.sep.join(parts[:i] + ["installed_plugins.json"]), parts[i + 1]
+    return None, None
 
 
-def plugin_removed(st):
-    """G9.6: True only when Claude Code's list of installed plugins, the one setup was run from, was READ and names
-    this plugin nowhere. A list that could not be read is never taken for 'removed' (a failed read is not a no)."""
-    reg = st.get("plugin_registry")
+def plugin_registry_for(here):
+    return plugin_place(here)[0]
+
+
+def plugin_record(st):
+    """G9.14 (M104, the family's rule 29 (e)): (the list's path, the catalog's name) as the record keeps them. A
+    record an earlier build wrote kept the plugin's version folder as setup_from; both are read from that path then,
+    and the path itself is never said."""
+    old = plugin_place(os.path.join(st["setup_from"], "scripts", "mirror.py")) if st.get("setup_from") else (None, None)
+    return st.get("plugin_registry") or old[0], st.get("plugin_catalog") or old[1]
+
+
+def plugin_read(st):
+    """G9.6 and G9.14: what Claude Code's list of installed plugins, the one setup was run from, says of this plugin:
+    (True, the list's own name for it, <plugin>@<catalog>) read, and it names it; (False, None) read, and it names it
+    nowhere; (None, None) there is no such list in the record, or it could not be read, or it is not on this
+    computer at all (a record brought from another computer): a failed read is not a no."""
+    reg = plugin_record(st)[0]
     if not reg:
-        return False
+        return None, None
     try:
         with open(reg, encoding="utf-8") as f:
             rows = json.load(f)["plugins"]
     except (OSError, ValueError, KeyError, TypeError):
-        return False
+        return None, None
     if not isinstance(rows, dict):
-        return False
-    return not any(k.split("@")[0] == PLUGIN and v for k, v in rows.items())
+        return None, None
+    keys = sorted(k for k, v in rows.items() if isinstance(k, str) and k.split("@")[0] == PLUGIN and v)
+    return (True, keys[0]) if keys else (False, None)
+
+
+def plugin_listed(st):
+    """True, False or None, as plugin_read says."""
+    return plugin_read(st)[0]
+
+
+def plugin_removed(st):
+    """G9.6: True only when Claude Code's list of installed plugins was READ and names this plugin nowhere. A list
+    that could not be read is never taken for 'removed'."""
+    return plugin_listed(st) is False
 
 
 def set_aside_folder(here):
@@ -2905,15 +2931,20 @@ def cmd_setup(args):
         shutil.copyfile(here, p["script"] + ".tmp")
         os.replace(p["script"] + ".tmp", p["script"])
         claim(p["script"])
-    if plugin_registry_for(here):
-        st["plugin_registry"] = plugin_registry_for(here)
     if os.path.abspath(p["script"]) != here:
         # G9.8 (M63): where the skill was downloaded to, so that uninstall can name it as still here. Setup run again
-        # from its own copy keeps the record.
-        kind, where = downloaded_from(here)
+        # from its own copy keeps the record. G9.14 (the family's rule 29 (e)): Claude Code's plugin is kept by
+        # Claude Code's own list and the plugin's name alone, never by its version folder, which Claude Code
+        # replaces at each update and removes later.
         st.pop("setup_from", None)
         st.pop("setup_from_file", None)
-        st["setup_from" if kind == "folder" else "setup_from_file"] = where
+        st.pop("plugin_registry", None)
+        st.pop("plugin_catalog", None)
+        if plugin_registry_for(here):
+            st["plugin_registry"], st["plugin_catalog"] = plugin_place(here)
+        else:
+            kind, where = downloaded_from(here)
+            st["setup_from" if kind == "folder" else "setup_from_file"] = where
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
     missing = set_up_misses(p, st)
@@ -4126,16 +4157,21 @@ def still_here(p, st, record="read"):
     """G9.8 (M63, the family's rule 8, 2026-11-23: an agent invents where the tool is silent): everything still on
     this computer because of the skill that uninstall does not take, with where it is and whose it is to delete."""
     lines = []
-    root = st.get("setup_from")
-    if root and os.path.isdir(root):
-        if plugin_registry_for(os.path.join(root, "scripts", "mirror.py")):
-            how = (f"with its own plugin uninstall: claude plugin uninstall {PLUGIN}@{PLUGIN}" if system()[0] != "darwin"
-                   else "with its own plugin uninstall")
-            lines.append(f"{root}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
-                         f"are Claude Code's; it removes both {how}. Nothing runs from them now.")
-        else:
-            lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
-                         "delete it like any folder when you want. Nothing runs from it now.")
+    reg, catalog = plugin_record(st)
+    root = None if plugin_registry_for(os.path.join(st.get("setup_from") or os.sep, "scripts", "mirror.py")) else st.get("setup_from")
+    listed, key = plugin_read(st)
+    if reg and listed is not False:
+        # G9.14 (M104, the family's rule 29 (e)): named by Claude Code's own list, never by a version folder; the one
+        # command whole, with the names the list or the record holds.
+        key = key or (f"{PLUGIN}@{catalog}" if catalog else None)
+        how = (f"with its own plugin uninstall: claude plugin uninstall {key}" if key and system()[0] != "darwin"
+               else "with its own plugin uninstall")
+        unread = "" if listed else f", if Claude Code still has them (its list of plugins, {reg}, could not be read)"
+        lines.append(f"Claude Code's folder for this skill as a plugin, and its entry in Claude Code{unread}. They "
+                     f"are Claude Code's; it removes both {how}. Nothing runs from them now.")
+    elif root and os.path.isdir(root):
+        lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
+                     "delete it like any folder when you want. Nothing runs from it now.")
     elif st.get("setup_from_file") and os.path.isfile(st["setup_from_file"]):
         lines.append(f"{st['setup_from_file']}: the copy of the script setup was run from. It is yours; delete it "
                      "when you want. Nothing runs from it now.")

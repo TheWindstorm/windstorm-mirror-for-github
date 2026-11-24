@@ -5178,17 +5178,57 @@ class G9(unittest.TestCase):
             self.assertEqual([x for x in left if not x.startswith(p["data"] + os.sep)
                               and os.path.basename(x) != mirror.SUITE_MARKER], [],
                              "a file of the skill's is left that the census does not name as kept")
-            # A plugin: Claude Code's folder and entry are Claude Code's, with its own command where it was seen.
+            # A plugin: Claude Code's folder and entry are Claude Code's, with its own command where it was seen. They
+            # are named by Claude Code's own list (G9.14, the family's rule 29 (e)), never by a version folder.
             st = mirror.load_json(p["state"], {})
-            plug = os.path.join(w.home.tmp, "cc", "plugins", "cache", mirror.PLUGIN, mirror.PLUGIN, "0.1.0")
-            os.makedirs(os.path.join(plug, "scripts"))
-            st["setup_from"] = plug
+            reg = os.path.join(w.home.tmp, "cc", "plugins", "installed_plugins.json")
+            os.makedirs(os.path.dirname(reg))
+            st.pop("setup_from", None)
+            st["plugin_registry"], st["plugin_catalog"] = reg, "thewindstorm"
             mirror.save_state(p, st)
+            whose = ("They are Claude Code's; it removes both with its own plugin uninstall"
+                     + (f": claude plugin uninstall {mirror.PLUGIN}@thewindstorm" if mirror.system()[0] != "darwin" else "")
+                     + ". Nothing runs from them now.")
+            with open(reg, "w") as f:
+                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [{"scope": "user"}]}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
-            self.assertIn(f"  {plug}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
-                          "are Claude Code's; it removes both with its own plugin uninstall", out)
-            if mirror.system()[0] != "darwin":
-                self.assertIn(f"claude plugin uninstall {mirror.PLUGIN}@{mirror.PLUGIN}. Nothing runs from them now.", out)
+            self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose,
+                          out.splitlines())
+            with open(reg, "w") as f:
+                f.write("{not a list")
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
+                          f"still has them (its list of plugins, {reg}, could not be read). " + whose, out.splitlines())
+            with open(reg, "w") as f:
+                json.dump({"version": 2, "plugins": {}}, f)
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertNotIn("Claude Code's folder for this skill as a plugin", out, "Claude Code's list names it nowhere")
+            # M104: a record an earlier build wrote keeps the plugin's version folder as setup_from (with or without
+            # the list's path beside it). It is read without error, the list and the catalog are read from that path,
+            # and the path itself is never said, there or gone.
+            ver = os.path.join(os.path.dirname(reg), "cache", "thewindstorm", mirror.PLUGIN, "0.0.9")
+            with open(reg, "w") as f:
+                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [{"scope": "user"}]}}, f)
+            for there in (True, False):
+                if there:
+                    os.makedirs(os.path.join(ver, "scripts"))
+                else:
+                    shutil.rmtree(ver)
+                for keep_list in (True, False):
+                    old_st = {k: v for k, v in st.items() if k not in ("plugin_registry", "plugin_catalog")}
+                    old_st["setup_from"] = ver
+                    if keep_list:
+                        old_st["plugin_registry"] = reg
+                    mirror.save_state(p, old_st)
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 0, out)
+                    self.assertNotIn(ver, out, f"a version folder said (there={there}, list kept={keep_list})")
+                    self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose,
+                                  out.splitlines(), f"there={there}, list kept={keep_list}")
+                    self.assertNotIn("the folder the skill was downloaded into (a copy", out)
+            st.pop("plugin_registry")
+            st.pop("plugin_catalog")
+            mirror.save_state(p, st)
             # A script run on its own (from a downloads folder, say) is named as that one file, never the folder
             # around it: a census must never call a person's home "the folder the skill was downloaded into".
             lone = os.path.join(w.home.tmp, "home", "Downloads", "mirror.py")
@@ -5199,7 +5239,7 @@ class G9(unittest.TestCase):
             os.makedirs(os.path.join(w.home.tmp, "home", "scripts"))
             self.assertEqual(mirror.downloaded_from(os.path.join(w.home.tmp, "home", "scripts", "mirror.py"))[0], "file")
             st = mirror.load_json(p["state"], {})
-            st.pop("setup_from")
+            st.pop("setup_from", None)
             st["setup_from_file"] = lone
             mirror.save_state(p, st)
             out = quiet(mirror.main, ["uninstall"])[1]
@@ -5221,6 +5261,83 @@ class G9(unittest.TestCase):
         self.assertIn("Never delete, and never offer to delete, the folder of copies or the record that uninstall "
                       "kept, unless the person asks for it in their own words in this conversation; even then, it is "
                       "their own command (`uninstall --delete-copies`, in a terminal window of their own).", never)
+
+    def test_G9_14_nothing_setup_writes_names_a_plugin_cache_version_folder(self):
+        """The family's rule 29 (a) and (e): Claude Code keeps an installed plugin in <its folder>/plugins/cache/
+        <catalog>/<plugin>/<version>/, makes a new folder at each update and removes the old one later. Setup run
+        from such a folder copies the script to the skill's own place and runs it from there: no unit, timer, job
+        file, setting or state value it writes names a path inside the version folder. The plugin is known by
+        Claude Code's own list (<its folder>/plugins/installed_plugins.json) and its name alone."""
+        cc = tempfile.mkdtemp(prefix="wsm-cc-")
+        TEMPS.append(cc)
+        ver = os.path.join(cc, "plugins", "cache", "thewindstorm", mirror.PLUGIN, "0.1.0")
+        here = os.path.join(ver, "scripts", "mirror.py")
+        os.makedirs(os.path.dirname(here))
+        shutil.copyfile(SCRIPT, here)
+        os.makedirs(os.path.join(ver, "skills", "mirror"))
+        shutil.copyfile(os.path.join(ROOT, "skills", "mirror", "SKILL.md"), os.path.join(ver, "skills", "mirror", "SKILL.md"))
+        reg = os.path.join(cc, "plugins", "installed_plugins.json")
+        self.assertEqual(mirror.plugin_registry_for(here), reg)
+        self.assertEqual(mirror.downloaded_from(here), ("folder", ver), "the stand-in is not shaped as the plugin's folder")
+
+        def values(x, at="state"):
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    yield from values(v, f"{at}.{k}")
+            elif isinstance(x, list):
+                for i, v in enumerate(x):
+                    yield from values(v, f"{at}[{i}]")
+            else:
+                yield at, str(x)
+        with Home(linger="yes") as h:
+            h.place_gitea()
+            p = mirror.paths()
+            saved = mirror.__file__
+            mirror.__file__ = here
+            try:
+                rc, out = h.setup()
+            finally:
+                mirror.__file__ = saved
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.isfile(p["script"]) and not p["script"].startswith(ver + os.sep), p["script"])
+            st = mirror.load_json(p["state"], {})
+            self.assertEqual((st.get("plugin_registry"), st.get("plugin_catalog")), (reg, "thewindstorm"),
+                             "the plugin is known by Claude Code's own list and its names")
+            self.assertEqual([(k, v) for k, v in values(st) if ver in v], [],
+                             "a state value names the plugin's version folder")
+            read = []
+            for d, _, fs in os.walk(h.tmp):
+                for f in fs:
+                    path = os.path.join(d, f)
+                    if path == p["bin"] or os.path.islink(path):
+                        continue
+                    with open(path, "rb") as fh:
+                        if ver.encode() in fh.read():
+                            read.append(path)
+            self.assertEqual(read, [], "a file setup wrote names the plugin's version folder")
+            for f in [x for x in mirror.service_files(p) if not x.endswith(".timer")]:     # a timer names no program
+                with open(f, encoding="utf-8") as fh:
+                    self.assertIn(p["script"], fh.read(), f"{f} does not run the skill's own copy")
+
+    def test_G9_14_a_list_that_is_not_on_this_computer_is_could_not_be_read_never_removed(self):
+        """M104 (the family's rules 6 and 29 (e)): a record whose list of plugins names a file that is not on this
+        computer (a record restored from another computer, say) answers "could not be read", never "names it
+        nowhere": status and sync never call the plugin removed from it, and uninstall's line names the list's path
+        as the thing that could not be read."""
+        gone = os.path.join(tempfile.gettempdir(), "wsm-no-such-" + os.urandom(4).hex(), "plugins", "installed_plugins.json")
+        self.assertFalse(os.path.exists(os.path.dirname(os.path.dirname(gone))))
+        st = {"plugin_registry": gone, "plugin_catalog": "thewindstorm"}
+        self.assertEqual(mirror.plugin_read(st), (None, None))
+        self.assertIsNone(mirror.plugin_listed(st))
+        self.assertFalse(mirror.plugin_removed(st), "a list that is not there was taken for one that names it nowhere")
+        with Home():
+            p = mirror.paths()
+            lines = mirror.still_here(p, st)
+            self.assertIn("Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
+                          f"still has them (its list of plugins, {gone}, could not be read). They are Claude Code's; it "
+                          "removes both with its own plugin uninstall"
+                          + (f": claude plugin uninstall {mirror.PLUGIN}@thewindstorm" if mirror.system()[0] != "darwin" else "")
+                          + ". Nothing runs from them now.", lines)
 
     def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
         """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never
