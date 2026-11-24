@@ -1561,6 +1561,22 @@
    "moved_why": "By the maintainer's word, 2026-11-24: seen on a stock virtual machine while 0.1.0 was under its checks; due 0.1.1.",
    "seen": "2026-11-24, on a fresh stock Ubuntu 24.04.5 virtual machine, in an account with a real login: backup FOLDER on a forge with no copies yet failed: Gitea's dump said \"Failed to include repositories: open .../forge/data/gitea-repositories: no such file or directory\"; the tool said \"No backup was made. Run backup again; if it fails the same way, Gitea's words are the reason.\" (exit 1), and the second run failed the same way, so the one next step cannot work. Nothing was lost: there was nothing to keep yet.",
    "promise": "backup on a forge with no copies either makes a backup (the forge's settings and accounts, 0 copies) or says there is nothing to keep yet, with no step to repeat."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#124",
+   "id": "M98",
+   "codon": "G10.5",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "moved_why": "By the maintainer's word, 2026-11-24: seen in a cold start while 0.1.0 was under its checks; due 0.1.1 unless the maintainer moves it.",
+   "seen": "2026-11-24, in a cold start before 0.1.0's tag (a fresh agent, a stock Ubuntu VM, two accounts): the agent read SKILL.md through its web-fetch tool, which answered with a summary (\"I can't return the full content verbatim\") that left out the rule to give each block whole, word for word; it never read SKILL.md from its clone, and gave the person the dry run's block and the announcement's block in its own words (0 of 10 and 0 of 7 lines whole). The go held: `go` printed the 7 lines whole in the person's own terminal (row M61).",
+   "promise": "Each block for the person carries its own instruction in the tool's output: a line just before `tell the person 1 of N` says to give lines 1 to N to the person whole, word for word and in order, before any words of the agent's own; and the README's agent line says to read skills/mirror/SKILL.md in the clone, the file itself, not a web page's summary of it. A test reads both."
   }
  ],
  "declined": []
