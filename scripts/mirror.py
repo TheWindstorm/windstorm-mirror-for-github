@@ -1432,12 +1432,12 @@ GIT_TIMEOUT = 600
 
 
 ADDRESS_UNREAD = ("the address git would use for GitHub could not be read ({why}), so nothing was fetched and this copy "
-                  "was not refreshed. `git config --global --list` shows the git setting it stops at; with that "
-                  "line mended, the next sync refreshes it.")
+                  "was not refreshed. This command shows the git setting it stops at; with that line mended, the "
+                  "next sync refreshes it:\n    git config --global --list")
 REWRITTEN = ("your git settings send GitHub's address for this repository to {where} (a url.<...>.insteadOf line in "
              "your git config, for this repository's whole address); the mirror reads GitHub only over HTTPS with its "
-             "read-only key, so this copy was not refreshed. `git config --global --get-regexp insteadof` lists those "
-             "lines; with that one taken out, the next sync refreshes it.")
+             "read-only key, so this copy was not refreshed. This command lists those lines; with that one taken out, "
+             "the next sync refreshes it:\n    git config --global --get-regexp insteadof")
 
 
 def github_git():
@@ -3214,11 +3214,11 @@ def release_check(st, force=False):
         return [f"newer release: not known (GitHub gave {rc['error']}; it is asked again tomorrow)"]
     lines = []
     if rc.get("tag") and vt(rc["tag"]) > vt(VERSION):
-        lines.append(f"newer release of this skill: {rc['tag']} (this is {VERSION}); `self-update` is your choice")
+        lines.append(f"newer release of this skill: {rc['tag']} (this is {VERSION}); self-update is your choice")
     if rc.get("gitea") and vt(rc["gitea"]) > vt(GITEA_VERSION):
         lines.append(f"that release pins Gitea {rc['gitea']} (this forge runs {GITEA_VERSION})"
                      + (", and names it a SECURITY FIX" if rc.get("security") else "")
-                     + "; `self-update` then `upgrade-forge` is your choice. Nothing was changed.")
+                     + "; self-update then upgrade-forge is your choice. Nothing was changed.")
     return lines or [f"newer release: none (latest {rc.get('tag') or 'none'})"]
 
 
@@ -3265,9 +3265,9 @@ EXPOSE_TEXT = """The forge listens on 127.0.0.1 only: no other computer can reac
 Opening it to other computers is your own choice and your own step. What it would mean:
 - Anyone who can reach it can try to sign in. Its accounts and every copy are then guarded by passwords and keys
   alone, and a forge open to the internet is found and tried within hours.
-- Gitea's updates become urgent: a security fix matters the day it is out (`status` says when one is pinned).
+- Gitea's updates become urgent: a security fix matters the day it is out (status says when one is pinned).
 - The usual roads are a private network of your own devices (a VPN), or a reverse proxy with TLS in front of
-  it. Both are outside this skill, and `status` reports the forge as reachable from outside each time it runs.
+  it. Both are outside this skill, and status reports the forge as reachable from outside each time it runs.
 Nothing was changed."""
 
 
@@ -3305,7 +3305,7 @@ def cmd_status(args):
                         f"keeps every copy: {own_command(p, 'setup')}")
     elif (ver or {}).get("version") != GITEA_VERSION:
         problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, and this release pins {GITEA_VERSION}"
-                        + ("; `upgrade-forge` moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
+                        + ("; upgrade-forge moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
     max_age = 2 * setting(s, "interval_min") * 60
     on_gh = copied = behind = unreadable = no_lfs = 0
     for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
@@ -3343,7 +3343,7 @@ def cmd_status(args):
         left = (when - time.time()) / 86400
         if left < 14:
             problems.append(f"the key for {owner} expires {exp}" + (" (it has expired)" if left < 0 else
-                            f", in {int(left)} day(s): make a new one, then `key set {owner}`"))
+                            f", in {int(left)} day(s): make a new one, then run key set {owner}"))
         notes.append(f"key for {owner}: expires {exp}")
     free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
     floor_mb = setting(s, "disk_floor_mb")
@@ -3811,8 +3811,8 @@ def setup_from(p, args):
     else:
         say(f"Restored from {name}: {n} copies are in the restored data; the forge has not answered, so they are not "
             "counted there yet.")
-    say(f"Your GitHub keys are not in a backup. To keep the copies current, make new keys and run `key set` for "
-        f"each owner: {owners}. Until then, `status` shows them behind.")
+    say(f"Your GitHub keys are not in a backup. To keep the copies current, make new keys and run key set for "
+        f"each owner: {owners}. Until then, status shows them behind.")
     say("Your Gitea password is the one it had on the old computer.")
     if not ok:
         say(f"The forge's service did not start: {why}")
@@ -3851,7 +3851,7 @@ def not_answering_yet(p, port, waited):
     """G1.9: what 'not answering yet' means, and when the person should look again."""
     return (f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{port}/ after "
             f"{waited} s. On the slowest computer it was tried on, it answered within {FIRST_START_SEEN} s, so "
-            f"something is holding it up: run `status` in 5 minutes. If it still does not answer then, the forge's "
+            f"something is holding it up: run status in 5 minutes. If it still does not answer then, the forge's "
             f"own words are the last lines of {os.path.join(p['forge'], 'log', 'gitea.log')}.")
 
 
@@ -4324,14 +4324,15 @@ def still_here(p, st, record="read"):
         # G9.14 (M104, the family's rule 29 (e)): named by Claude Code's own list, never by a version folder; the one
         # command whole, with the names the list or the record holds.
         key = key or (f"{PLUGIN}@{catalog}" if catalog else None)
-        how = (f"`claude plugin uninstall {key}`" if key and system()[0] != "darwin" else "plugin uninstall")
+        how = (f"claude plugin uninstall {shlex.quote(key)}" if key and system()[0] != "darwin" else "")
         unread = "" if listed else f", if Claude Code still has them (its list of plugins, {reg}, could not be read)"
         # Seen 2026-11-24 (Claude Code 2.1.331, Linux, a stock virtual machine): its uninstall takes the plugin off its
         # list at once and leaves the folder, marked; the folder's removal 14 days later is its documentation's word.
         lines.append(f"Claude Code's folder for this skill as a plugin, and its entry in Claude Code{unread}. They "
-                     f"are Claude Code's. Claude Code's own {how} takes this plugin off Claude Code's list at once; its "
-                     "folder in Claude Code's cache stays, and Claude Code's documentation says it removes that folder "
-                     "14 days later. Nothing runs from them now.")
+                     "are Claude Code's. Claude Code's own plugin uninstall takes this plugin off Claude Code's list at "
+                     "once; its folder in Claude Code's cache stays, and Claude Code's documentation says it removes "
+                     "that folder 14 days later. Nothing runs from them now."
+                     + (f" Its command for this plugin:\n      {how}" if how else ""))
     elif root and os.path.isdir(root):
         lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
                      "delete it like any folder when you want. Nothing runs from it now.")

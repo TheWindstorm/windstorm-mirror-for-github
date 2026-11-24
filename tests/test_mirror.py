@@ -1335,7 +1335,7 @@ class G1(unittest.TestCase):
             self.assertIn(f"not answering yet on http://127.0.0.1:{mirror.load_json(p['state'], {})['port']}/ after "
                           f"{mirror.SETUP_WAIT} s", out)
             self.assertIn(f"it answered within {mirror.FIRST_START_SEEN} s", out)
-            self.assertIn("run `status` in 5 minutes", out)
+            self.assertIn("run status in 5 minutes", out)
             self.assertIn(os.path.join(p["forge"], "log", "gitea.log"), out)
 
     def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
@@ -2108,7 +2108,8 @@ class G3(unittest.TestCase):
                 rc, out = w.sync()
                 self.assertNotEqual(rc, 0, out)
                 self.assertIn("the address git would use for GitHub could not be read (fatal: bad config line 1", out)
-                self.assertIn("`git config --global --list` shows the git setting it stops at", out)
+                self.assertIn("This command shows the git setting it stops at; with that line mended, the next sync refreshes "
+                              "it:\n    git config --global --list", out)
                 shown = subprocess.run(["git", "config", "--global", "--list"], capture_output=True, text=True,
                                        env=dict(os.environ, GIT_CONFIG_GLOBAL=gc))
                 self.assertIn(f"bad config line 1 in file {gc}", shown.stderr)
@@ -3108,6 +3109,21 @@ class G6(unittest.TestCase):
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
 
+    def test_G6_12_no_printed_line_carries_a_backtick_or_a_dollar_parenthesis(self):
+        """The family's rule 31 (2026-11-24): a line the person is asked to report can reach a shell inside double
+        quotes, where a backticked command, or one in a dollar-parenthesis, is run and its answer lands in the text
+        that is sent. So no string the tool can print carries either; a whole command stands alone on a line of
+        its own. Read over every string constant in the script (docstrings aside), f-strings' parts too."""
+        import ast
+        tree = ast.parse(fread(SCRIPT))
+        docs = {id(n.body[0].value) for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+        found = sorted((n.lineno, n.value[:90]) for n in ast.walk(tree)
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
+                       and ("`" in n.value or "$(" in n.value))
+        self.assertEqual(found, [], f"{len(found)} printed string(s) carry a backtick or a dollar-parenthesis")
+
     def test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space(self):
         """M60 (a Mac test account, 2026-11-23): the tool printed `python3 -I /Users/.../Application Support/
         windstorm-mirror/mirror.py uninstall --delete-copies`, which a shell splits at the space. Every command the
@@ -3322,7 +3338,7 @@ class G6(unittest.TestCase):
             self.assertEqual(w.sync()[0], 0)
             rc, out = status()
             self.assertEqual(rc, 1)
-            self.assertIn(f"problem: the key for someone expires {near}, in 5 day(s): make a new one, then `key set someone`", out)
+            self.assertIn(f"problem: the key for someone expires {near}, in 5 day(s): make a new one, then run key set someone", out)
             w.gh.expires = None
             self.assertEqual(w.sync()[0], 0)
             out = status()[1]
@@ -3351,7 +3367,7 @@ class G6(unittest.TestCase):
             rc, out = status()
             self.assertNotIn("v0.3.0", out, "asked again within the day")
             rc, out = quiet(mirror.main, ["status", "--check-release"])
-            self.assertIn(f"newer release of this skill: v0.3.0 (this is {mirror.VERSION}); `self-update` is your choice", out)
+            self.assertIn(f"newer release of this skill: v0.3.0 (this is {mirror.VERSION}); self-update is your choice", out)
             self.assertIn(f"that release pins Gitea 28.9.1 (this forge runs {mirror.GITEA_VERSION}), and names it a SECURITY FIX", out)
             self.assertIn("Nothing was changed.", out)
             self.assertEqual(w.gh.release_calls, [False, False], "the release was asked for more than once a day, or with a key")
@@ -3571,7 +3587,7 @@ class G7(unittest.TestCase):
                 self.assertIn("The forge runs as your own service.", out)
                 self.assertIn("After a restart it starts by itself.", out)
                 self.assertNotIn(mirror.NO_LOGIN_NOTE, out)
-                self.assertIn("make new keys and run `key set` for each owner: someone", out)
+                self.assertIn("make new keys and run key set for each owner: someone", out)
                 rc, out = quiet(mirror.main, ["restore", "--check"])
                 self.assertEqual(rc, 0, out)
                 self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s)", out)
@@ -5667,11 +5683,11 @@ class G9(unittest.TestCase):
             mirror.save_state(p, st)
             ours = {"scope": "user", "version": "0.1.0",
                     "installPath": os.path.join(os.path.dirname(reg), "cache", "thewindstorm", mirror.PLUGIN, "0.1.0")}
-            whose = ("They are Claude Code's. Claude Code's own "
-                     + (f"`claude plugin uninstall {mirror.PLUGIN}@thewindstorm`" if mirror.system()[0] != "darwin"
-                        else "plugin uninstall")
-                     + " takes this plugin off Claude Code's list at once; its folder in Claude Code's cache stays, and "
-                       "Claude Code's documentation says it removes that folder 14 days later. Nothing runs from them now.")
+            whose = ("They are Claude Code's. Claude Code's own plugin uninstall takes this plugin off Claude Code's "
+                     "list at once; its folder in Claude Code's cache stays, and Claude Code's documentation says it "
+                     "removes that folder 14 days later. Nothing runs from them now."
+                     + (f" Its command for this plugin:\n      claude plugin uninstall {mirror.PLUGIN}@thewindstorm"
+                        if mirror.system()[0] != "darwin" else ""))
             with open(reg, "w") as f:
                 json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [ours]}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
@@ -5818,12 +5834,11 @@ class G9(unittest.TestCase):
             lines = mirror.still_here(p, st)
             self.assertIn("Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
                           f"still has them (its list of plugins, {gone}, could not be read). They are Claude Code's. "
-                          "Claude Code's own "
-                          + (f"`claude plugin uninstall {mirror.PLUGIN}@thewindstorm`" if mirror.system()[0] != "darwin"
-                             else "plugin uninstall")
-                          + " takes this plugin off Claude Code's list at once; its folder in Claude Code's cache stays, "
-                            "and Claude Code's documentation says it removes that folder 14 days later. Nothing runs "
-                            "from them now.", lines)
+                          "Claude Code's own plugin uninstall takes this plugin off Claude Code's list at once; its "
+                          "folder in Claude Code's cache stays, and Claude Code's documentation says it removes that "
+                          "folder 14 days later. Nothing runs from them now."
+                          + (f" Its command for this plugin:\n      claude plugin uninstall {mirror.PLUGIN}@thewindstorm"
+                             if mirror.system()[0] != "darwin" else ""), lines)
 
     def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
         """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never run
