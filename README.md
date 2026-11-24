@@ -49,6 +49,10 @@ list (`ip` or `ifconfig`), on Linux `pkcheck`, read-only and never asking for a 
 person may switch on lingering themselves, on a Mac the two settings it reads (`defaults read` of the
 automatic-login account, `fdesetup status`), both read-only, and Python itself to check a self-update.
 
+`status` asks GitHub, at most once a day and with no key, for this skill's newest release, to say whether a newer
+one is out. That one request carries your computer's address and the skill's name and version, nothing else of
+yours, and it installs nothing.
+
 Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
 forge on this computer; it still carries the mirror's calls to GitHub.
 
@@ -175,7 +179,8 @@ with no key; a sync and a restore on a Mac are not seen yet.
   the account's top-level folder and its `~/Library/LaunchAgents` were the same before and after. The dry run and
   setup said the copy stands still after a restart until the person logs in, because that Mac does not log anyone
   in by itself. On that Mac the developer tools' Python lives in folders that belong to another account, so
-  setup named them and `status` gave them as problems (exit code 1): only that Mac's administrator can change them.
+  setup named them and `status` gave them as problems: status was seen answering 1 there, for that reason, and
+  only that Mac's administrator can change those folders.
   No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS runners the tests
   make first copies and run restore --check with the real pinned Gitea, against a stand-in for GitHub.
 - **The plugin commands above**, with no GitHub key and no GitHub login: Claude Code 2.1.280 in a Linux account,
@@ -194,6 +199,8 @@ with no key; a sync and a restore on a Mac are not seen yet.
     with the skill itself: not seen by us. Seen instead: first copies and restore --check with the real pinned
     Gitea on GitHub's macOS runners, against a stand-in for GitHub; and setup, status and uninstall in a Mac test
     account with no key;
+  - `status` answering 0 on a Mac, and a Mac whose own person put Apple's developer tools there (those folders
+    are then theirs, and the skill does not name them);
   - a Mac that logs the person in by itself, and a Mac without Apple's developer tools;
   - Debian, Fedora and other Ubuntu versions;
   - Windows (not supported in 0.1);
