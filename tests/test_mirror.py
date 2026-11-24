@@ -349,23 +349,37 @@ def short_lived_ports_start():
         return 49152
 
 
-def below_short_lived_ports(p):
-    """The suite's own forges listen below the short-lived range. Seen on a GitHub runner (2026-11-24, release
-    0.1.0's pull_request run, job test 3.9): setup's port came from that range, and in the seconds between run-forge's
-    check and Gitea's bind a listener that is none of the suite's (it answered 407, which no stand-in here sends) was
-    handed the same number; Gitea could not bind, and the test waited 90 s on a stranger. Below that range the
-    system hands the number to no one, so only a program that asks for it by name can take it. The tool is not
-    changed: this is where the suite's forge listens, read and written as restore writes them (HTTP_PORT, ROOT_URL,
-    and the state's port)."""
-    port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT") or 0)
+def low_free_port():
+    """A free port on 127.0.0.1 below the system's short-lived range, for the suite's forges. Seen on a GitHub runner
+    (2026-11-24, release 0.1.0's pull_request run, job test 3.9): setup's port came from that range, and in the
+    seconds between run-forge's check and Gitea's bind a listener that is none of the suite's (it answered 407,
+    which no stand-in here sends) was handed the same number; Gitea could not bind, and the test waited 90 s on a
+    stranger. Below that range the system hands the number to no one, so only a program that asks for it by name
+    can take it."""
     first = short_lived_ports_start()
-    if 0 < port < first and port >= 20000:
-        return port
-    for cand in random.Random().sample(range(20000, min(first, 30000)), 200):
+    lo, hi = 20000, min(first, 30000)
+    if hi - lo < 200:
+        raise AssertionError(f"this system's short-lived ports begin at {first}: there is no room below them, from "
+                             f"{lo}, for the suite's forge. Run the suite where they begin at 20200 or above.")
+    for cand in random.Random().sample(range(lo, hi), 200):
         if mirror.port_is_free(cand):
-            break
-    else:
-        raise AssertionError("no free port below the short-lived range for the suite's forge")
+            return cand
+    raise AssertionError(f"no free port from {lo} to {hi} for the suite's forge (200 tried)")
+
+
+# The tool's own pick, as setup and restore make it inside the suite, comes from below that range; the tool itself
+# is not changed. Run as its own program (run-forge, a sync in a process of its own), the tool picks no port.
+mirror.free_port = low_free_port
+
+
+def below_short_lived_ports(p):
+    """The guard: a forge the suite starts listens below the short-lived range. With the tool's pick made there
+    already (low_free_port), it finds the port low and changes nothing; a port written some other way is moved as
+    restore writes it (HTTP_PORT, ROOT_URL, and the state's port)."""
+    port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT") or 0)
+    if 20000 <= port < short_lived_ports_start():
+        return port
+    cand = low_free_port()
     ini = fread(p["app_ini"])
     ini = re.sub(r"^HTTP_PORT\s*=.*$", f"HTTP_PORT = {cand}", ini, flags=re.M)
     ini = re.sub(r"^ROOT_URL\s*=.*$", f"ROOT_URL = http://127.0.0.1:{cand}/", ini, flags=re.M)
