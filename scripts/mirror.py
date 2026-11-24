@@ -1146,6 +1146,40 @@ def launchd_load(p, label, plist):
     return run(["launchctl", "bootstrap", f"gui/{os.getuid()}", plist]), ""
 
 
+SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told it to stop
+SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
+
+
+def systemd_off(p):
+    """G1.18 (M107, seen 2026-11-24 on a stock Ubuntu 24.04: uninstall run from a shell with no user bus, after
+    `su -` from root and with XDG_RUNTIME_DIR unset, said "Gone now" and ended 0 while systemd still ran the forge
+    from its removed program): tell systemd to stop the skill's units, then read each stopped. Per unit (its words,
+    'stopped' | 'running' | 'unread', seconds waited, what systemctl answered): 'stopped' when its ActiveState reads
+    inactive or failed; 'running' when it still reads active (or on its way) at SYSTEMD_WAIT; 'unread' at once when
+    systemctl --user does not answer (no user bus in this shell) or answers no state."""
+    run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
+    seen = []
+    for suffix, words in SYSTEMD_UNITS:
+        unit = SERVICE if suffix is None else SYNC_UNIT + suffix
+        start = time.monotonic()
+        while True:
+            out = run(["systemctl", "--user", "show", unit, "-p", "ActiveState"])
+            state = dict(x.split("=", 1) for x in out.stdout.splitlines() if "=" in x).get("ActiveState", "").strip()
+            if out.returncode != 0 or not state:
+                said = (out.stderr or out.stdout).strip().splitlines()
+                seen.append((words, "unread", time.monotonic() - start,
+                             f"code {out.returncode}" + (f": {said[0]}" if said else "")))
+                break
+            if state in ("inactive", "failed"):
+                seen.append((words, "stopped", time.monotonic() - start, state))
+                break
+            if time.monotonic() - start >= SYSTEMD_WAIT:
+                seen.append((words, "running", time.monotonic() - start, state))
+                break
+            time.sleep(0.2)
+    return seen
+
+
 def install_service(p):
     if system()[0] == "darwin":
         write_file(p["plist"], plist_text(p))
@@ -4095,7 +4129,26 @@ def cmd_uninstall(args):
             for plist, _, _, _, _ in jobs:
                 take_service_file(p, plist, removed, left_service)
         else:
-            run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
+            # G1.18 and the family's rule 30: every unit is told to stop and read stopped first; while one is not,
+            # nothing at all is removed (a unit systemd still runs would go on running a program taken from it).
+            units = systemd_off(p)
+            if any(answer != "stopped" for _, answer, _, _ in units):
+                said, no_bus = [], False
+                for words, answer, waited, what in units:
+                    if answer == "stopped":
+                        said.append(f"{words} is stopped, and its file stays too")
+                    elif answer == "running":
+                        said.append(f"systemd still had {words} {what} {waited:.0f} s after it was told to stop it")
+                    else:
+                        said.append(f"whether systemd stopped {words} could not be read (systemctl --user answered "
+                                    f"{what})")
+                        no_bus = no_bus or "Failed to connect to bus" in what
+                again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                say("Not now: " + "; ".join(said) + ". Nothing was removed. " + (
+                    "This shell cannot reach your account's own systemd (it has no user bus), so run uninstall again "
+                    f"from a login of your own to this computer, such as ssh or a terminal at the screen: {again}"
+                    if no_bus else f"Run uninstall again in a minute: {again}"))
+                return 3
             base = os.path.dirname(p["unit"])
             for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
                 take_service_file(p, f, removed, left_service)

@@ -1559,8 +1559,24 @@
    "test": "test_G1_17_on_a_mac_setup_again_loads_a_running_forge_again",
    "stand_in": "launchd (the suite's stand-in keeps a job it was told to boot out for some reads, and answers 5 to a load meanwhile, as one Mac was seen to; and answers 125 in an account not logged in at the screen, as another Mac was seen to)",
    "moved_why": "",
-   "seen": "2026-11-24, on a Mac (macOS 27.2.1, arm64, a clean test account, no key) before the 0.1.0 tag: setup run while the forge's launch agent was loaded and running stopped with \"The forge's service did not start: this Mac did not load the forge's launch agent (code 5)\" and left the forge unloaded; status then said the forge does not answer, with its step, setup again; that setup loaded it; the next one answered code 5 again. Seen twice out of two with the job running. The fix's own wait was then read on that Mac (launchd.log, one run): a job booted out while its process ran was still there at the first read and gone at the second, 0.2 s later, 5 times of 5; otherwise gone at the first read, 9 times of 9. Longer than 0.2 s, never gone, and a read that answers neither are not seen. In an account not logged in at the Mac's screen (macOS 13.7.8, over ssh), `launchctl print` of the domain and of the job each answered 125.",
+   "seen": "2026-11-24, on a Mac (macOS 27.2.1, arm64, a clean test account, no key) before the 0.1.0 tag: setup run while the forge's launch agent was loaded and running stopped with \"The forge's service did not start: this Mac did not load the forge's launch agent (code 5)\" and left the forge unloaded; status then said the forge does not answer, with its step, setup again; that setup loaded it; the next one answered code 5 again. Seen twice out of two with the job running. The fix's own wait was then read on that Mac (launchd.log, one run): a job booted out while its process ran was still there at the first read and gone at the second, 0.2 s later, 5 times of 5; otherwise gone at the first read, 9 times of 9. Longer than 0.2 s, never gone, and a read that answers neither are not seen. In an account not logged in at the Mac's screen (macOS 13.7.8, over ssh), `launchctl print` of the domain and of the job each answered 125. The skill's owner then read the same Mac and version in an account that is logged in at its screen, over ssh: the domain answered 0 and a job that is not there 113 (seen once).",
    "promise": "On a Mac, setup run again while the forge runs loads it again, every time. Every place that takes a launchd job off reads it gone before anything is loaded or said off; a job still there at 30 s, or a read that answers neither, is said as that with its one step, and nothing is loaded over it. Uninstall reads both jobs first, and while either is not read gone it removes nothing and says so, with the whole command line to run again. In an account not logged in at the Mac's screen, where launchctl answers 125 for its domain, nothing of it is loaded, and uninstall takes the file setup wrote."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#133",
+   "id": "M107",
+   "codon": "G1.18",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_18_uninstall_removes_nothing_while_systemd_runs_a_unit_or_cannot_be_read",
+   "stand_in": "the service manager (the suite's stand-in reads a unit active until it is stopped, keeps it deactivating for some reads, and answers 1 \"Failed to connect to bus\" in a shell with no user bus, as a stock Ubuntu 24.04 was seen to)",
+   "moved_why": "",
+   "seen": "2026-11-24, on a stock Ubuntu 24.04 virtual machine (no key), before the 0.1.0 tag: uninstall run from a shell with no user bus (XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset; and `su - <the person>` from root), where `systemctl --user` answered \"Failed to connect to bus: No medium found\", removed the unit files, the forge's program and the keys, said \"Gone now\" and ended 0, while systemd still ran the forge's service (active, running) from its removed program. Run the ordinary way, from the person's own ssh login, it stopped the forge.",
+   "promise": "Before uninstall removes anything on Linux, it tells systemd to stop each of the skill's units and reads each one stopped (ActiveState inactive or failed); a unit still running at 30 s, or a read that does not answer, is said as that, nothing at all is removed, and it ends 3 with the whole command line to run again, and with no user bus where to run it."
   }
  ],
  "declined": []

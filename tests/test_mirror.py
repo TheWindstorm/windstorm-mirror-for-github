@@ -210,6 +210,12 @@ class Home:
         # that is not 113 and not a job). A job never loaded or booted out here keeps the old answers.
         self.teardown_reads, self.loaded, self.tearing, self.gone, self.answered = 0, set(), {}, set(), []
         self.print_code = None
+        self.domain_code = None      # what `launchctl print gui/<uid>` itself answers, when set (the domain's own read)
+        # systemd's user units, as seen 2026-11-24 on a stock Ubuntu 24.04 (M107): a unit `enable --now` or `start`
+        # started reads ActiveState=active until it is stopped; user_bus False is a shell with no user bus (after
+        # `su -` from root, or XDG_RUNTIME_DIR unset), where every `systemctl --user` answers 1 "Failed to connect to
+        # bus: No medium found" and changes nothing; stop_reads: how many reads a stopped unit still reads deactivating.
+        self.units_up, self.user_bus, self.stop_reads, self.stopping = set(), True, 0, {}
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -221,6 +227,8 @@ class Home:
         """launchctl's bootstrap, bootout and print of one job, or None for every other command."""
         dom = f"gui/{os.getuid()}"
         done = lambda rc, out="", err="": subprocess.CompletedProcess(cmd, rc, out, err)
+        if cmd == ["launchctl", "print", dom] and self.domain_code is not None:
+            return done(self.domain_code, "", "")
         if not self.mac_session and cmd[:2] in (["launchctl", "bootstrap"], ["launchctl", "bootout"],
                                                 ["launchctl", "print"]) and cmd[2].startswith(dom):
             # Seen 2026-11-24 over ssh on macOS 13.7.8, a test account with no screen login: print of the domain
@@ -283,6 +291,26 @@ class Home:
             return subprocess.CompletedProcess(cmd, 0, f"FileVault is {'On' if self.filevault else 'Off'}.\n", "")
         if cmd[0] in ("systemctl", "loginctl", "launchctl"):
             self.calls.append(cmd)
+            if cmd[:2] == ["systemctl", "--user"]:
+                if not self.user_bus:
+                    return subprocess.CompletedProcess(cmd, 1, "", "Failed to connect to bus: No medium found\n")
+                verb = [c for c in cmd[2:] if not c.startswith("-")]
+                if verb[:1] in (["enable"], ["start"]) and ("--now" in cmd or verb[0] == "start"):
+                    self.units_up |= set(verb[1:])
+                elif verb[:1] in (["disable"], ["stop"]) and ("--now" in cmd or verb[0] == "stop"):
+                    for u in verb[1:]:
+                        if u in self.units_up and self.stop_reads:
+                            self.stopping[u] = self.stop_reads
+                        self.units_up.discard(u)
+                elif verb[:1] == ["show"] and cmd[-2:] == ["-p", "ActiveState"] and len(cmd) == 6:
+                    u = cmd[3]
+                    if u in self.stopping:
+                        self.stopping[u] -= 1
+                        if self.stopping[u] <= 0:
+                            del self.stopping[u]
+                        return subprocess.CompletedProcess(cmd, 0, "ActiveState=deactivating\n", "")
+                    return subprocess.CompletedProcess(cmd, 0, f"ActiveState={'active' if u in self.units_up else 'inactive'}\n",
+                                                       "")
             mac = self.launchd(cmd)
             if mac is not None:
                 self.answered.append((cmd, mac.returncode))
@@ -870,12 +898,32 @@ class G1(unittest.TestCase):
                 self.assertFalse(os.path.exists(p["plist"]), out)
                 self.assertIn(p["plist"], out.split("Gone now:")[1] if "Gone now:" in out else "", out)
                 self.assertNotIn("Not now", out)
-                # a domain that answers anything else is never "no domain": could not be read
+                # a domain that answers anything else is never "no domain": with the job loaded and not letting go,
+                # never "gone", and uninstall removes nothing (the owner's point (a), 3:23 PM ET 11-24)
                 self.assertEqual(mirror.LAUNCHD_NO_SCREEN, 125)
                 h.mac_session = True
                 h.print_code, mirror.LAUNCHD_WAIT = 1, 1
                 self.assertEqual(mirror.launchd_off(p, mirror.LAUNCHD_LABEL)[0], "unread")
                 h.print_code = None
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                for x in (p["script"], p["settings"]):
+                    mirror.write_file(x, "{}\n")
+                    mirror.claim(x)
+                for dom_code in (1, 113):
+                    h.domain_code = dom_code
+                    h.tearing.clear()
+                    h.loaded.add(mirror.LAUNCHD_LABEL)
+                    h.teardown_reads = 10 ** 6
+                    answer = mirror.launchd_off(p, mirror.LAUNCHD_LABEL)[0]
+                    self.assertNotEqual(answer, "gone", f"the domain answered {dom_code}")
+                    h.tearing.clear()
+                    h.loaded |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, f"the domain answered {dom_code}: {out}")
+                    self.assertTrue(all(os.path.exists(x) for x in (p["plist"], p["script"], p["settings"])), out)
+                h.domain_code, h.teardown_reads = None, 0
+                h.tearing.clear()
+                h.loaded.clear()
                 # the sync's job held by launchd: its own words reach the person, with the step
                 self.assertEqual(mirror.install_service(p), (True, ""))
                 h.loaded.add(mirror.SYNC_LABEL)
@@ -891,6 +939,66 @@ class G1(unittest.TestCase):
             src = inspect.getsource(fn)
             self.assertNotIn('"the sync timer could not be switched on"', src)
             self.assertIn("The sync's timer is not on, so nothing is copied until it is: {timer_why}", src)
+
+    def test_G1_18_uninstall_removes_nothing_while_systemd_runs_a_unit_or_cannot_be_read(self):
+        """M107 (seen 2026-11-24 on a stock Ubuntu 24.04, the owner's question of 3:23 PM ET): uninstall run from a
+        shell with no user bus (after `su -` from root, and with XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset)
+        said "Gone now" and ended 0 while systemd still ran the forge, from its removed program. Every unit is told
+        to stop and read stopped first; while one is not, uninstall removes nothing, names each unit with what was
+        read, and ends 3 with the whole command line; with no user bus, where to run it. That line, run as printed
+        from a shell that reaches systemd, ends 0."""
+        saved, saved_wait = mirror.system, mirror.SYSTEMD_WAIT
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["unit"]), exist_ok=True)
+                self.assertTrue(mirror.install_service(p)[0])
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                base = os.path.dirname(p["unit"])
+                kept = [p["script"], p["bin"], p["mirror_key"], os.path.join(p["keys"], "someone"), p["settings"],
+                        p["state"]]
+                for x in kept:
+                    mirror.write_file(x, "{}\n")
+                    mirror.claim(x)
+                kept += [p["unit"], os.path.join(base, mirror.SYNC_UNIT + ".service"),
+                         os.path.join(base, mirror.SYNC_UNIT + ".timer"), os.path.join(p["data"], mirror.MADE_RECORD)]
+                step = mirror.own_command(p, "uninstall")
+                # (1) no user bus in this shell: nothing is read, so nothing is removed, and where to run it is said
+                h.user_bus = False
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "something was removed")
+                self.assertNotIn("Gone now", out)
+                self.assertFalse([c for c in h.calls if c[:2] == ["loginctl", "disable-linger"]], "linger changed")
+                line = [l for l in out.splitlines() if l.startswith("Not now: ")]
+                self.assertEqual(line, ["Not now: " + "; ".join(
+                    f"whether systemd stopped {w} could not be read (systemctl --user answered code 1: Failed to "
+                    "connect to bus: No medium found)" for w in ("the forge's service", "the sync's service",
+                                                                 "the sync's timer"))
+                    + ". Nothing was removed. This shell cannot reach your account's own systemd (it has no user "
+                    "bus), so run uninstall again from a login of your own to this computer, such as ssh or a "
+                    f"terminal at the screen: {step}"], out)
+                # (2) a unit systemd does not stop in time: named with what was read; the stopped ones too
+                h.user_bus, mirror.SYSTEMD_WAIT, h.stop_reads = True, 1, 10 ** 6
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "something was removed")
+                self.assertIn("systemd still had the forge's service deactivating 1 s after it was told to stop it", out)
+                self.assertIn("the sync's service is stopped, and its file stays too", out)
+                self.assertIn(f". Nothing was removed. Run uninstall again in a minute: {step}", out)
+                self.assertNotIn("Gone now", out)
+                # (3) systemd stops them; the step, exactly as printed
+                h.stopping.clear()
+                h.stop_reads = 0
+                args = shlex.split(step)
+                self.assertEqual(args[:3], ["python3", "-I", p["script"]])
+                rc, out = quiet(mirror.main, args[3:])
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("Not now", out)
+                self.assertFalse(os.path.exists(p["unit"]) or os.path.exists(p["script"]), out)
+        finally:
+            mirror.system, mirror.SYSTEMD_WAIT = saved, saved_wait
 
     def test_G1_16_on_a_mac_with_no_login_session_setup_says_so_in_the_persons_words(self):
         """M58 (a Mac test account, 2026-11-23): setup over ssh into an account that is not logged in at the Mac's
