@@ -4086,7 +4086,7 @@ class G8(unittest.TestCase):
 
     def test_G8_7_a_mac_process_of_the_account_nobody_is_another_programs(self):
         """Seen 2026-11-24 in GitHub's Mac runner (M102's stranger, run as `nobody`): `ps -o uid=` prints that account
-        as -2 on macOS (read on a fleet Mac too: `id -u nobody` 4294967294, ps -2), and the door read said "could not
+        as -2 on macOS (read on another Mac too: `id -u nobody` 4294967294, ps -2), and the door read said "could not
         be read" of a port another program held. A uid with its sign is read as a uid, another account's; anything
         that is not a number stays "could not be read"."""
         saved = mirror.subprocess.run
