@@ -690,9 +690,17 @@ def running_bin(p):
     return os.path.join(os.path.dirname(p["bin"]), f"gitea-{ver}") if ver else p["bin"]
 
 
+def forge_env(p):
+    """What the forge runs with: this environment without any of git's own settings (GIT_CONFIG_GLOBAL, GIT_DIR and
+    the rest), so the forge's git keeps its settings in the forge's own git home and never writes them into a git
+    config of the person's, nor follows one (seen: an inherited GIT_CONFIG_GLOBAL took the forge's user.name)."""
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    env["GITEA_WORK_DIR"] = p["forge"]
+    return env
+
+
 def gitea(p, *args):
-    return run([running_bin(p), "--config", p["app_ini"], "--work-path", p["forge"], *args],
-               env=dict(os.environ, GITEA_WORK_DIR=p["forge"]))
+    return run([running_bin(p), "--config", p["app_ini"], "--work-path", p["forge"], *args], env=forge_env(p))
 
 
 # ---------------------------------------------------------------- G1.4 the two accounts
@@ -3594,7 +3602,7 @@ def cmd_run_forge(args):
         say(f"The forge cannot start: port {port} on 127.0.0.1 is taken by another program. "
             "Run setup again to pick a free one.")
         return 3
-    env = dict(os.environ, GITEA_WORK_DIR=p["forge"])
+    env = forge_env(p)
     binary = running_bin(p)
     os.execve(binary, [binary, "--config", p["app_ini"], "--work-path", p["forge"], "web"], env)
 

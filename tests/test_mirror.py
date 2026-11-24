@@ -2947,6 +2947,38 @@ class G8(unittest.TestCase):
                              f"SSH_ROOT_PATH = {mirror.paths()['forge']}/ssh"):
                     self.assertIn(line, ini)
 
+    def test_G8_5_the_forge_never_writes_or_follows_a_git_config_of_the_persons(self):
+        """M73 (seen 2026-11-24 with the real pinned Gitea, by T6's guard): the forge was handed the whole
+        environment, and stock Gitea's git took an inherited GIT_CONFIG_GLOBAL over its own git home and wrote its
+        user.name and gc lines into that file. With git's settings of the person's set (GIT_CONFIG_GLOBAL, and a
+        GIT_CONFIG_COUNT pair), setup and the forge's start leave the person's file as it was, and the forge's own
+        settings go in its own folder."""
+        with Home(linger="yes") as h:
+            mine = os.path.join(os.environ["HOME"], "my-gitconfig")
+            with open(mine, "w") as f:
+                f.write("[user]\n\tname = The Person\n")
+            before = os.stat(mine)
+            was = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                                                  "GIT_CONFIG_VALUE_0")}
+            os.environ.update(GIT_CONFIG_GLOBAL=mine, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="user.email",
+                              GIT_CONFIG_VALUE_0="person@example.invalid")
+            try:
+                h.place_gitea()
+                rc, out = h.setup()
+                self.assertEqual(rc, 0, out)
+                h.start_forge()
+                time.sleep(2)                                     # past the forge's own start-up writes
+            finally:
+                for k, v in was.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            after = os.stat(mine)
+            self.assertEqual(fread(mine), "[user]\n\tname = The Person\n", "the forge wrote the person's git config")
+            self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+            forge = mirror.paths()["forge"]
+            own = [os.path.join(r, f) for r, _, fs in os.walk(forge) for f in fs if f == ".gitconfig"]
+            self.assertTrue(any("name = Gitea" in fread(x) for x in own), f"the forge's own git settings: {own}")
+            self.assertFalse(any("person@example.invalid" in fread(x) for x in own), "the forge followed the person's")
+
     def test_G8_2_exposing_the_forge_is_left_to_the_person(self):
         src = fread(SCRIPT)
         self.assertNotIn("0.0.0.0", src)

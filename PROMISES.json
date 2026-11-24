@@ -1161,6 +1161,22 @@
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
+  },
+  {
+   "id": "M73",
+   "seen": "2026-11-24, the whole suite with the real pinned Gitea, after the suite was given a home of its own with git's global config at an empty file (T6): the file held stock Gitea's user.name, user.email, core and gc lines after the run. The forge was handed the whole environment by setup's forge commands and by the service's start, and Gitea's git took an inherited GIT_CONFIG_GLOBAL over its own git home. On a person's computer with GIT_CONFIG_GLOBAL set where the forge starts, the forge would rewrite that person's git config; any other of git's settings (GIT_DIR, GIT_CONFIG_COUNT pairs) would steer the forge's git.",
+   "promise": "the forge runs with this environment minus every one of git's own settings, so it never writes or follows a git config of the person's; its git settings stay in its own folder.",
+   "codon": "G8.5",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G8_5_the_forge_never_writes_or_follows_a_git_config_of_the_persons",
+   "stand_in": "none",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
   }
  ],
  "declined": []
