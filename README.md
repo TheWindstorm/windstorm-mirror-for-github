@@ -40,6 +40,9 @@ The copy is as current as the last sync, and `status` says when that was. While 
 nothing is copied. GitHub's issues, pull requests, releases and wikis are not in the copy, so this is a second copy
 of your code, not of everything GitHub holds.
 
+`status` ends with 1 while any of its "problem:" lines stands, also one that only this computer's administrator can
+change, and with 0 when it names none; before setup it says "Run setup first." and ends with 2.
+
 ## What it runs, and where it connects
 
 Python standard library only. Over the network it reaches only GitHub (its API, with or without a key, and git),
@@ -237,6 +240,14 @@ with no key; a sync and a restore on a Mac are not seen yet.
     version or environment. If that program is moved or removed, the forge and the sync stop: `status` says the forge
     does not answer, with its one step, setup again, which writes the python3 it is run with. Seen on Linux with
     a python3 taken away; not seen on a Mac.
+  - On Linux, if one of the mirror's service files in ~/.config/systemd/user was removed by hand, uninstall says
+    "Not now" at every run, and running it again does not help (the fix is due in 0.1.1). The way out, seen on a
+    stock Ubuntu 24.04: run `systemctl --user stop windstorm-mirror-forge.service windstorm-mirror-sync.timer`, then
+    uninstall again; it then removes the rest. Two links systemd made stay behind,
+    ~/.config/systemd/user/default.target.wants/windstorm-mirror-forge.service and
+    ~/.config/systemd/user/timers.target.wants/windstorm-mirror-sync.timer, pointing at files that are gone. After a
+    restart and a login, systemd listed no failed unit and nothing of the mirror ran; the two links can be deleted
+    like any file.
 
 ## Taking it off
 
