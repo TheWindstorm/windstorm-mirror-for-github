@@ -242,8 +242,9 @@ with no key; a sync and a restore on a Mac are not seen yet.
     a python3 taken away; not seen on a Mac.
   - on Linux, uninstall can sit without a word while systemd stops the forge's service. With the service as setup
     writes it, systemd's own default ends that stop after 90 seconds (read in systemd's settings, not seen by us); a
-    stop setting of your own for that service can make it longer (seen: 17 minutes, with one that never ended the
-    stop);
+    stop setting of your own for that service can make it longer (seen once: 17 minutes without a word, with a
+    setting that never ends the stop). Once the stop ends, uninstall goes on by itself (seen once); ending uninstall
+    during that wait is not seen by us;
   - a line that says to run the command again can come back with the same words at the second run, and the tool does
     not yet say what to do then. It is then not a wait: do not run it a third time, and do not work round it by
     hand; report the line at https://github.com/TheWindstorm/windstorm-mirror-for-github/issues (you may leave out
