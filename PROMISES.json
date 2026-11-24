@@ -1719,7 +1719,7 @@
    "test": "",
    "stand_in": "none",
    "moved_why": "",
-   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: some commands the person or their administrator is asked to run are written inside a sentence, not on a line of their own: the lingering line, sudo loginctl enable-linger <user> (three places); the install lines for git and git lfs (sudo apt update && sudo apt install git, the same for git-lfs, and sudo dnf install for Fedora); chmod go-w <path> and chmod g-w <path> (five places); loginctl disable-linger <user>; uninstall --delete-copies (two places). None carries a backtick or a dollar-parenthesis, so nothing runs them when such a line is quoted. In 0.1.0 the commands that were set between backticks were taken out of them, and the whole ones (the two git config lines, Claude Code's plugin uninstall) stand on a line of their own.",
+   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: some commands the person or their administrator is asked to run are written inside a sentence, not on a line of their own: the lingering line, sudo loginctl enable-linger <user> (three places); the install lines for git and git lfs (sudo apt update && sudo apt install git, the same for git-lfs, and sudo dnf install for Fedora); chmod go-w <path> and chmod g-w <path> (five places); loginctl disable-linger <user>; uninstall --delete-copies (two places). None carries a backtick or a dollar-parenthesis, so nothing runs them when such a line is quoted. In 0.1.0 the commands that were set between backticks were taken out of them, and the whole ones (the two git config lines, Claude Code's plugin uninstall) stand on a line of their own. The sync that the timer starts prints its lines to its standard output: on Linux the unit names no other place for them, so they reach the journal, one entry per line; on a Mac launchd writes them to the forge's log/sync.log. Read in the code, not seen: whether the journal keeps a command's leading spaces, and whether its entry stands next to the reason that ends with a colon.",
    "promise": "Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write. A test reads every line the tool can print and fails on a command for the person written inside a sentence."
   },
   {
@@ -1737,6 +1737,22 @@
    "moved_why": "",
    "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: values the tool prints but did not write, and who can choose each: branch and tag names, by anyone who can push to the repository on GitHub (sync's kept line, restore --check's difference line), where git allows a backtick pair and a dollar-parenthesis; git's, Gitea's and the service manager's own error words, which can echo such a name, a URL or a path; a URL from the person's git settings; paths, including the names of files someone else made in a folder the tool names; account and group names on the computer; the address and project named for restore --to; GitHub's owner and repository names, where by GitHub's naming rules as we know them neither form fits (not tried). 0.1.0 sets none of them between backticks, and none of the tool's own printed strings carries either form.",
    "promise": "One helper that every value the tool did not write passes through on its way into a sentence. A value that holds a backtick or a dollar-parenthesis is shown changed, and the line says it is shown changed. Where a command must carry the value exactly, it stands alone on its line, quoted for the shell, unchanged. Only the two forms; nothing stored or pushed is changed, only what is printed. One test world: a branch and a tag whose names hold both forms (sync's kept line, restore --check's difference line), and a failing fetch whose git error echoes such a name."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#142",
+   "id": "M116",
+   "codon": "G6.15",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "a test world whose git setting is one git cannot read while status runs, and a stand-in forge that refuses a copy's read while it answers otherwise",
+   "moved_why": "",
+   "seen": "2026-11-24, seen in a test world while building 0.1.0's status-road test (git 2.43, Linux): with a line git cannot read (\"[url\" alone) still in ~/.gitconfig when status runs, status's own read of the copy from the forge fails, and its line reads only \"<owner>/<repository>: its copy could not be read from the forge\", with no reason, no step and no command; that test takes the setting out before status for this reason. Read in the code: any failed read of a copy gives this same line. When the forge does not answer at all, the forge's own line above it carries a step; when the forge refuses for a reason status knows, that reason's line stands instead of it. Not seen: this on a real computer.",
+   "promise": "Status's line for a copy it could not read from a forge that answers says why, in git's own first line passed through the helper of M115, and ends with one step: for a git setting git cannot read, the same command on its own line that the sync's stop gives (git config --global --list); for any other reason, what the person can do, or, where the tool knows of nothing, show the line and report it at the issues link. Proven by a test world for each: the setting left in place while status runs, and a forge that refuses the read while it answers otherwise; both lines read whole."
   }
  ],
  "declined": []

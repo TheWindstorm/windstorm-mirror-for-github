@@ -222,6 +222,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G6.12 | Every command the tool prints with its own copy's path runs as printed when pasted whole into a shell: the path is quoted (on a Mac it holds a space, `Application Support`), through one helper (M60). | `test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space` |
 | G6.13 | Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write | `test_G6_13_a_command_for_the_person_stands_alone_on_its_line` *(to build)* |
 | G6.14 | A value the tool did not write passes through one helper on its way into a sentence: holding a backtick or a dollar-parenthesis, it is shown changed and the line says so; a command that must carry it exactly stands alone on its line, quoted for the shell | `test_G6_14_a_value_the_tool_did_not_write_is_never_printed_in_a_form_a_shell_runs` *(to build)* |
+| G6.15 | Status's line for a copy it could not read from a forge that answers says why, in git's own first line, and ends with one step: for a git setting git cannot read, the sync's own command on its own line; otherwise what the person can do, or show the line and report it | `test_G6_15_a_copy_status_cannot_read_from_the_forge_says_why_and_its_step` *(to build)* |
 
 ### G7 Restore
 
