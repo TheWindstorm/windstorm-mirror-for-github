@@ -23,6 +23,13 @@ would mean without changing anything.
 
 The copy is as private as this computer. Anyone who can read this account's files can read every project in it. Disk encryption, and who uses this computer, are yours.
 
+## Settings and rights
+
+The skill needs no administrator rights: none of its commands runs with sudo or as another account. It reads three
+settings of yours and no other: `WSM_HOME` moves every folder of the skill's under it, and on Linux
+`XDG_DATA_HOME` and `XDG_CONFIG_HOME` move its data and settings folders as they do for other programs. A command
+whose folders one of them moved says so first.
+
 ## Family
 
 Part of the Windstorm skills: [Pit Stop](https://github.com/TheWindstorm/windstorm-pit-stop),

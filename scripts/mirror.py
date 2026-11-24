@@ -64,10 +64,13 @@ def system():
     return platform.system().lower(), platform.machine().lower().replace("amd64", "x86_64").replace("aarch64", "arm64")
 
 
-def paths():
-    """Everything the skill writes, in two folders of the person's own. WSM_HOME moves both (tests)."""
+def paths(root="from WSM_HOME"):
+    """Everything the skill writes, in two folders of the person's own. WSM_HOME moves both (the person's setting,
+    named in the README; the suite gives each test a home of its own with it). paths(None): where they are with no
+    WSM_HOME."""
     home = os.path.expanduser("~")
-    root = os.environ.get("WSM_HOME")
+    if root == "from WSM_HOME":
+        root = os.environ.get("WSM_HOME")
     if root:
         data, conf = os.path.join(root, "data"), os.path.join(root, "config")
     elif system()[0] == "darwin":
@@ -137,21 +140,392 @@ def load_json(path, default):
 def write_private(path, text):
     """A file only the person can read: made 0600 before anything is written into it."""
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    write_file(path, text, 0o600)
 
 
 def write_file(path, text, mode=0o644):
+    """Written whole, then put in place. Rule 28: the file is made with its own mode by name, before a byte is
+    written, whatever the umask; a .tmp left by an earlier run is never reused (its mode could be wider)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    try:
+        os.remove(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        os.fchmod(f.fileno(), mode)
         f.write(text)
-    os.chmod(tmp, mode)
     os.replace(tmp, path)
+    claim(path)
+
+
+# ---------------------------------------------------------------- G9.12 / rule 23: only what the skill wrote
+# A folder a setting names (WSM_HOME, XDG_*) may hold a person's things, and so may a folder of the skill's own name.
+# The skill keeps a record of every file and folder it writes in its own folders, as it writes it, and setup,
+# uninstall and the delete read the folders against that record at the moment they run: an entry the record does not
+# hold stops setup, and is named and left by uninstall and the delete, which go on for the rest (rule 8). Trees a
+# program the skill runs writes into (Gitea's forge, git's cache repositories) are recorded whole and known by their
+# exact top-level names; a folder goes only when it is empty.
+MADE_RECORD = "windstorm-mirror-made.json"
+FORGE_NAMES = {"custom", "data", "log"}
+GIT_NAMES = {"HEAD", "config", "description", "hooks", "info", "objects", "refs", "packed-refs", "FETCH_HEAD", "lfs",
+             "logs", "shallow", "branches", "ORIG_HEAD", "gc.log", "gc.pid", "index"}
+_made_cache = {}
+
+
+def own_roots(p):
+    """The folders that are the skill's own places: its data and settings folders, and WSM_HOME around them."""
+    roots = [os.path.abspath(p["data"]), os.path.abspath(p["conf"])]
+    h = os.environ.get("WSM_HOME")
+    if h:
+        roots.append(os.path.abspath(h))
+    return roots
+
+
+def inside(path, folder):
+    return (path + os.sep).startswith(folder + os.sep) and path != folder
+
+
+def read_made(p):
+    """(record, None) or (None, why): what the skill wrote in its own folders, path to kind ("file", "dir", or
+    "tree:<forge|git|other>"). No record is an empty one; a record that cannot be read is never taken as empty."""
+    f = os.path.join(p["data"], MADE_RECORD)
+    if not os.path.exists(f):
+        return {}, None
+    try:
+        with open(f, encoding="utf-8") as fh:
+            rec = json.load(fh)
+        if not isinstance(rec, dict) or rec.get("written_by") != "windstorm-mirror":
+            return None, f"{f} is not the skill's record"
+        return dict(rec.get("made") or {}), None
+    except (OSError, ValueError) as e:
+        return None, f"{f} could not be read ({e})"
+
+
+def service_files(p):
+    """The service manager's files the skill writes, outside its own folders: each is recorded with its SHA-256, and
+    is written over or removed only while it is still exactly as the skill wrote it."""
+    if system()[0] == "darwin":
+        return [p["plist"], os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")]
+    base = os.path.dirname(p["unit"])
+    return [p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")]
+
+
+def service_file_ours(p, rec, f):
+    return rec is not None and os.path.isfile(f) and not os.path.islink(f) and rec.get(f) == "service:" + sha256_of(f)
+
+
+def write_made(p, rec):
+    f = os.path.join(p["data"], MADE_RECORD)
+    os.makedirs(p["data"], mode=0o700, exist_ok=True)
+    with open(f + ".tmp", "w", encoding="utf-8") as fh:
+        json.dump({"written_by": "windstorm-mirror", "made": rec}, fh, indent=1)
+    os.replace(f + ".tmp", f)
+
+
+def claim(path, kind="file"):
+    """Note in the record that the skill wrote `path` (and made each folder between it and its own folders), or,
+    for a service file, its SHA-256. Anything else outside the skill's own folders (a backup the person asked for)
+    is not recorded."""
+    p = paths()
+    path = os.path.abspath(path)
+    roots = own_roots(p)
+    if path in service_files(p):
+        rec, why = read_made(p)
+        if rec is not None:
+            rec[path] = "service:" + sha256_of(path)
+            write_made(p, rec)
+        return
+    if not any(inside(path, r) for r in roots) or os.path.basename(path) == MADE_RECORD:
+        return
+    rec, why = read_made(p)
+    if rec is None:
+        return                       # never written over: an unreadable record stays as it is, and is said
+    want = {path: kind}
+    d = os.path.dirname(path)
+    while any(inside(d, r) for r in roots):
+        want.setdefault(d, "dir")
+        d = os.path.dirname(d)
+    if all(rec.get(k) == v or (v == "dir" and k in rec) for k, v in want.items()):
+        return
+    for k, v in want.items():
+        if not (v == "dir" and k in rec):
+            rec[k] = v
+    write_made(p, rec)
+
+
+def unclaim(p, gone):
+    rec, why = read_made(p)
+    if rec is None or not any(g in rec for g in gone):
+        return
+    for g in gone:
+        rec.pop(g, None)
+    if os.path.exists(p["data"]):
+        write_made(p, rec)
+
+
+def not_ours(p):
+    """Every entry in the skill's own folders that its record does not hold (at most 50), or [why] when the record
+    cannot be read. Checked at the moment a command runs: a person's file may have arrived since setup."""
+    rec, why = read_made(p)
+    if rec is None:
+        return [why]
+    found = []
+    record_file = os.path.join(os.path.abspath(p["data"]), MADE_RECORD)
+
+    def look(folder):
+        try:
+            names = sorted(os.listdir(folder))
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            found.append(f"{folder} (could not be read: {e})")
+            return
+        for n in names:
+            e = os.path.join(folder, n)
+            kind = rec.get(e)
+            if e == record_file or e in roots or (n == SUITE_MARKER and folder == wsm):
+                if e in roots and e != folder:
+                    continue          # an own folder inside another (a Mac's config inside data) is looked at on its own
+                continue
+            if kind is None:
+                found.append(e)
+            elif kind == "dir" and os.path.isdir(e) and not os.path.islink(e):
+                look(e)
+            elif kind in ("tree:forge", "tree:git") and os.path.isdir(e):
+                allowed = FORGE_NAMES if kind == "tree:forge" else GIT_NAMES
+                found.extend(os.path.join(e, x) for x in sorted(os.listdir(e))
+                             if x not in allowed and not x.endswith(".lock"))
+            if len(found) >= 50:
+                return
+    roots = own_roots(p)
+    wsm = os.path.abspath(os.environ.get("WSM_HOME") or "") if os.environ.get("WSM_HOME") else None
+    for r in roots:
+        look(r)
+    return sorted(set(found))[:50]
+
+
+STRANGER = ("", -1, frozenset())     # an account in no group of any folder: only the "others" bits let it in
+
+
+def accounts():
+    """Rule 28: every account on this computer but the person's own and the administrator's, as (name, uid, its
+    group ids); None when the list cannot be read (rule 6: then that is said, never taken as nobody)."""
+    try:
+        import pwd
+        rows = pwd.getpwall()
+    except Exception:
+        return None
+    me, out = os.getuid(), []
+    for u in rows:
+        if u.pw_uid in (me, 0):
+            continue
+        try:
+            out.append((u.pw_name, u.pw_uid, groups_of(u.pw_name, u.pw_gid)))
+        except Exception:           # this one account's groups could not be read: said for it, the rest go on
+            out.append((u.pw_name, u.pw_uid, None))
+    return out
+
+
+def groups_of(name, gid):
+    """An account's group numbers, as a folder's group reads. On a Mac, the system's call takes a signed number, so
+    the group of nobody (4294967294 in the account list, -2 there) is passed as -2, and what comes back is read as
+    the folder reads it (seen on macOS 13: the call answered 2**64 - 2 for it)."""
+    try:
+        got = os.getgrouplist(name, gid)
+    except OverflowError:
+        got = os.getgrouplist(name, gid - 2 ** 32)
+    return frozenset(g % 2 ** 32 for g in got) | {gid}
+
+
+def may(acct, s_, bit):
+    """What the system asks: the owner's bits for the owner, the group's for a member of the group, else the others'.
+    None when it turns on groups that could not be read for this account (its group's bits and the others' differ)."""
+    name, uid, groups = acct
+    if uid == s_.st_uid:
+        return bool(s_.st_mode >> 6 & bit)
+    if groups is None:
+        g, o = bool(s_.st_mode >> 3 & bit), bool(s_.st_mode & bit)
+        return g if g == o else None
+    if s_.st_gid in groups:
+        return bool(s_.st_mode >> 3 & bit)
+    return bool(s_.st_mode & bit)
+
+
+def account_name(uid, accts=()):
+    """The name of the account with this number: from the accounts read, else the system's list, else the number."""
+    for a in accts or []:
+        if a[1] == uid:
+            return a[0]
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except (ImportError, KeyError):
+        return f"number {uid}"
+
+
+def group_name(gid):
+    try:
+        import grp
+        return grp.getgrgid(gid).gr_name
+    except (ImportError, KeyError):
+        return str(gid)
+
+
+def loose(path, accts=()):
+    """Rule 28 (when a person's folder is named): why another account can really reach this folder and write in it,
+    "could not be read (...)", or None. Reach: every folder above it lets that account pass. Write: its bits for
+    that account, or it owns the folder. A 775 folder in the person's own group with nobody else in it is not
+    named; accts None (the list of accounts could not be read) is said as that when a group could write."""
+    up = []
+    d = os.path.dirname(os.path.abspath(path))
+    while True:
+        up.append(d)
+        if os.path.dirname(d) == d:
+            break
+        d = os.path.dirname(d)
+    try:
+        s_ = os.stat(path)
+        chain = [os.stat(x) for x in up]
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"could not be read ({e.strerror or e})"
+    pool = [STRANGER] + list(accts or [])
+    if s_.st_uid not in (os.getuid(), 0):
+        owner = next((a for a in pool if a[1] == s_.st_uid), ("", s_.st_uid, frozenset()))
+        if all(may(owner, c, 1) for c in chain):
+            return "another account owns it"
+    def can(a):                 # True, False, or None (it turns on groups that could not be read)
+        said = [may(a, c, 1) for c in chain] + [may(a, s_, 2)]
+        return False if False in said else None if None in said else True
+    writers = [a for a in pool if can(a) is True]
+    unsure = [a for a in pool if can(a) is None]
+    if STRANGER in writers:
+        return "every account on this computer can write in it"
+    if writers:
+        return ("another account on this computer can write in it ("
+                + ", ".join(sorted(a[0] for a in writers)[:3]) + (", and more" if len(writers) > 3 else "") + ")")
+    if accts is None and s_.st_mode & 0o020:
+        return f"writable by group {group_name(s_.st_gid)}; who is in that group could not be read"
+    if unsure:
+        return (f"not fully known: the groups of {len(unsure)} account{'s' if len(unsure) > 1 else ''} on this "
+                "computer could not be read")
+    return None
+
+
+def folders_above(p):
+    """Rule 28 (a file is only as closed as the folders above it): every folder from the home (or from the skill's
+    own root, for what is not under the home) down to each thing of the skill's that runs, and to what decides what
+    runs (what runs includes what decides what runs): the service's files, the installed copy of the tool, the
+    forge's program and the state that picks it, the forge's settings (app.ini), the tool's settings, and the Python
+    the service's files name (as named, and the file it leads to)."""
+    home = os.path.abspath(os.path.expanduser("~"))
+    out = []
+    py = [sys.executable, os.path.realpath(sys.executable)] if sys.executable else []
+    for f in service_files(p) + [p["script"], p["bin"], p["state"], p["app_ini"], p["settings"]] + py:
+        d = os.path.dirname(os.path.abspath(f))
+        top = home if (d == home or inside(d, home)) else next(
+            (r for r in sorted(own_roots(p), key=len) if d == r or inside(d, r)), d)
+        chain = [d]
+        while chain[-1] != top and os.path.dirname(chain[-1]) != chain[-1]:
+            chain.append(os.path.dirname(chain[-1]))
+        out += [c for c in reversed(chain) if c not in out]
+    return out
+
+
+def open_folders(p, close=False):
+    """Rule 28: each folder above what the skill runs that another account can write in, as a line for the person.
+    The skill's own (one of its roots, on its record, or made by setup) setup closes (`close`); a folder it cannot
+    know it made is never changed (rule 23), only named, with what that means and, when it is the person's, the one
+    command that closes it; one that is not theirs, with whose it is and no command."""
+    rec, why = read_made(p)
+    own = set(own_roots(p)) | set(rec or {}) | set(load_json(p["state"], {}).get("made_folders") or [])
+    lines, accts = [], accounts()
+    for d in folders_above(p):
+        try:
+            mine = d in own and os.stat(d).st_uid == os.getuid() and os.stat(d).st_mode & 0o022
+        except OSError:
+            mine = False
+        if mine:                    # the skill's own: closed for group and others, without asking who is there
+            if close:
+                os.chmod(d, os.stat(d).st_mode & 0o7755)
+            else:
+                lines.append(f"{d} is a folder of the skill's own that others may write in: setup closes it "
+                             "(chmod go-w).")
+            continue
+        why = loose(d, accts)
+        if not why:
+            continue
+        try:
+            uid = os.stat(d).st_uid
+        except OSError:
+            uid = os.getuid()
+        # Rule 28 (how it is worked out): a folder that is not the person's gets no command, since the person
+        # cannot change it and a printed command that fails is a false next step; its line says whose it is.
+        who = account_name(uid, accts) if uid != os.getuid() else ""
+        not_yours = (f" It belongs to {who}, not to you: only the computer's administrator can change it. The skill "
+                     "leaves it as it is.")
+        if why.startswith("could not be read"):
+            lines.append(f"{d} {why}, so whether another account can write in it is not known; the skill's service "
+                         "or program is in it, or below it.")
+        elif why == "another account owns it":
+            lines.append(f"{d} belongs to the account {who}, which could replace the skill's service or program in "
+                         "it, or below it. You cannot change a folder that is not yours: only the computer's "
+                         "administrator can hand it back to you. The skill leaves it as it is.")
+        elif why.startswith("not fully known"):
+            lines.append(f"{d}: whether another account can write in it is {why}; the skill's service or program is "
+                         "in it, or below it."
+                         + (not_yours if who else f" If it is not only yours: chmod go-w {shlex.quote(d)}"))
+        elif why.startswith("writable by group"):
+            lines.append(f"{d} is {why}, so whether another account can write in it is not known; the skill's "
+                         "service or program is in it, or below it."
+                         + (not_yours if who else f" If it is not only yours: chmod g-w {shlex.quote(d)}"))
+        else:
+            lines.append(f"{d} is open: {why}, so another account could replace the skill's service or program in it, "
+                         "or below it."
+                         + (not_yours if who else " It is yours, and the skill leaves it as it is. The one command "
+                            f"that closes it: chmod go-w {shlex.quote(d)}"))
+    return lines
+
+
+def home_is_not_ours(p):
+    """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it."""
+    h = os.environ.get("WSM_HOME")
+    if h and os.path.realpath(h) == os.path.realpath(os.path.expanduser("~")):
+        return (f"Stopped: WSM_HOME is your home folder ({h}). The skill makes its folders only in a folder of its "
+                "own, so nothing of yours is ever written over or taken away. Nothing was changed. The one next "
+                "step: set WSM_HOME to a folder that does not exist yet, or is empty, and run setup again.")
+    for d in own_roots(p) + [os.path.dirname(p["bin"])]:
+        try:
+            s_ = os.stat(d)
+        except FileNotFoundError:
+            continue
+        # Others may not write there; a group may only when it is the person's own (a user's private group).
+        loose = s_.st_mode & 0o002 or (s_.st_mode & 0o020 and s_.st_gid != os.getgid())
+        if s_.st_uid != os.getuid() or loose:
+            return (f"Stopped: {d} is not yours alone ("
+                    + ("another account owns it" if s_.st_uid != os.getuid() else "other accounts can write in it")
+                    + "), and the forge's program, your keys and the copies would live there, where someone else "
+                    "could change them. Nothing was changed. The one next step: "
+                    + ("set WSM_HOME to a folder of your own that does not exist yet" if h else
+                       f"make {d} yours alone (run chmod go-w {shlex.quote(d)} as its owner)") + ", and run setup again.")
+    rec, why = read_made(p)
+    changed = [f for f in service_files(p) if os.path.lexists(f) and not service_file_ours(p, rec, f)]
+    if changed:
+        return ("Stopped: this computer already has " + ", ".join(changed) + ", and not as the skill wrote it (it "
+                "was changed since, or something else wrote it), so setup does not write over it. Nothing was "
+                "changed. The one next step: move it out of that folder, and run setup again.")
+    others = not_ours(p)
+    if others:
+        where = h or p["data"]
+        return (f"Stopped: {where} already holds things the skill did not make: " + ", ".join(others[:8])
+                + (f" and {len(others) - 8} more" if len(others) > 8 else "") + ". The skill writes only into "
+                "folders that are its own, so nothing of yours is written over or taken away. Nothing was changed. "
+                "The one next step: " + ("set WSM_HOME to a folder that does not exist yet, or is empty"
+                                         if h else "move those out of it") + ", and run setup again.")
+    return None
 
 
 def run(cmd, **kw):
@@ -204,6 +578,7 @@ def fetch_forge(p, base=None):
                              f"(expected {want[:16]}..., got {got[:16]}...). It was deleted and not run.")
         os.chmod(part, 0o755)
         os.replace(part, p["bin"])
+        claim(p["bin"])
     finally:
         if os.path.exists(part):
             os.remove(part)
@@ -722,13 +1097,86 @@ GITHUB_API = "https://api.github.com"
 OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
 
+# G9.12 (the family's rule 27): four settings exist only for the suite. Each needs TWO keys: the setting, and the marker
+# the suite writes in the temporary home it made (WSM_HOME). The setting alone is found and ignored: nothing is
+# replaced and the command goes on against GitHub itself. Even with both keys, the two GitHub addresses are taken
+# only on this computer's loopback, so no setting ever sends a key to another host.
+# The family's rule 27 keeps three lists of what the tool reads from its environment; a test fails on any other name.
+PERSON_SETTINGS = ("WSM_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME")     # named in the README; said when they move a folder
+HOST_FACTS = ()                                                        # none read
+OWN_MARKERS = ()                                                       # none
+TEST_SETTINGS = ("WSM_GITHUB_API", "WSM_GITHUB_GIT", "WSM_PAGE_SIZE", "WSM_GITEA_BASE")
+TEST_SETTING_DEFAULT = {"WSM_GITHUB_API": "GitHub itself", "WSM_GITHUB_GIT": "GitHub itself",
+                        "WSM_PAGE_SIZE": "GitHub's largest page", "WSM_GITEA_BASE": "Gitea's own download site"}
+SUITE_MARKER = "windstorm-mirror-suite-home"
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def suite_home():
+    h = os.environ.get("WSM_HOME")
+    return bool(h) and os.path.isfile(os.path.join(h, SUITE_MARKER))
+
+
+def on_loopback(url):
+    try:
+        u = urllib.parse.urlsplit(url)
+        return u.scheme in ("http", "https") and (u.hostname or "").lower() in LOOPBACK
+    except ValueError:
+        return False
+
+
+def test_setting(name):
+    """The value of a test-only setting when both keys are there (and, for an address, it is loopback); else None."""
+    v = os.environ.get(name)
+    if not v or not suite_home():
+        return None
+    if name in ("WSM_GITHUB_API", "WSM_GITHUB_GIT") and not on_loopback(v):
+        return None
+    return v
+
+
+def settings_lines():
+    """What each command says first about the settings it reads: (lines, stop). WSM_HOME is a person's setting and
+    is named; a test-only setting without the suite's marker is found and ignored; a GitHub address that is not
+    this computer's loopback, with the marker there, stops the command before it does anything."""
+    lines, stop = [], False
+    h = os.environ.get("WSM_HOME")
+    if h:
+        lines.append(f"WSM_HOME is set: this skill's folders are under {h}.")
+    elif system()[0] == "linux":
+        home = os.path.expanduser("~")
+        for name, usual, what in (("XDG_DATA_HOME", os.path.join(home, ".local", "share"), "data"),
+                                  ("XDG_CONFIG_HOME", os.path.join(home, ".config"), "settings and service")):
+            v = os.environ.get(name)
+            if v and os.path.abspath(v) != usual:
+                lines.append(f"{name} is set: this skill's {what} folders are under {v}, not {usual}.")
+    for name in TEST_SETTINGS:
+        v = os.environ.get(name)
+        if not v:
+            continue
+        if not suite_home():
+            lines.append(f"{name} was found and ignored: it is read only inside the test suite's own home; this "
+                         f"command goes on with {TEST_SETTING_DEFAULT[name]}, and it is not handed on.")
+            os.environ.pop(name)        # nothing it starts (git, the forge) is handed it either
+        elif name in ("WSM_GITHUB_API", "WSM_GITHUB_GIT") and not on_loopback(v):
+            lines.append(f"Stopped: {name} names an address that is not this computer's own (127.0.0.1, localhost "
+                         "or ::1), and no key is ever sent there. Nothing was done. Unset it and run the command "
+                         "again.")
+            stop = True
+    return lines, stop
+
+
 def github_api():
-    return os.environ.get("WSM_GITHUB_API") or GITHUB_API
+    return test_setting("WSM_GITHUB_API") or GITHUB_API
 
 
 def gh_get(key, path):
     """One read from GitHub's REST API with one owner's key. Returns (status, headers, body). Never writes."""
-    url = path if path.startswith("http") else github_api() + path
+    api = github_api()
+    url = path if path.startswith("http") else api + path
+    if urllib.parse.urlsplit(url)[:2] != urllib.parse.urlsplit(api)[:2]:
+        return 0, {}, {"message": f"not asked: {urllib.parse.urlsplit(url).netloc} is not GitHub's API, and a key "
+                                  "goes only there"}
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT,
                                                "Accept": "application/vnd.github+json",
                                                "X-GitHub-Api-Version": "2022-11-28"})
@@ -871,7 +1319,7 @@ GIT_TIMEOUT = 600
 
 
 def github_git():
-    return os.environ.get("WSM_GITHUB_GIT") or GITHUB_GIT
+    return test_setting("WSM_GITHUB_GIT") or GITHUB_GIT
 
 
 def now_utc():
@@ -888,7 +1336,7 @@ def next_link(headers):
 def page_size():
     """G3.10: GitHub's largest page, 100. WSM_PAGE_SIZE (1 to 100) is read for tests and labs only: it makes the
     pages small, so that paging can be seen on a real owner with few repositories. Anything else is 100."""
-    v = os.environ.get("WSM_PAGE_SIZE", "")
+    v = test_setting("WSM_PAGE_SIZE") or ""
     return int(v) if v.isdigit() and 1 <= int(v) <= 100 else 100
 
 
@@ -1186,6 +1634,7 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         os.makedirs(p["cache"], mode=0o700, exist_ok=True)
         if git(None, "init", "-q", "--bare", cache).returncode != 0:
             return "the local cache could not be made"
+        claim(cache, "tree:git")
     git(cache, "config", "remote.github.url", f"{github_git()}/{full}.git")
     git(cache, "config", "remote.github.pushurl", NO_PUSH)       # G5.3: a push to GitHub cannot even start
     for i, spec in enumerate(FETCH_SPEC):
@@ -1282,6 +1731,7 @@ def take_lock(p):
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(str(os.getpid()))
+            claim(path)
             return True, note
         except FileExistsError:
             try:
@@ -1412,7 +1862,7 @@ def announce_first_copy(p, st, picked, complete, to_the_person=False):
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
           restart_line(st), lfs_missing() if not has_git_lfs() else "",
           *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
-          NOT_COPIED, PRIVATE_AS_THIS_COMPUTER], to_the_person)
+          *open_folders(p), NOT_COPIED, PRIVATE_AS_THIS_COMPUTER], to_the_person)
     st["announced"] = st.get("announced") or now_utc()
     st["announced_list"] = names
     save_state(p, st)
@@ -1716,6 +2166,45 @@ PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes
                "computer and keeps every copy current. To take it off: {command}")
 
 
+def other_install(p):
+    """G9.12: the service file this computer has for the skill, when it runs another home's copy than p's.
+    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file)."""
+    f = p["plist"] if system()[0] == "darwin" else p["unit"]
+    if not os.path.exists(f):
+        return None
+    try:
+        with open(f, encoding="utf-8") as fh:
+            txt = fh.read()
+    except (OSError, ValueError):
+        return "", f
+    m = (re.search(r"<string>-I</string><string>([^<]+)</string><string>run-forge</string>", txt)
+         or re.search(r"^ExecStart=\S+ -I (.+) run-forge$", txt, re.M))
+    if m and m.group(1) == p["script"]:
+        return None
+    return (m.group(1) if m else ""), f
+
+
+def other_install_stop(p, cmd):
+    """Setup and uninstall do nothing against another home's install: said with the home it uses and one step."""
+    found = other_install(p)
+    if not found:
+        return None
+    script, f = found
+    if not script:
+        return (f"Stopped: this computer already has the skill's service ({f}), and which copy of the skill it runs "
+                f"could not be read, so {cmd} cannot tell whether it is this one ({p['script']}). Nothing was "
+                f"changed. The one next step: read that file, and run {cmd} with the copy it names.")
+    if script == paths(None)["script"]:
+        step = f"unset WSM_HOME, then run {own_command(paths(None), cmd)}"
+    elif os.path.basename(os.path.dirname(script)) == "data":
+        root = os.path.dirname(os.path.dirname(script))
+        step = f"run it with that home: WSM_HOME={shlex.quote(root)} {own_command(paths(root), cmd)}"
+    else:
+        step = f"run it with the copy that service runs: python3 -I {shlex.quote(script)} {cmd}"
+    return (f"Stopped: the skill set up on this computer uses another home. Its service ({f}) runs {script}, and "
+            f"this {cmd} would use {p['data']}. Nothing was changed. The one next step, to run as printed: {step}")
+
+
 def own_command(p, *args):
     """G6.12 (M60): a command for the person to run, with this skill's own copy, as it runs when pasted whole into a
     shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
@@ -1827,6 +2316,10 @@ def setup_plan(p, st):
 
 def cmd_setup(args):
     p = paths()
+    other = other_install_stop(p, "setup") or home_is_not_ours(p)
+    if other:
+        say(other)
+        return 2
     if getattr(args, "from_file", None):
         return setup_from(p, args)
     have = load_json(p["state"], {}).get("gitea")
@@ -1850,7 +2343,7 @@ def cmd_setup(args):
         say("setup --dry-run: nothing is changed.")
         tell([f"Setup would {step}." for step in plan]
              + [f"After a restart: {note}" if note else "After a restart it starts by itself.",
-                lfs_missing() if not has_git_lfs() else ""])
+                lfs_missing() if not has_git_lfs() else ""] + open_folders(p))
         return 0
     if linger_unchosen(args, st):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
@@ -1859,11 +2352,13 @@ def cmd_setup(args):
     made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    claim(p["conf"], "dir")
     record_made_folders(p, st, made)
-    if fetch_forge(p, os.environ.get("WSM_GITEA_BASE")):
+    if fetch_forge(p, test_setting("WSM_GITEA_BASE")):
         say(f"Gitea {GITEA_VERSION} downloaded; checksum matches the pin.")
     else:
         say(f"Gitea {GITEA_VERSION} already here; checksum matches the pin.")
+    claim(p["forge"], "tree:forge")
     if not os.path.exists(p["app_ini"]):
         port = free_port()
         write_file(p["app_ini"], app_ini(p, port), 0o600)
@@ -1896,6 +2391,7 @@ def cmd_setup(args):
     if os.path.abspath(p["script"]) != here:
         shutil.copyfile(here, p["script"] + ".tmp")
         os.replace(p["script"] + ".tmp", p["script"])
+        claim(p["script"])
     if plugin_registry_for(here):
         st["plugin_registry"] = plugin_registry_for(here)
     if os.path.abspath(p["script"]) != here:
@@ -1928,7 +2424,7 @@ def cmd_setup(args):
     # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
     # person must hear before the go is in the announcement's block, the one they say go to.
     for line in ("After a restart it starts by itself." if back else "", note, lfs_missing() if not has_git_lfs() else "",
-                 PRIVATE_AS_THIS_COMPUTER):
+                 *open_folders(p, close=True), PRIVATE_AS_THIS_COMPUTER):
         if line:
             say(line)
     return 0 if ok else 1
@@ -1943,8 +2439,8 @@ def copy_state(rec, forge_refs, max_age):
     stopped it, and the forge holds exactly the branches and tags GitHub last showed. There is no pardon."""
     if rec.get("copying_since"):
         return False, f"a copy was stopped part-way at {rec['copying_since']}; the next sync does it again"
-    if rec.get("problem"):
-        return False, rec["problem"]
+    if rec.get("problem"):              # the reason, and since when the copy stands still (never "current")
+        return False, rec["problem"] + (f"; not refreshed since {rec['last_good']}" if rec.get("last_good") else "")
     if not rec.get("last_good"):
         return False, "never copied yet"
     if time.time() - epoch_of(rec["last_good"]) > max_age:
@@ -2118,6 +2614,7 @@ def cmd_status(args):
     problems, notes = [], []
     if not shutil.which("git"):
         problems.append("git is not installed on this computer, so no copy can refresh until it is")
+    problems += open_folders(p)                     # rule 28: said again each time, until it is closed
     code, ver = forge.call("GET", "/version")
     up = code == 200
     if not up:
@@ -2223,7 +2720,9 @@ ONLY_THIS_COMPUTER = {"http_proxy": "http://127.0.0.1:9", "https_proxy": "http:/
 
 def scratch(p, what):
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
-    return tempfile.mkdtemp(prefix=f"{what}-", dir=p["data"])
+    d = tempfile.mkdtemp(prefix=f"{what}-", dir=p["data"])
+    claim(d, "tree:other")
+    return d
 
 
 def clone_copy(forge, name, into):
@@ -2505,8 +3004,9 @@ def setup_from(p, args):
     made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    claim(p["conf"], "dir")
     record_made_folders(p, {}, made)
-    fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
+    fetch_forge(p, test_setting("WSM_GITEA_BASE"))
     work = scratch(p, "setup-from")
     try:
         safe_extract(src, work)
@@ -2520,6 +3020,7 @@ def setup_from(p, args):
         safe_extract(os.path.join(work, "gitea-dump.tar.gz"), dump)
         f = p["forge"]
         os.makedirs(f, mode=0o700, exist_ok=True)
+        claim(f, "tree:forge")
         if os.path.isdir(os.path.join(dump, "custom")):
             shutil.copytree(os.path.join(dump, "custom"), os.path.join(f, "custom"), dirs_exist_ok=True)
         shutil.copytree(os.path.join(dump, "data"), os.path.join(f, "data"), dirs_exist_ok=True)
@@ -2563,6 +3064,7 @@ def setup_from(p, args):
     if os.path.abspath(p["script"]) != here:
         shutil.copyfile(here, p["script"] + ".tmp")
         os.replace(p["script"] + ".tmp", p["script"])
+        claim(p["script"])
     ok, why = install_service(p)
     if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
         ok, why = False, "the sync timer could not be switched on"
@@ -2642,13 +3144,14 @@ def cmd_upgrade_forge(args):
     rollback = os.path.join(p["data"], "upgrade-rollback")
     try:
         say(f"upgrade-forge: Gitea {cur} to {new}. First, a backup.")
+        claim(os.path.join(p["data"], "backups"), "tree:other")
         if make_backup(p, st, os.path.join(p["data"], "backups")) != 0:
             say("The backup failed, so the forge was not touched. Run upgrade-forge again once the backup's "
                 "reason above is dealt with; it makes the backup first.")
             return 1
         save_state(p, st)
         try:
-            fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
+            fetch_forge(p, test_setting("WSM_GITEA_BASE"))
         except SystemExit as e:
             say(f"{e} The forge was not touched. Run upgrade-forge again.")
             return 1
@@ -2660,6 +3163,7 @@ def cmd_upgrade_forge(args):
             return 1
         shutil.rmtree(rollback, ignore_errors=True)
         os.makedirs(rollback, mode=0o700)
+        claim(rollback, "tree:other")
         db = os.path.join(p["forge"], "data", "gitea.db")
         shutil.copy2(db, os.path.join(rollback, "gitea.db"))
         shutil.copy2(p["app_ini"], os.path.join(rollback, "app.ini"))
@@ -2759,6 +3263,7 @@ def cmd_self_update(args):
     try:
         os.chmod(tmp, os.stat(target).st_mode & 0o777 if os.path.exists(target) else 0o644)
         os.replace(tmp, target)
+        claim(target)
     finally:
         drop_lock(p)
     say(f"self-update: {VERSION} to {tag}, replaced whole at {target}. The forge was not changed.")
@@ -2772,6 +3277,10 @@ def cmd_uninstall(args):
     """G9.3: everything but the folder of copies goes; that folder goes only on the person's typed word, typed
     at a terminal (it cannot be undone, so nothing piped in counts)."""
     p = paths()
+    other = other_install_stop(p, "uninstall")
+    if other:
+        say(other)
+        return 2
     if args.delete_copies and not sys.stdin.isatty():
         line = own_command(p, "uninstall", "--delete-copies")
         say("Needs you: deleting the copies cannot be undone, so the person does it themselves: in a terminal "
@@ -2798,23 +3307,19 @@ def cmd_uninstall(args):
             say(f"Not now: a sync is still running (process {lock_holder(p)}) after {UNINSTALL_WAIT // 60} minutes, "
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
-    removed, linger_said = [], ""
+    removed, linger_said, left_service, foreign, unreadable = [], "", [], [], None
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
             for label, plist in ((LAUNCHD_LABEL, p["plist"]),
                                  (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"))):
                 run(["launchctl", "bootout", f"gui/{uid}/{label}"])
-                if os.path.exists(plist):
-                    os.remove(plist)
-                    removed.append(plist)
+                take_service_file(p, plist, removed, left_service)
         else:
             run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
             base = os.path.dirname(p["unit"])
             for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
-                if os.path.exists(f):
-                    os.remove(f)
-                    removed.append(f)
+                take_service_file(p, f, removed, left_service)
             run(["systemctl", "--user", "daemon-reload"])
             if st.get("linger_by_setup"):
                 if run(["loginctl", "disable-linger", getpass.getuser()]).returncode == 0:
@@ -2827,33 +3332,136 @@ def cmd_uninstall(args):
             st.pop("linger_by_setup", None)
             if record == "read" and os.path.exists(p["state"]):
                 save_state(p, st)
-        for d in (os.path.dirname(p["bin"]), p["cache"], p["conf"]):
-            if os.path.exists(d):
-                shutil.rmtree(d)
-                removed.append(d)
-        for f in (p["script"],):
-            if os.path.exists(f):
-                os.remove(f)
-                removed.append(f)
+        # Rule 23: what the skill made, by its record, read now (a person's file may have arrived since setup).
+        # Rule 8: a person who wants to leave is never refused because of the state of their own data: what the
+        # skill did not make stays where it is and is named, and the leave goes on to its end for the rest.
+        rec_now, unreadable = read_made(p)
+        if rec_now is not None:
+            foreign = not_ours(p)
+            remove_made(p, [os.path.dirname(p["bin"]), p["cache"], p["conf"], p["script"]], removed)
     finally:
         if os.path.exists(p["data"]):
             drop_lock(p)
     n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
     rc = 0
-    if args.delete_copies and os.path.exists(p["forge"]):
-        say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds:")
+    copies_here = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)
+    if args.delete_copies and os.path.exists(p["data"]) and unreadable:
+        say(f"The copies were not deleted: {unreadable}, so the skill cannot tell what in {p['data']} it made, and "
+            "nothing was taken from it.")
+        rc = 1
+    elif args.delete_copies and copies_here:
+        say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds. Only "
+            "what the skill made goes; anything else in it stays where it is, and is named:")
         answer = input("> ").strip()
         if answer == str(n):
-            shutil.rmtree(p["data"])
-            removed.append(f"{p['data']}: the folder of copies ({n} copies) and the record of what the skill did here")
+            foreign = sorted(set(foreign) | set(not_ours(p)))     # read again: a file may have arrived meanwhile
+            take_data(p, removed, f"the folder of copies ({n} copies)", f"{p['forge']}: the {n} copies (the "
+                      "forge's own folders in it)")
         else:
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
             rc = 1
+    elif args.delete_copies and os.path.exists(p["data"]):         # no copies left in it: nothing to ask
+        foreign = sorted(set(foreign) | set(not_ours(p)))
+        take_data(p, removed, "the skill's folder", None)
     if record == "read":
         take_made_folders(st, removed)
-    uninstall_census(p, removed, linger_said, n, st, record)
+    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service)
     return rc
+
+
+def take_data(p, removed, what, copies_line):
+    """The delete: what the record holds in the data folder goes, by name; the record goes last, once nothing it
+    names is still here; the folder goes once it is empty."""
+    gone = len(removed)
+    remove_made(p, [p["data"]], removed)
+    rec_left, why = read_made(p)
+    try:
+        if rec_left is not None and not any(os.path.lexists(k) for k in rec_left if k != os.path.abspath(p["data"])):
+            os.remove(os.path.join(p["data"], MADE_RECORD))
+        if not os.listdir(p["data"]):
+            os.rmdir(p["data"])
+    except OSError:
+        pass
+    if not os.path.exists(p["data"]):
+        removed[gone:] = [f"{p['data']}: {what} and the record of what the skill did here, each thing the skill "
+                          "made in it by name"]
+    elif copies_line and (not os.path.exists(p["forge"]) or set(os.listdir(p["forge"])).isdisjoint(FORGE_NAMES)):
+        removed.insert(gone, copies_line)
+
+
+def take_service_file(p, f, removed, left):
+    """A service file goes only while it is exactly as the skill wrote it (its recorded SHA-256); else it is named
+    and left."""
+    if not os.path.lexists(f):
+        return
+    rec, why = read_made(p)
+    if service_file_ours(p, rec, f):
+        os.remove(f)
+        removed.append(f)
+        if rec is not None and os.path.exists(p["data"]):
+            rec.pop(f, None)
+            write_made(p, rec)
+    else:
+        left.append(f"{f} (not as the skill wrote it: changed since, or written by something else)")
+
+
+def remove_made(p, targets, removed):
+    """Remove what the record says the skill made at or inside each target: a file by its name, a tree a program
+    of the skill's wrote (checked by its top-level names first), a folder only once it is empty. Each removed thing
+    is named; nothing the record does not hold is touched."""
+    rec, why = read_made(p)
+    if rec is None:
+        return
+    targets = [os.path.abspath(t) for t in targets]
+    mine = sorted((k for k in rec if any(k == t or inside(k, t) for t in targets)), key=len, reverse=True)
+    trees = [k for k in mine if rec[k].startswith("tree:")]
+    mine = [k for k in mine if not any(inside(k, t) for t in trees)]     # they go with their tree
+    gone, caches, as_dir = [], 0, []
+    for k in mine:
+        kind = rec[k]
+        try:
+            if kind == "file" and (os.path.isfile(k) or os.path.islink(k)):
+                os.remove(k)
+                removed.append(k)
+            elif kind.startswith("tree:") and os.path.isdir(k) and not os.path.islink(k):
+                allowed = FORGE_NAMES if kind == "tree:forge" else GIT_NAMES if kind == "tree:git" else None
+                names = os.listdir(k)                 # read now, at the moment of removal
+                other = [x for x in names if allowed is not None and x not in allowed and not x.endswith(".lock")]
+                if other:                             # what the program wrote goes; the rest and the folder stay
+                    for x in names:
+                        if x not in other:
+                            e = os.path.join(k, x)
+                            shutil.rmtree(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
+                    as_dir.append(k)                  # still the skill's folder: it goes once it is empty
+                else:
+                    shutil.rmtree(k)
+                if kind == "tree:git":
+                    caches += 1
+                elif not other:
+                    removed.append(k)
+            elif kind == "dir" and os.path.isdir(k) and not os.path.islink(k) and not os.listdir(k):
+                os.rmdir(k)
+                removed.append(k)
+            if not os.path.lexists(k):
+                gone.append(k)
+        except OSError:
+            pass
+    for t in targets:                       # a target folder of the skill's own goes once it is empty
+        try:
+            if t not in rec and os.path.isdir(t) and not os.path.islink(t) and not os.listdir(t) and t != p["data"]:
+                os.rmdir(t)
+                removed.append(t)
+        except OSError:
+            pass
+    if caches:
+        removed.append(f"{p['cache']}: {caches} cache repositories the skill made")
+    unclaim(p, gone)
+    if as_dir:
+        rec, why = read_made(p)
+        if rec is not None:
+            rec.update({k: "dir" for k in as_dir})
+            write_made(p, rec)
 
 
 def downloaded_from(here):
@@ -2909,31 +3517,70 @@ def still_here(p, st, record="read"):
     return lines
 
 
-def uninstall_census(p, removed, linger_said, n, st=None, record="read"):
+def stayed_for(p, foreign):
+    """Each of the skill's folders still here because something it did not make is in it: folder -> those things."""
+    roots = own_roots(p)
+    held = {}
+    for f in foreign:
+        if not os.path.lexists(f):
+            continue
+        d = os.path.dirname(f)
+        while os.path.isdir(d) and any(d == r or inside(d, r) for r in roots):
+            held.setdefault(d, []).append(os.path.relpath(f, d))
+            d = os.path.dirname(d)
+    return held
+
+
+def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
+                     left_service=()):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
-    computer because of the skill that uninstall does not take. Run twice, it says so."""
+    computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
+    it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
     say("uninstall: what is gone, and what is kept.")
     if removed:
         say("Gone now:")
         for r in removed:
             say(f"  {r}")
-    else:
+    if unreadable:
+        say(f"Not taken: {unreadable}, so the skill cannot tell what in its folders it made, and nothing was "
+            f"removed from them: the forge's binary, the copies' caches, the settings and your keys ({p['keys']}), "
+            "and the folder of copies are still there. Nothing of the skill's runs. They are yours, to keep or "
+            "delete after you look at them.")
+    if foreign:
+        say("Not the skill's, so left where they are (yours, or put there since setup):")
+        for x in foreign:
+            say(f"  {x}")
+        held = stayed_for(p, foreign)
+        if held:
+            say("Folders of the skill's that stayed because they hold those:")
+            for d in sorted(held):
+                say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
+    if left_service:
+        say("Not taken, and still there: " + "; ".join(left_service) + ". It is switched off; look at it, and keep "
+            "or delete it as you choose.")
+    if not removed and not unreadable and not foreign and not left_service:
         say("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and the keys were "
             "already gone.")
     if linger_said:
         say(linger_said)
-    if os.path.exists(p["forge"]):
+    record_here = os.path.exists(os.path.join(p["data"], MADE_RECORD))
+    if unreadable:
+        pass
+    elif os.path.exists(p["forge"]) and record_here and set(os.listdir(p["forge"])) & FORGE_NAMES:
         say(f"Kept: the folder of copies, {p['data']} ({n} copies), with the record of what the skill did here. It "
             "is yours; delete it only when you are sure, with: uninstall --delete-copies")
-    elif os.path.exists(p["data"]):
+    elif record_here:
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
-    else:
+    elif not foreign:
         say("Kept: nothing; there is no folder of copies and no record of the skill's on this computer now.")
     left = still_here(p, st or {}, record)
     if left:
         say("Still on this computer, and not uninstall's to take:")
         for x in left:
             say(f"  {x}")
+    if foreign or left_service or unreadable:
+        say("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or delete "
+            "after you look at it.")
 
 
 def cmd_run_forge(args):
@@ -2953,6 +3600,9 @@ def cmd_run_forge(args):
 
 
 def main(argv=None):
+    # Rule 28: whatever umask it was started with (000 in some containers and job runners), nothing the tool or the
+    # forge it starts makes can be written by other accounts; the person's own read bits are left as they are.
+    os.umask(os.umask(0o022) | 0o022)
     ap = argparse.ArgumentParser(prog="mirror.py", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"Windstorm Mirror for GitHub {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -3007,6 +3657,11 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
+    lines, stop = settings_lines()
+    for line in lines:
+        say(line)
+    if stop:
+        return 2
     aside = set_aside_folder(__file__)
     if aside:
         own, line = paths()["script"], own_command(paths(), a.cmd)
