@@ -1524,6 +1524,113 @@ class G3(unittest.TestCase):
             self.assertEqual(mirror.load_json(w.p["state"], {})["go"], go, "an announcement moved the go")
             self.assertEqual(w.forge_refs("someone--r1"), before, "an announcement after the go copied")
 
+    def test_G3_14_the_fetch_stays_on_the_road_the_read_only_key_travels(self):
+        """M74 (seen 2026-11-24, a sighting in the suite): a person's git config with the common line
+        url."git@github.com:".insteadOf "https://github.com/" sent the skill's fetch over ssh, where the read-only key
+        does not travel and the person's own ssh key, with the whole account's rights, would; the sync broke and said
+        only "the fetch from GitHub failed: and the repository exists." The skill's own git now holds its road to the
+        project's full address: with either common form (an ssh:// address, and the git@host: form) the fetch, the
+        large files' fetch included, stays on HTTPS with the read-only key and ssh is never run; a line for the
+        project's whole address, which the hold cannot outrank, stops that one copy with a sentence that says why and
+        the one step that mends it; an address git cannot read stops it the same way; no transport but the scheme of
+        the address the skill set is allowed; every git call that names GitHub's address goes through one function;
+        a failed fetch is said by git's first fatal line."""
+        lfs = mirror.has_git_lfs()
+        if not lfs and os.environ.get("WSM_REQUIRE_GITEA"):
+            raise AssertionError("git lfs is needed for this test in CI")
+        data = os.urandom(150_000)
+        bin_ = tempfile.mkdtemp(prefix="wsm-ssh-")
+        self.addCleanup(shutil.rmtree, bin_, True)
+        ran = os.path.join(bin_, "ran")
+        with open(os.path.join(bin_, "ssh"), "w") as f:
+            f.write(f"#!/bin/sh\necho \"$*\" >> {ran}\necho 'ssh: connect to host 127.0.0.1 port 1: Connection refused' >&2\nexit 255\n")
+        os.chmod(os.path.join(bin_, "ssh"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bin_ + os.pathsep + path
+        try:
+            with World(self) as w:
+                w.gh.add_repo("someone", "alpha")
+                w.gh.commit("someone/alpha", {"a": b"1"})
+                if lfs:
+                    w.gh.add_repo("someone", "big")
+                    w.gh.commit("someone/big", {".gitattributes": b"*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                                                 "blob.bin": w.gh.lfs_file(data)})
+                w.key_set()
+                base = os.environ["WSM_GITHUB_GIT"].rstrip("/")
+                host = urllib.parse.urlsplit(base).hostname
+                gc = os.path.join(os.environ["HOME"], ".gitconfig")
+                for n, form in enumerate((f'[url "ssh://git@{host}:1/"]\n\tinsteadOf = {base}/\n',
+                                          f'[url "git@{host}:"]\n\tinsteadOf = {base}/\n')):
+                    with open(gc, "w") as f:
+                        f.write(form)
+                    if n:
+                        w.gh.commit("someone/alpha", {"n": str(n).encode()})
+                    rc, out = w.sync() if n else w.first_sync()
+                    self.assertEqual(rc, 0, out)
+                    self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"), form)
+                    self.assertFalse(os.path.exists(ran), f"the fetch went over ssh with {form}")
+                if lfs:
+                    key = fread(w.p["mirror_key"]).strip()
+                    req = urllib.request.Request(f"http://127.0.0.1:{w.port}/api/v1/repos/mirror/someone--big/media/blob.bin",
+                                                 headers={"Authorization": f"token {key}"})
+                    self.assertEqual(urllib.request.urlopen(req, timeout=10).read(), data)
+                # A line for the project's whole address: that copy stops, said with the one step that mends it.
+                w.gh.commit("someone/alpha", {"b": b"2"})
+                with open(gc, "w") as f:
+                    f.write(f'[url "ssh://git@{host}:1/someone/alpha.git"]\n\tinsteadOf = {base}/someone/alpha.git\n')
+                rc, out = w.sync()
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn(mirror.REWRITTEN.format(where=f"ssh://{host}"), out)
+                self.assertFalse(os.path.exists(ran), "the fetch went over ssh")
+                self.assertNotEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+                listed = subprocess.run(["git", "config", "--global", "--get-regexp", "insteadof"], capture_output=True,
+                                        text=True, env=dict(os.environ, GIT_CONFIG_GLOBAL=gc))
+                self.assertIn(f"{base}/someone/alpha.git", listed.stdout)    # the step names the line to take out
+                os.remove(gc)
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+                # An address git cannot read: no fetch, said with the step that shows the setting it stops at.
+                w.gh.commit("someone/alpha", {"c": b"3"})
+                with open(gc, "w") as f:
+                    f.write("[url\n")
+                rc, out = w.sync()
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("the address git would use for GitHub could not be read (fatal: bad config line 1", out)
+                self.assertIn("`git config --global --list` shows the git setting it stops at", out)
+                shown = subprocess.run(["git", "config", "--global", "--list"], capture_output=True, text=True,
+                                       env=dict(os.environ, GIT_CONFIG_GLOBAL=gc))
+                self.assertIn(f"bad config line 1 in file {gc}", shown.stderr)
+                os.remove(gc)
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+                self.assertFalse(os.path.exists(ran), "ssh ran")
+                # No transport but the scheme of the address the skill set (the stand-in's; GitHub's is https).
+                r = mirror.github_call(None, base + "/someone/alpha.git", "ls-remote", f"ssh://git@{host}:1/someone/alpha.git")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("transport 'ssh' not allowed", r.stderr)
+                self.assertFalse(os.path.exists(ran), "ssh ran")
+        finally:
+            os.environ["PATH"] = path
+        self.assertEqual(mirror.road("https://github.com/a/b.git")[1::2],
+                         ["url.https://github.com/a/b.git.insteadOf=https://github.com/a/b.git", "protocol.allow=never",
+                          "protocol.https.allow=always"])
+        # Every git call that names GitHub's address goes through github_call, and the key only there.
+        src = fread(SCRIPT)
+        body = re.search(r"\ndef github_call\(.*?(?=\n\S)", src, re.S).group(0)
+        rest = src.replace(body, "").replace("def github_env(", "")
+        self.assertEqual(re.findall(r"github_env\(", rest), [], "the key handed to git around github_call")
+        calls = re.findall(r"(?<!def )\bgit\((?:[^()]|\([^()]*\))*\)", rest)
+        self.assertEqual([c for c in calls if '"github"' in c or "github_git()" in c or "via=" in c], [],
+                         "a git call names GitHub's address around github_call")
+        self.assertEqual(mirror.where_to("ssh://git@127.0.0.1:1/someone/alpha.git"), "ssh://127.0.0.1")
+        self.assertEqual(mirror.where_to("git@github.com:someone/alpha.git"), "an ssh address on github.com")
+        self.assertEqual(mirror.where_to("https://x-access-token:secret@example.com/a.git"), "https://example.com")
+        self.assertEqual(mirror.git_reason("fatal: Could not read from remote repository.\n\nPlease make sure you have "
+                                           "the correct access rights\nand the repository exists.\n"),
+                         "fatal: Could not read from remote repository.")
+
     def test_G3_13_the_person_hears_it_in_their_own_terminal_and_the_go_is_their_enter(self):
         """M61, the family's rule 7 (2026-11-23: a small model reworded even a one-line block, dropped facts and
         invented a step): what the person must hear before the first copy is also printed by a command they run
