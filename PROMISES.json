@@ -213,7 +213,7 @@
    "test": "test_G9_2_self_update_swaps_whole_and_never_during_a_sync",
    "stand_in": "GitHub (a stand-in's releases and downloads)",
    "proven": "",
-   "issue": "",
+   "issue": "#100",
    "moved_why": "By the maintainer's word, 2026-11-23: a real move to a newer version needs a newer release, and there is none before 0.1.0; the tool reads releases with no key, so a private rehearsal cannot stand in. Its real proof is the first real update, 0.1.0 to 0.1.1, on a stock virtual machine, before 0.1.1 is announced. What 0.1.0 does promise of self-update is row M42.",
    "moved_by_person": "",
    "exception": ""
@@ -1061,7 +1061,7 @@
    "test": "",
    "stand_in": "the service manager's answer about the forge's process, and the process table",
    "proven": "",
-   "issue": "",
+   "issue": "#101",
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
@@ -1125,7 +1125,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#102",
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
@@ -1237,7 +1237,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#103",
    "moved_why": "By the maintainer's word, 2026-11-24: decided in 0.1.1 with sightings, not before the first release.",
    "moved_by_person": "",
    "exception": ""
@@ -1253,7 +1253,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#104",
    "moved_why": "By the maintainer's word, 2026-11-24: the README and changelog say it in 0.1.0; the restore's own words and the decision come in 0.1.1, with sightings.",
    "moved_by_person": "",
    "exception": ""
@@ -1269,7 +1269,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#105",
    "moved_why": "By the maintainer's word, 2026-11-24 (family rule 6, an exit code can say no for could not ask): written the day it was read; due 0.1.1.",
    "moved_by_person": "",
    "exception": ""
@@ -1285,7 +1285,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#106",
    "moved_why": "By the maintainer's word, 2026-11-24 (family rule 6, an exit code can say no for could not ask): written the day it was read; due 0.1.1.",
    "moved_by_person": "",
    "exception": ""
@@ -1301,7 +1301,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#107",
    "moved_why": "By the maintainer's word, 2026-11-24 (family rule 6, an exit code can say no for could not ask): written the day it was read; due 0.1.1.",
    "moved_by_person": "",
    "exception": ""
@@ -1317,7 +1317,7 @@
    "test": "",
    "stand_in": "none",
    "proven": "",
-   "issue": "",
+   "issue": "#108",
    "moved_why": "By the maintainer's word, 2026-11-24 (family rule 6, an exit code can say no for could not ask): written the day it was read; due 0.1.1.",
    "moved_by_person": "",
    "exception": ""
