@@ -2873,8 +2873,9 @@ class G6(unittest.TestCase):
             rc, out = status()
             self.assertEqual(rc, 1, out)
             down = next_sync(out)
-            self.assertTrue(down.startswith(f"next sync: {'' if mirror.system()[0] == 'darwin' else 'tried at '}{when}"), down)
-            self.assertTrue(down.endswith("; it cannot work until the forge answers"), down)
+            # The time is still to come: "will be tried at" (the owner's word, 11-24); a Mac's line names no time.
+            self.assertEqual(down, f"next sync: {'' if mirror.system()[0] == 'darwin' else 'will be tried at '}{when}; "
+                                   "it cannot work until the forge answers")
 
     def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
         """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said
@@ -3325,16 +3326,21 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = answer
 import errno, time
-end = time.monotonic() + 90
+start = time.monotonic()
+refused = 0
 while True:
     try:
         srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
         break
     except OSError as e:
-        if e.errno != errno.EADDRINUSE or time.monotonic() > end:
+        if e.errno != errno.EADDRINUSE or time.monotonic() - start > 90:
+            print("NOT LISTENING after %.1f s, %d refusal(s) of Address already in use" % (time.monotonic() - start,
+                  refused), flush=True)
             raise
+        refused += 1
         time.sleep(0.5)
-print("LISTENING", flush=True)
+print("LISTENING after %.1f s, %d refusal(s) of Address already in use" % (time.monotonic() - start, refused),
+      flush=True)
 srv.serve_forever()
 '''
 
@@ -3345,7 +3351,8 @@ class Stranger:
     as (another account, by sudo without a password), or None for this account's own. Its bind waits up to 90 s on
     "Address already in use": seen on GitHub's Mac runners at 649ee99, where the forge's port, free to this account,
     was refused to the stranger; a Mac keeps another account off a port this account's closed connections still
-    hold (TIME_WAIT), where Linux does not (our reading; the next Mac leg is its test)."""
+    hold (TIME_WAIT), where Linux does not (our reading; the next Mac leg is its test). It prints how long it waited
+    and how many refusals; the test writes that into the run's log whenever it was refused at all."""
 
     def __init__(self, port, as_account=None):
         py = "/usr/bin/python3" if as_account and os.path.exists("/usr/bin/python3") else sys.executable
@@ -3354,10 +3361,14 @@ class Stranger:
             cmd = ["sudo", "-n", "-u", as_account, *cmd]
         self.pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd="/")
         first = self.pr.stdout.readline()
-        if "LISTENING" not in first:
+        who = as_account or "this account"
+        if not first.startswith("LISTENING"):
             self.pr.kill()
-            raise AssertionError(f"the stranger ({as_account or 'this account'}) did not listen on {port}: "
+            raise AssertionError(f"the stranger ({who}) did not listen on {port}: "
                                  f"{first}{self.pr.stdout.read()[-300:]}")
+        self.refusals = int(first.split(", ")[1].split()[0])
+        if self.refusals:                       # the run's log says the wait, so a Mac leg can be read for it
+            print(f"\nG8.7: the stranger ({who}) on 127.0.0.1:{port}: {first.strip()}", file=sys.stderr, flush=True)
         self.seen = []
 
     def close(self):

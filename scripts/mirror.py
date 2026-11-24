@@ -3297,8 +3297,8 @@ def cmd_status(args):
     if tproblem:
         say("next sync: none (see the problem above)")
     elif not up:                                    # M105: a time is not a promise while the forge does not answer
-        say(f"next sync: {when if system()[0] == 'darwin' else 'tried at ' + when}; it cannot work until the forge "
-            "answers")
+        say(f"next sync: {when if system()[0] == 'darwin' else 'will be tried at ' + when}; it cannot work until "
+            "the forge answers")
     else:
         say(f"next sync: {when}")
     say(f"key scan: {n} file(s) read, " + (f"{len(found)} with a key in them" if found else "no key found"))
