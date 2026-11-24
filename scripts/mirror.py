@@ -3115,7 +3115,7 @@ def copy_state(rec, forge_refs, max_age):
     if rec.get("copying_since"):
         return False, f"a copy was stopped part-way at {rec['copying_since']}; the next sync does it again"
     if rec.get("problem"):              # the reason, and since when the copy stands still (never "current")
-        return False, rec["problem"] + (f"; not refreshed since {rec['last_good']}" if rec.get("last_good") else "")
+        return False, (f"not refreshed since {rec['last_good']}; " if rec.get("last_good") else "") + rec["problem"]
     if not rec.get("last_good"):
         return False, "never copied yet"
     if time.time() - epoch_of(rec["last_good"]) > max_age:

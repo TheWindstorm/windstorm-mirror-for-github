@@ -3013,14 +3013,49 @@ class G6(unittest.TestCase):
                 self.assertIn("copies: 1 on GitHub, 1 copied, 1 behind, 0 unreadable", out, why)
                 line = [x for x in out.splitlines() if x.startswith("problem: someone/alpha: ")]
                 self.assertEqual(len(line), 1, (why, out))
-                self.assertIn("cannot refresh: ", line[0], why)
-                self.assertTrue(line[0].endswith(f"; not refreshed since {good}"), (why, line[0]))
+                self.assertTrue(line[0].startswith(f"problem: someone/alpha: not refreshed since {good}; cannot refresh: "),
+                                (why, line[0]))
                 self.assertIn(f"last good sync: {good_sync}", out, why)
                 self.assertNotIn("0 behind", out, why)
                 st = mirror.load_json(w.p["state"], {})
                 self.assertEqual(st["last_good_sync"], good_sync, why)
                 self.assertEqual(next(iter(st["repos"].values()))["last_good"], good, why)
                 self.assertFalse(mirror.copy_state(next(iter(st["repos"].values())), w.forge_refs("someone--alpha"), 10 ** 9)[0])
+
+    def test_G6_2_a_reason_that_ends_in_a_command_ends_its_status_line_with_it(self):
+        """The family's rule 31 (2026-11-24, found on reading the strings commit): status says a copy that stopped
+        for a git setting with the time of its last good refresh; the command its reason names stands alone on the
+        line after it and ends that line, so a shell given the line to its end runs nothing after the command. Both
+        reasons: a line for the project's whole address, and a setting git cannot read."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            good = next(iter(mirror.load_json(w.p["state"], {})["repos"].values()))["last_good"]
+            base = os.environ["WSM_GITHUB_GIT"].rstrip("/")
+            host = urllib.parse.urlsplit(base).hostname
+            gc = os.path.join(os.environ["HOME"], ".gitconfig")
+            for n, (form, cmd) in enumerate((
+                    (f'[url "ssh://git@{host}:1/someone/alpha.git"]\n\tinsteadOf = {base}/someone/alpha.git\n',
+                     "git config --global --get-regexp insteadof"),
+                    ("[url\n", "git config --global --list"))):
+                w.gh.commit("someone/alpha", {"n": str(n).encode()})
+                with open(gc, "w") as f:
+                    f.write(form)
+                try:
+                    rc, out = w.sync()
+                    self.assertNotEqual(rc, 0, out)
+                finally:
+                    os.remove(gc)             # status prints the reason the sync stored (a setting git cannot read
+                rc, out = status()            # would stop status's own read of the forge, a line with no command)
+                self.assertEqual(rc, 1, out)
+                lines = out.splitlines()
+                at = [i for i, x in enumerate(lines) if x.startswith("problem: someone/alpha: ")]
+                self.assertEqual(len(at), 1, out)
+                self.assertTrue(lines[at[0]].startswith(f"problem: someone/alpha: not refreshed since {good}; "), out)
+                self.assertTrue(lines[at[0]].endswith(":"), lines[at[0]])
+                self.assertEqual(lines[at[0] + 1], "    " + cmd, out)
 
     def test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current(self):
         fresh = mirror.now_utc()
@@ -5691,13 +5726,21 @@ class G9(unittest.TestCase):
             with open(reg, "w") as f:
                 json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [ours]}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
-            self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose,
-                          out.splitlines())
+            self.assertIn("\n  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose + "\n",
+                          out)
+            if mirror.system()[0] != "darwin":
+                # The family's rule 31 (iv): the catalog's name is Claude Code's list's, not the tool's, so the one
+                # command that carries it is quoted for the shell, alone on its line.
+                with open(reg, "w") as f:
+                    json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@my catalog": [ours]}}, f)
+                out = quiet(mirror.main, ["uninstall"])[1]
+                self.assertIn(f"Its command for this plugin:\n      claude plugin uninstall '{mirror.PLUGIN}@my catalog'\n",
+                              out)
             with open(reg, "w") as f:
                 f.write("{not a list")
             out = quiet(mirror.main, ["uninstall"])[1]
-            self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
-                          f"still has them (its list of plugins, {reg}, could not be read). " + whose, out.splitlines())
+            self.assertIn("\n  Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
+                          f"still has them (its list of plugins, {reg}, could not be read). " + whose + "\n", out)
             with open(reg, "w") as f:
                 json.dump({"version": 2, "plugins": {}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
@@ -5722,8 +5765,8 @@ class G9(unittest.TestCase):
                     rc, out = quiet(mirror.main, ["uninstall"])
                     self.assertEqual(rc, 0, out)
                     self.assertNotIn(ver, out, f"a version folder said (there={there}, list kept={keep_list})")
-                    self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose,
-                                  out.splitlines(), f"there={there}, list kept={keep_list}")
+                    self.assertIn("\n  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose
+                                  + "\n", out, f"there={there}, list kept={keep_list}")
                     self.assertNotIn("the folder the skill was downloaded into (a copy", out)
             st.pop("plugin_registry")
             st.pop("plugin_catalog")
