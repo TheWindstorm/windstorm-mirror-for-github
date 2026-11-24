@@ -4307,7 +4307,9 @@ class G9(unittest.TestCase):
             self.assertIn(f"Waiting: a sync is running (process {os.getpid()}); uninstall goes on as soon as it ends", out)
             lines = out.strip().splitlines()
             kept = lines.index(f"Kept: the folder of copies, {p['data']} (2 copies), with the record of what the skill "
-                               "did here. It is yours; delete it only when you are sure, with: uninstall --delete-copies")
+                               "did here. It is yours; delete it only when you are sure, with: uninstall --delete-copies. "
+                               "Setup run again later finds this folder and goes on from it: the mirror account gets a "
+                               "new key, and your Gitea account and its password are left as they are.")
             self.assertEqual(lines[kept + 1], "Still on this computer, and not uninstall's to take:")
             self.assertTrue(all(x.startswith("  ") for x in lines[kept + 2:]), lines[kept:])
             self.assertIn("Gone now:", lines)
@@ -4358,6 +4360,70 @@ class G9(unittest.TestCase):
             self.assertIn("keep running", off)
             self.assertIn("python3 -I ~/.local/share/windstorm-mirror/mirror.py uninstall", off)
             self.assertIn("needs nothing else installed", off)
+
+    def test_G9_13_the_way_back_in_uninstall_then_setup_and_the_tool_works(self):
+        """M84 (G9.13): after an uninstall that kept the copies, setup again makes the tool work. The kept record still
+        names the mirror account, and its key went with uninstall: setup gives it a new key (a new name, since Gitea
+        refuses one the account holds), leaves the person's Gitea account and password as they are and says so, and
+        status and a sync then work. Seen on a real machine 2026-11-24: setup answered 0, then every command said
+        "Run setup first." for ever."""
+        with World(self) as w:
+            G7.world_with_copies(self, w)
+            p = w.p
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("Setup run again later finds this folder and goes on from it", out)
+            self.assertFalse(os.path.exists(p["mirror_key"]))
+            self.assertEqual(mirror.load_json(p["state"], {}).get("mirror_user"), mirror.MIRROR_USER)
+            rc, out = w.home.setup("--dry-run")
+            self.assertIn("a new key of its own", out)
+            self.assertIn("as it is, from before: setup does not change it or its password", out)
+            w.home.place_gitea()
+            rc, out = w.home.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.exists(p["mirror_key"]), out)
+            self.assertIn("is there from before: setup did not change it or its password", out)
+            self.assertIn("there from before; it has a new key", out)
+            self.assertFalse(os.path.exists(p["password"]), "setup wrote a password the person's account does not have")
+            self.assertEqual(mirror.set_up_misses(p, mirror.load_json(p["state"], {})), "")
+            rc, out = quiet(mirror.main, ["status"])
+            self.assertNotIn("Run setup first", out)
+            self.assertIn("copies: 2 on GitHub, 2 copied", out)
+            w.key_set()
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("Run setup first", out)
+            code, repos = w.forge_get("/repos/search?limit=50")
+            self.assertEqual(code, 200)
+            self.assertEqual(len(repos["data"]), 2, "the new key reads the copies kept from before")
+
+    def test_G9_13_from_the_cut_shape_setup_makes_the_key_or_does_not_say_it_is_set_up(self):
+        """M84 (G9.13): from the shape a cut uninstall leaves (the settings and keys gone, the record kept), setup makes
+        the key; and setup never says it is set up, nor answers 0, unless the commands' own check (the port and the
+        key) passes: a key that did not land stops it before anything is started."""
+        with Home() as h:
+            p = h.place_gitea()
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            shutil.rmtree(p["conf"])                    # the cut shape: settings and keys gone, the record kept
+            self.assertTrue(mirror.load_json(p["state"], {}).get("mirror_user"))
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(mirror.set_up_misses(p, mirror.load_json(p["state"], {})), "")
+            os.remove(p["mirror_key"])
+            saved = mirror.write_private
+            mirror.write_private = lambda path, text: None if path == p["mirror_key"] else saved(path, text)
+            try:
+                n = len(h.calls)
+                rc, out = h.setup()
+            finally:
+                mirror.write_private = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("Setup did not finish: the mirror account's key is not in place", out)
+            self.assertNotIn("The forge runs as your own service", out)
+            started = [c for c in h.calls[n:] if c[0] in ("systemctl", "launchctl")
+                       and {"start", "enable", "daemon-reload", "bootstrap", "load"} & set(c)]
+            self.assertFalse(started, "setup installed or started a service after its own check failed")
 
 SKILL = os.path.join(ROOT, "skills", "mirror", "SKILL.md")
 
