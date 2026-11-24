@@ -574,7 +574,11 @@ class G1(unittest.TestCase):
                     rc, out = h.setup(*args)
                     self.assertEqual(rc, 2, out)
                     self.assertIn("git is not installed on this computer", out)
-                    self.assertIn("sudo apt update && sudo apt install git", out)
+                    self.assertIn(mirror.install_words("git"), out)               # this computer's own way (G1.14)
+                    if mirror.os_id() == "ubuntu":
+                        self.assertIn("sudo apt update && sudo apt install git", out)
+                    elif mirror.os_id() == "mac":
+                        self.assertIn("xcode-select --install is Apple's command", out)
                     self.assertIn("Nothing was changed", out)
                 self.assertFalse(os.path.exists(mirror.paths()["app_ini"]), "setup wrote settings with no git")
             finally:
