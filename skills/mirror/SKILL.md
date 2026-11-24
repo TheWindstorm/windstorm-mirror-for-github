@@ -22,6 +22,16 @@ marked **Person** and is described under "The person's steps": say what is writt
 that is the person's is never done another way: if a program is missing, or the computer refuses something, say
 what the tool printed and wait; do not install, change or work around anything yourself.
 
+**A stop that comes back.** When a command stops and says to run it again, run it again once, after the wait it
+names if it names one. If that second run stops with the same words (a count of seconds aside), it is not a wait: do
+not run it a third time, and do not work round it by hand by removing, stopping or changing anything yourself. Show
+the person the line, and ask them to report it at
+https://github.com/TheWindstorm/windstorm-mirror-for-github/issues; they may leave out their account's name where a
+path holds it. When the line names something that must change first (for example, a login of the person's own to
+this computer), that is the step: do it if you can, or show the person the line; it is not a fault to report. One
+such stop has a way out written in the README: on Linux, uninstall saying "Not now" at every run after one of the
+mirror's service files was removed by hand.
+
 **Lines for the person.** Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the
 person. Give them the whole block, every line from 1 of N to N of N, word for word and in that order, before any
 words of your own. Never shorten, merge, reword or leave one out; your own words come after the block.

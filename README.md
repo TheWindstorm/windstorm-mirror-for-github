@@ -240,6 +240,12 @@ with no key; a sync and a restore on a Mac are not seen yet.
     version or environment. If that program is moved or removed, the forge and the sync stop: `status` says the forge
     does not answer, with its one step, setup again, which writes the python3 it is run with. Seen on Linux with
     a python3 taken away; not seen on a Mac.
+  - a line that says to run the command again can come back with the same words at the second run, and the tool does
+    not yet say what to do then. It is then not a wait: do not run it a third time, and do not work round it by
+    hand; report the line at https://github.com/TheWindstorm/windstorm-mirror-for-github/issues (you may leave out
+    your account's name where a path holds it). When the line names something that must change first, such as a
+    login of your own to this computer, that is the step, not a fault to report. For uninstall on Linux after a
+    service file was removed by hand, the way out is in the next line;
   - On Linux, if one of the mirror's service files in ~/.config/systemd/user was removed by hand, uninstall says
     "Not now" at every run, and running it again does not help (the fix is due in 0.1.1). The way out, seen on a
     stock Ubuntu 24.04: run `systemctl --user stop windstorm-mirror-forge.service windstorm-mirror-sync.timer`, then
