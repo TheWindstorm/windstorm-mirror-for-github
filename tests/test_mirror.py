@@ -2972,7 +2972,10 @@ class G6(unittest.TestCase):
             self.assertEqual(lines[at], "copies: 3 on GitHub, 3 copied, 3 behind, 0 unreadable")
             problems = [x for x in lines[:at] if x.startswith("problem:")]
             self.assertTrue(any("someone/a: last good refresh" in x and "older than twice the sync interval" in x for x in problems))
-            self.assertTrue(any(x.startswith("problem: someone/b: cannot refresh: the fetch from GitHub failed") for x in problems))
+            b_good = next(r for r in st["repos"].values() if r["full_name"] == "someone/b")["last_good"]
+            self.assertTrue(b_good, st)              # b had a good refresh, so its line says since when first (G6.2)
+            self.assertTrue(any(x.startswith(f"problem: someone/b: not refreshed since {b_good}; cannot refresh: the "
+                                             "fetch from GitHub failed") for x in problems), out)
             self.assertIn("problem: someone/c: the copy's branches and tags differ from what GitHub last showed", problems)
 
     def test_G6_2_a_refused_key_reads_as_not_refreshed_since_the_last_good_one(self):
