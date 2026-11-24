@@ -12,7 +12,7 @@ Say this to your AI agent (Claude Code, or any agent that can run commands on yo
 
 > Set up https://github.com/TheWindstorm/windstorm-mirror-for-github on this computer.
 
-**If you are the agent:** clone this release with the line below, read `skills/mirror/SKILL.md` and follow its steps in order.
+**If you are the agent:** clone this release with the line below first, then read `skills/mirror/SKILL.md` in that clone, the file itself, and follow its steps in order. A web page or a fetch tool's summary of it is not the file: a summary leaves out lines the person must get word for word.
 Stop at each step marked **Person**, say what it gives you to say, and wait for the person. Do nothing that it
 does not tell you to do.
 
