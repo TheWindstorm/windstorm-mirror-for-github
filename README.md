@@ -52,6 +52,9 @@ automatic-login account, `fdesetup status`), both read-only, and Python itself t
 Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
 forge on this computer; it still carries the mirror's calls to GitHub.
 
+After `restore --to`, check the new home yourself: the restore pushes from the mirror's own copy, so a
+pre-push hook of yours does not check that push.
+
 ## What setup does
 
 `setup --dry-run` shows all of this first, and changes nothing.
