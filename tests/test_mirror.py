@@ -5595,6 +5595,9 @@ class G6Words(unittest.TestCase):
             return " ".join(x.value for x in ast.walk(n) if isinstance(x, ast.Constant) and isinstance(x.value, str))
 
         funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        # G8.7: a DoorShut's words, and setup's floor, are door_line's: checked where they are built, below
+        door_names = {h.name for h in ast.walk(tree) if isinstance(h, ast.ExceptHandler) and h.name
+                      and getattr(h.type, "id", None) == "DoorShut"} | {"floor", "shut"}
         lacking, built, seen = [], set(), 0
         for node in ast.walk(tree):
             for field in ("body", "orelse", "finalbody"):
@@ -5616,12 +5619,15 @@ class G6Words(unittest.TestCase):
                         elif (isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr == "replace"
                               and isinstance(x.func.value, ast.Name) and x.func.value.id == "why"):
                             mine.add("check_key")             # say(why.replace(key, ...)): the key check's words
-                    if isinstance(arg, ast.Name) and not arg.id.isupper():
+                    if any(isinstance(x, ast.Name) and x.id in door_names for x in ast.walk(arg)):
+                        mine.add("door_line")
+                    elif isinstance(arg, ast.Name) and not arg.id.isupper():
                         mine.add(f"<{arg.id}>")
                     if words(arg).strip() == "STOPPED:":
                         mine.add("HardStop")                  # says a HardStop's words: every raise is checked
                     built |= mine
-                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>"}:
+                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>",
+                               "door_line"}:
                         continue                              # checked below, where the words are built
                     if not self.NEXT.search(words(arg)):
                         lacking.append((a.lineno, words(arg)[:90]))
@@ -5636,6 +5642,10 @@ class G6Words(unittest.TestCase):
         self.assertTrue(self.NEXT.search(mirror.LINGER_CHOICE))
         self.assertTrue(self.NEXT.search(mirror.git_missing_sentence()))
         self.assertTrue(self.NEXT.search(words(funcs["git_out_of_service_reach"])))
+        for kind, never in (("other", False), ("unread", True), ("unread", False)):    # G8.7, each of its three
+            line = mirror.door_line(kind, 21000, "why", never)
+            self.assertTrue(re.search(r"\. (Run setup|Run status again|The mirror needs that read to run; the README)",
+                                      line), line)
         for fn in ("other_install_stop", "home_is_not_ours"):          # G9.12: each stop it returns, one by one
             for r in ast.walk(funcs[fn]):
                 if isinstance(r, ast.Return) and r.value is not None and words(r.value):
@@ -5648,7 +5658,7 @@ class G6Words(unittest.TestCase):
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
                 "own_command"}                                                   # (the command to run, as it runs)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
-                                         "<other>"},
+                                         "<other>", "door_line"},
                          set(),
                          "a stop line is built from something this test does not check")
 
