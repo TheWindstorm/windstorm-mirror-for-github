@@ -5249,13 +5249,15 @@ class G9(unittest.TestCase):
             st.pop("setup_from", None)
             st["plugin_registry"], st["plugin_catalog"] = reg, "thewindstorm"
             mirror.save_state(p, st)
+            ours = {"scope": "user", "version": "0.1.0",
+                    "installPath": os.path.join(os.path.dirname(reg), "cache", "thewindstorm", mirror.PLUGIN, "0.1.0")}
             whose = ("They are Claude Code's. Claude Code's own "
                      + (f"`claude plugin uninstall {mirror.PLUGIN}@thewindstorm`" if mirror.system()[0] != "darwin"
                         else "plugin uninstall")
                      + " takes this plugin off Claude Code's list at once; its folder in Claude Code's cache stays, and "
                        "Claude Code's documentation says it removes that folder 14 days later. Nothing runs from them now.")
             with open(reg, "w") as f:
-                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [{"scope": "user"}]}}, f)
+                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [ours]}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
             self.assertIn("  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose,
                           out.splitlines())
@@ -5273,7 +5275,7 @@ class G9(unittest.TestCase):
             # and the path itself is never said, there or gone.
             ver = os.path.join(os.path.dirname(reg), "cache", "thewindstorm", mirror.PLUGIN, "0.0.9")
             with open(reg, "w") as f:
-                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [{"scope": "user"}]}}, f)
+                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [ours]}}, f)
             for there in (True, False):
                 if there:
                     os.makedirs(os.path.join(ver, "scripts"))
@@ -5408,11 +5410,12 @@ class G9(unittest.TestCase):
                             "from them now.", lines)
 
     def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
-        """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never
-        run ours. Claude Code empties the plugin's row in its list of installed plugins and marks the plugin's folder
-        `.orphaned_at`. The mirror is the thing the person set up, so it goes on, and status and each sync say the
-        plugin was removed, with the one command that takes the mirror off; a list that could not be read is never
-        'removed'. Nothing runs from a set-aside folder."""
+        """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never run
+        ours. Claude Code takes the plugin's key out of its list of installed plugins and marks the plugin's folders
+        `.orphaned_at` (seen 2026-11-24, Claude Code 2.1.331: no key with an empty list is left). The mirror is the
+        thing the person set up, so it goes on, and status and each sync say the plugin was removed, with the one
+        command that takes the mirror off; a list that could not be read is never 'removed'.
+        Nothing runs from a set-aside folder."""
         cc = tempfile.mkdtemp(prefix="wsm-cc-")
         TEMPS.append(cc)
         ver = os.path.join(cc, "plugins", "cache", "thewindstorm", mirror.PLUGIN, "0.0.0")
@@ -5430,9 +5433,16 @@ class G9(unittest.TestCase):
         registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [row]}})
         st = {"plugin_registry": reg}
         self.assertFalse(mirror.plugin_removed(st), "read, and it names the plugin")
-        for gone in ({mirror.PLUGIN + "@thewindstorm": []}, {"other@x": [row]}, {}):
+        for gone in ({"other@x": [row]}, {}):
             registry({"version": 2, "plugins": gone})
             self.assertTrue(mirror.plugin_removed(st), gone)
+        # The family's rule 29 (e), as seen 2026-11-24: a key whose list is empty, or a row with no installPath, was
+        # never seen; it is "could not be read", never "removed" and never "installed".
+        key = mirror.PLUGIN + "@thewindstorm"
+        for odd in ({key: []}, {key: [{"scope": "user", "version": "0.0.0"}]}, {key: [row, {"scope": "user"}]},
+                    {key: [{"scope": "user", "installPath": ""}]}, {key: row}, {key: ["x"]}):
+            registry({"version": 2, "plugins": odd})
+            self.assertEqual(mirror.plugin_read(st), (None, None), f"never seen, so could not be read: {odd}")
         for unread in ("", "{not json", json.dumps({"version": 2}), json.dumps({"version": 2, "plugins": []})):
             registry(unread)
             self.assertFalse(mirror.plugin_removed(st), f"could not be read, never removed: {unread!r}")
@@ -5480,6 +5490,9 @@ class G9(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertNotIn("plugin:", out)
             registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": []}})
+            rc, out = status()
+            self.assertNotIn("plugin:", out, "a key with an empty list is could not be read, never removed")
+            registry({"version": 2, "plugins": {}})
             rc, out = status()
             self.assertEqual(rc, 0, out)
             self.assertIn(said, out.splitlines())

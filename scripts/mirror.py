@@ -2678,8 +2678,17 @@ def plugin_read(st):
         return None, None
     if not isinstance(rows, dict):
         return None, None
-    keys = sorted(k for k, v in rows.items() if isinstance(k, str) and k.split("@")[0] == PLUGIN and v)
-    return (True, keys[0]) if keys else (False, None)
+    ours = sorted((k, v) for k, v in rows.items() if isinstance(k, str) and k.split("@")[0] == PLUGIN)
+    if not ours:
+        return False, None
+    # The family's rule 29 (e), as seen 2026-11-24 (Claude Code 2.1.331): an install or an update leaves one row
+    # with its installPath; an uninstall takes the key away. A key whose list is empty, or a row with no
+    # installPath, was never seen: it is "could not be read", never "removed" and never "installed".
+    for k, v in ours:
+        if isinstance(v, list) and v and all(isinstance(r, dict) and isinstance(r.get("installPath"), str)
+                                             and r["installPath"] for r in v):
+            return True, k
+    return None, None
 
 
 def plugin_listed(st):
