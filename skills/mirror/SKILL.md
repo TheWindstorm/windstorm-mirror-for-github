@@ -27,10 +27,12 @@ names if it names one. If that second run stops with the same words (a count of 
 not run it a third time, and do not work round it by hand by removing, stopping or changing anything yourself. Show
 the person the line, and ask them to report it at
 https://github.com/TheWindstorm/windstorm-mirror-for-github/issues; they may leave out their account's name where a
-path holds it. When the line names something that must change first (for example, a login of the person's own to
-this computer), that is the step: do it if you can, or show the person the line; it is not a fault to report. One
-such stop has a way out written in the README: on Linux, uninstall saying "Not now" at every run after one of the
-mirror's service files was removed by hand.
+path holds it. The line goes whole, in your own reply for the person to copy, or from a file given to gh with
+--body-file; never inside a shell's double quotes, where a shell would run a command the line names. When the line
+names something that must change first (for example, a login of the person's own to this computer), that is the
+step: do it if you can, or show the person the line; it is not a fault to report. One such stop has a way out
+written in the README: on Linux, uninstall saying "Not now" at every run after one of the mirror's service files was
+removed by hand.
 
 **Lines for the person.** Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the
 person. Give them the whole block, every line from 1 of N to N of N, word for word and in that order, before any
