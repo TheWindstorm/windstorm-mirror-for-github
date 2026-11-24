@@ -2542,7 +2542,8 @@ def cmd_setup(args):
         save_state(p, st)
     # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
     # person must hear before the go is in the announcement's block, the one they say go to.
-    for line in ("After a restart it starts by itself." if back else "", note, lfs_missing() if not has_git_lfs() else "",
+    for line in ("After a restart it starts by itself." if back and ok else "", note,
+                 lfs_missing() if not has_git_lfs() else "",
                  *open_folders(p, close=True), PRIVATE_AS_THIS_COMPUTER):
         if line:
             say(line)
@@ -3187,13 +3188,40 @@ def setup_from(p, args):
     ok, why = install_service(p)
     if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
         ok, why = False, "the sync timer could not be switched on"
-    n = sum(1 for r in (st.get("repos") or {}).values() if r.get("forge_id"))
+    # M88 (G7.4, rule 24): what restore says is what it read. The person acts on these lines after losing a
+    # computer, so "back" and "runs" are said only when the forge itself answered and held the copies.
+    up = ok and wait_forge(port, seconds=SETUP_WAIT)
+    ids = [r["forge_id"] for r in (st.get("repos") or {}).values() if r.get("forge_id")]
+    n = len(ids)
     owners = ", ".join(sorted((load_json(p["settings"], {}).get("owners") or {}))) or "(none)"
-    say(f"Restored from {os.path.basename(src)}: {n} copies are back, on http://127.0.0.1:{port}/ (this computer only).")
+    name = os.path.basename(src)
+    held = unread = 0
+    if up:
+        forge = Forge(p, st)
+        for rid in ids:
+            try:
+                held += forge.by_id(rid) is not None
+            except CouldNotRead:
+                unread += 1
+        if held == n:
+            say(f"Restored from {name}: {n} copies are back, on http://127.0.0.1:{port}/ (this computer only), "
+                "counted in the forge itself.")
+        else:
+            say(f"Restored from {name}: the forge holds {held} of the {n} copies in the restored record"
+                + (f", and {unread} could not be read" if unread else "") + f", on http://127.0.0.1:{port}/ (this "
+                "computer only). Run status: it names each copy that is not there.")
+    else:
+        say(f"Restored from {name}: {n} copies are in the restored data; the forge has not answered, so they are not "
+            "counted there yet.")
     say(f"Your GitHub keys are not in a backup. To keep the copies current, make new keys and run `key set` for "
         f"each owner: {owners}. Until then, `status` shows them behind.")
     say("Your Gitea password is the one it had on the old computer.")
-    say(f"The forge runs as your own service." if ok else f"The forge's service did not start: {why}")
+    if not ok:
+        say(f"The forge's service did not start: {why}")
+    elif up:
+        say("The forge runs as your own service.")
+    else:
+        say(not_answering_yet(p, port, SETUP_WAIT))
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -3201,11 +3229,11 @@ def setup_from(p, args):
         st.pop("linger_by_setup", None)              # the old computer's record means nothing here
         back, note = linger_step(st, allow=not getattr(args, "no_linger", False))
         save_state(p, st)
-    if back:
+    if back and ok:                     # never after a service that did not start (M88)
         say("After a restart it starts by itself.")
     if note:
         say(note)
-    return 0 if ok else 1
+    return 0 if up and held == n else 1       # 1: the forge did not answer, or it does not hold every copy
 
 
 # ---------------------------------------------------------------- G9 upgrades and uninstall
