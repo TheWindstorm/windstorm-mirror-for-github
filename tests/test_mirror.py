@@ -2989,11 +2989,13 @@ class G7(unittest.TestCase):
             w.gh.stop()                                # the new computer: GitHub out of reach, only the file
             with Home(linger="yes") as h2:
                 h2.place_gitea()
-                rc, out = h2.setup("--from", backup)
+                rc, out = restore_with_the_forge_answering(h2, backup)
                 self.assertEqual(rc, 0, out)
-                self.assertIn("2 copies are back", out)
+                self.assertIn("2 copies are back, on http://127.0.0.1:", out)
+                self.assertIn("counted in the forge itself", out)
+                self.assertIn("The forge runs as your own service.", out)
+                self.assertIn("After a restart it starts by itself.", out)
                 self.assertIn("make new keys and run `key set` for each owner: someone", out)
-                port, _ = h2.start_forge()
                 rc, out = quiet(mirror.main, ["restore", "--check"])
                 self.assertEqual(rc, 0, out)
                 self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s)", out)
@@ -3006,6 +3008,81 @@ class G7(unittest.TestCase):
                 rc, out = h2.setup("--from", backup)
                 self.assertEqual(rc, 2)
                 self.assertIn("already has a forge", out)
+
+    def test_G7_4_restore_says_back_and_runs_only_from_what_the_forge_answered(self):
+        """M88 (rule 24): restore's lines are read from the forge at that moment. Each thing is taken away in turn
+        while the restored record stays: the forge that does not answer, a record naming more copies than the forge
+        holds, and a service that could not be installed."""
+        with World(self) as w:
+            self.world_with_copies(w)
+            folder = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(folder)
+            self.assertEqual(quiet(mirror.main, ["backup", folder])[0], 0)
+            backup = os.path.join(folder, os.listdir(folder)[0])
+            w.gh.stop()
+            # 1. The data is in place and the forge does not answer: never "back", never "runs", not 0.
+            with Home(linger="yes") as h2:
+                h2.place_gitea()
+                rc, out = h2.setup("--from", backup)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("2 copies are in the restored data; the forge has not answered, so they are not counted "
+                              "there yet.", out)
+                self.assertNotIn("are back", out)
+                self.assertNotIn("The forge runs as your own service.", out)
+                self.assertIn("it was not answering yet", out)
+            # 2. The record names a copy the forge does not hold: both numbers and "Run status", not 0.
+            more = os.path.join(folder, "more-in-the-record.tar")
+            work = tempfile.mkdtemp(prefix="wsm-bk-more-")
+            TEMPS.append(work)
+            with tarfile.open(backup) as tf:
+                tf.extractall(work, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+            stp = os.path.join(work, "skill", "state.json")
+            st = json.loads(fread(stp))
+            st["repos"]["999999"] = {"full_name": "someone/gone-from-the-forge", "forge_id": 987654}
+            with open(stp, "w", encoding="utf-8") as fh:
+                json.dump(st, fh)
+            with tarfile.open(more, "w") as tf:
+                for x in sorted(os.listdir(work)):
+                    tf.add(os.path.join(work, x), arcname=x)
+            with Home(linger="yes") as h3:
+                h3.place_gitea()
+                rc, out = restore_with_the_forge_answering(h3, more)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("the forge holds 2 of the 3 copies in the restored record", out)
+                self.assertIn("Run status: it names each copy that is not there.", out)
+                self.assertNotIn("are back", out)
+                self.assertIn("The forge runs as your own service.", out)
+            # 3. The service could not be installed: no "starts by itself" after it, in restore and in setup.
+            with Home(linger="yes", service_ok=False) as h4:
+                h4.place_gitea()
+                rc, out = h4.setup("--from", backup)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The forge's service did not start", out)
+                self.assertNotIn("After a restart it starts by itself.", out)
+                self.assertNotIn("are back", out)
+            with Home(linger="yes", service_ok=False) as h5:
+                h5.place_gitea()
+                rc, out = h5.setup()
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The forge's service did not start", out)
+                self.assertNotIn("After a restart it starts by itself.", out)
+
+
+def restore_with_the_forge_answering(home, backup):
+    """setup --from with the stand-in service start followed by the real forge, and restore given time to read it:
+    the road where the forge answers, as on a person's computer."""
+    real, wait = mirror.install_service, mirror.SETUP_WAIT
+
+    def install_and_start(p):
+        r = real(p)
+        if r[0]:
+            home.start_forge()
+        return r
+    mirror.install_service, mirror.SETUP_WAIT = install_and_start, 30
+    try:
+        return home.setup("--from", backup)
+    finally:
+        mirror.install_service, mirror.SETUP_WAIT = real, wait
 
 
 class G8(unittest.TestCase):
