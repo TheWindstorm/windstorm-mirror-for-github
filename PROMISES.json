@@ -1689,6 +1689,38 @@
    "moved_why": "",
    "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: of the 47 lines the tool can print that tell the person to run a command again, five do not say what to do when the same line comes back. Setup's key: \"Gitea did not give the mirror account its key; nothing was printed. Run setup again.\", Gitea's own words dropped; a second run differs in that the account is there and the key's name carries a time stamp. Setup's port move: \"... Run setup again in a minute.\", shown only when another program certainly holds the port and a forge of this folder may still run after its service was stopped; in that state status's port line says to run setup, which stops there again. Uninstall on a Mac: \"Not now: launchd still had ... / whether launchd let go of ... could not be read ... Run uninstall again in a minute\". Uninstall on Linux other than the no-user-bus branch: \"Not now: systemd still had ... / whether systemd stopped ... could not be read ... Run uninstall again in a minute\"; a service file removed by hand has the README's way out. Setup's launchd lines on a Mac: \"... Run setup again in a minute, and if it stops here again, run status\", where status says nothing of the forge's job, and of the sync's job either nothing or \"the sync timer is not loaded\", with no step. On a stock Ubuntu 24.04 set to German, the no-user-bus branch still matched and named its own step. 0.1.0 says, in the skill's text and the README, that a stop coming back with the same words is not a wait: show the line and report it; a line that names what must change first gives that step instead. Not seen: any of the five coming back on a real computer.",
    "promise": "Every stop that tells the person to run a command again names, the first time it is printed, what a second run can find different and what the person does if the same line comes back. By line: setup's key from Gitea shows Gitea's own reason, never dropped; status's port line never sends a person to a setup that stops at the port move, and that stop names what must change (a forge of this folder started by hand has ended, or the process list can be read); uninstall on a Mac, and on Linux other than the no-user-bus branch, gives a lasting unread answer its own words and a way out the tool prints; setup's launchd lines no longer send the person to status unless status says something they can act on for both jobs, and the unread form no longer differs from the still-loaded one by \"in a minute\" alone. Proven two ways: for each of the five, a test world where the second run meets the same state, with both printings read; and a reader over every line the tool can print that tells the person to run a command again, failing on one without both sentences, so a new one cannot be added bare. When every such line carries its own second sentence, the skill's paragraph \"A stop that comes back\" and the README's line on it are reworded or taken out in the same release, so the same thing is not said in two places."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#138",
+   "id": "M112",
+   "codon": "G1.21",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "a stand-in service manager whose stop answers only after a time the test sets",
+   "moved_why": "",
+   "seen": "2026-11-24, on a stock Ubuntu 24.04 virtual machine (systemd 255), 0.1.0's tool, no key: with a stop setting of the person's own for the forge's service (a drop-in whose stop command never ends, with no stop timeout), uninstall printed nothing for 17 minutes 17 seconds. Its first call, systemctl --user disable --now for the forge's service and the sync's timer, waits for the stop to end, and the tool gives that call no time limit, so its own 30 s read and its \"Not now\" were never reached. When the stop ended, uninstall read the unit as failed, took that as stopped, removed what setup made and ended 0. Read, not seen: the user service manager's default stop timeout is 1 min 30 s, and the service as setup writes it sets none, so with the service as written systemd ends such a stop at 90 s. Not seen: the same on a Mac. 0.1.0 says it among the README's known lines.",
+   "promise": "Every call the tool makes to another program has a bound. A stop of a service or a job is asked without waiting, or under a timeout, so the tool's own read of its state is what bounds uninstall. Before a wait, the tool says what it waits for and for how long at most."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#139",
+   "id": "M113",
+   "codon": "G6.13",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "moved_why": "",
+   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: some commands the person or their administrator is asked to run are written inside a sentence, not on a line of their own: the lingering line, sudo loginctl enable-linger <user> (three places); the install lines for git and git lfs (sudo apt update && sudo apt install git, the same for git-lfs, and sudo dnf install for Fedora); chmod go-w <path> and chmod g-w <path> (five places); loginctl disable-linger <user>; uninstall --delete-copies (two places). None carries a backtick or a dollar-parenthesis, so nothing runs them when such a line is quoted. In 0.1.0 the commands that were set between backticks were taken out of them, and the whole ones (the two git config lines, Claude Code's plugin uninstall) stand on a line of their own.",
+   "promise": "Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write. A test reads every line the tool can print and fails on a command for the person written inside a sentence."
   }
  ],
  "declined": []

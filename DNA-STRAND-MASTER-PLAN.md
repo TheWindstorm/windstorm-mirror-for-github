@@ -145,6 +145,7 @@ Commands: `setup`, `key set <owner>`, `sync`, `status`, `restore`, `backup`, `up
 | G1.16 | On a Mac, setup run in an account that is not logged in at the Mac's screen (over ssh, say) loads nothing and says three things in the person's words: this account is not logged in at this Mac's screen; the forge starts once it is; log in there, then run setup again. No line for a person carries launchctl's words (M58). | `test_G1_16_on_a_mac_with_no_login_session_setup_says_so_in_the_persons_words` |
 | G1.19 | Another program is read in one language: by its exit code or a field made for programs first; a phrase only where no such answer exists, in "C.UTF-8" with LANGUAGE removed on that call alone, and only where the program is seen to translate it; never on what the tool starts for the person. A read that could not be made is said as that, never as a no. The repository lists every phrase and layout read, with the version seen and whether it is translated. | `test_G1_19_another_programs_words_are_read_in_one_language` *(to build)* |
 | G1.20 | A stop that says to run a command again says, the first time, what a second run can find different and what the person does if the same line comes back; a test reads every such line the tool can print | `test_G1_20_a_stop_that_says_run_again_says_what_to_do_if_it_comes_back` *(to build)* |
+| G1.21 | Every call the tool makes to another program has a bound: a stop is asked without waiting or under a timeout, so the tool's own read bounds uninstall, and a wait says what it waits for and for how long at most | `test_G1_21_every_call_to_another_program_has_a_bound` *(to build)* |
 
 ### G2 The GitHub keys: one read-only key per owner, each in its own file, each watched
 
@@ -219,6 +220,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G6.10 | `sync` asks the forge first. A forge that does not answer is a `problem:` line with its next step (`status`, then `setup`, which starts it again and keeps every copy) and a failing code, even when nothing changed on GitHub; nothing is copied, changed or used up, not the person's go either (a real machine saw a stopped forge and a sync that said `0 problem(s)`, M48). | `test_G6_10_a_sync_says_when_the_forge_does_not_answer` |
 | G6.11 | A reader that stops reading (`status | head`) never gets a traceback: the tool does the whole of its work, ends with its own code, and the rest of its words go nowhere; a sync is never stopped halfway by a closed pipe (a real machine saw a traceback, M49). | `test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback` |
 | G6.12 | Every command the tool prints with its own copy's path runs as printed when pasted whole into a shell: the path is quoted (on a Mac it holds a space, `Application Support`), through one helper (M60). | `test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space` |
+| G6.13 | Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write | `test_G6_13_a_command_for_the_person_stands_alone_on_its_line` *(to build)* |
 
 ### G7 Restore
 
