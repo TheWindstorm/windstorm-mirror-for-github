@@ -1351,7 +1351,7 @@
    "test": "test_G9_13_the_way_back_in_uninstall_then_setup_and_the_tool_works",
    "stand_in": "the service manager (stand-ins for systemctl and launchctl), with the real pinned Gitea and a stand-in for GitHub",
    "moved_why": "",
-   "seen": "2026-11-24, on a stock virtual machine and again in the suite's own home: after an uninstall that kept the copies (and after one that was cut off), setup run again answered 0 and made no key for the mirror account, because its record still named that account; every command then said \"Run setup first.\" and setup again changed nothing.",
+   "seen": "2026-11-24, on a stock virtual machine and again in the suite's own home: after an uninstall that kept the copies (and after one that was cut off), setup run again answered 0 and made no key for the mirror account, because its record still named that account; every command then said \"Run setup first.\" and setup again changed nothing. Since the fix, each way back in makes the mirror account one more key, and the earlier key stays valid in the forge's own records (row M86, due 0.1.1).",
    "promise": "after an uninstall that kept the copies, or one that was cut off, setup run again makes the tool work: it decides by what is on disk and in the forge, makes the mirror account a new key when its key is missing, leaves the person's Gitea account and its password as they are and says so, and answers 0 and says it is set up only when the commands' own check (the forge's port and the mirror account's key) passes; uninstall says what a setup after it will do."
   },
   {
@@ -1367,8 +1367,40 @@
    "test": "",
    "stand_in": "none",
    "moved_why": "By the maintainer's word, 2026-11-24: read in the code while fixing row M84; written the day it was read; due 0.1.1.",
-   "seen": "2026-11-24, read in the code, not seen: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen, and setup says only that the forge was not answering yet and that its own words are in gitea.log.",
-   "promise": "when the forge's port is taken by another program, setup and status say so in those words, with the program's port and one next step, never only that the forge is not answering yet."
+   "seen": "2026-11-24, read in the code, not seen: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen; the service is installed and started, the forge's health check never answers, setup says only that the forge was not answering yet, \"run `status` in 5 minutes\", and that its own words are in gitea.log, and setup answers 0.",
+   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#112",
+   "id": "M86",
+   "codon": "G9.13",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "moved_why": "By the maintainer's word, 2026-11-24: read while fixing row M84; not held for 0.1.0, because the forge listens on this computer only and the removed file was the key's one copy; due 0.1.1.",
+   "seen": "2026-11-24, read in the code: uninstall removes the file that holds the mirror account's key, but the key stays valid in the forge's own records, and each setup run again after an uninstall makes one more.",
+   "promise": "setup, when it makes the mirror account a new key because its file is gone, removes that account's earlier windstorm-mirror keys from the forge, or names them, and why, where it cannot."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#113",
+   "id": "M87",
+   "codon": "T6",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "moved_why": "By the maintainer's word, 2026-11-24: a count of the suite found no test that builds a child's PATH from /usr/bin:/bin, so the head stays still; due 0.1.1.",
+   "seen": "2026-11-24: a test that hands its child a PATH built from /usr/bin:/bin steps over the suite's stand-ins, and where a program is installed there the child can reach it; a count of this suite found no such test (one puts its own folder in front of the run's PATH; the others inherit the run's PATH and reach no such program).",
+   "promise": "the suite's guard also fails a test that starts a child whose PATH, searched in order, finds the machine's own copy of a program the guard stands in for before a stand-in or a copy in a temporary folder; a test never builds a child's PATH from /usr/bin:/bin."
   }
  ],
  "declined": []
