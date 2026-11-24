@@ -1928,6 +1928,48 @@ class G2Sync(unittest.TestCase):
             self.assertIn("sync: 2 on GitHub, 2 copied now, 0 unchanged, 0 problem(s)", out)
             self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
 
+    def test_G2_7_a_fine_grained_key_for_one_project_of_an_organisation_is_set_copied_and_proved(self):
+        """Row M99: the one road 0.1.0 gives a person, with a key as GitHub's docs describe it: fine-grained
+        (github_pat_ and 82 more, no X-OAuth-Scopes header), read-only, an organisation as its resource owner, one
+        project selected, an end date in its header. key set keeps it; the announcement names that project and the
+        key's end; the first copy follows the person's go; restore --check proves it from the forge alone; the key
+        is in its own file and nowhere else. This is the stand-in's idea of GitHub's answers: the row is seen
+        against the real GitHub, with a real key of this kind, before its version is tagged."""
+        pat = "github_pat_" + "11ABCDEFG0" + "Zz9_" * 18
+        self.assertEqual(len(pat), len("github_pat_") + 82)
+        self.assertTrue(mirror.KEY_SHAPE.search(pat), "the key scan does not know a fine-grained key's shape")
+        end = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() + 30 * 86400))
+        tell = re.compile(r"^tell the person \d+ of \d+: (.*)$", re.M)
+        with World(self) as w:
+            w.gh.key, w.gh.scopes, w.gh.expires = pat, None, end
+            w.gh.add_repo("theorg", "proof", owner_type="Organization")
+            w.gh.commit("theorg/proof", {"a": b"1"})
+            quiet(mirror.main, ["config", "include", "theorg/proof"])
+            rc, out = w.key_set("theorg")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("The key for theorg (organisation) is kept", out)
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            said = tell.findall(out)
+            self.assertTrue(any(x.startswith("The first copy: 1 repositories from 1 owner(s)") for x in said), said)
+            self.assertTrue(any("They are: theorg/proof." in x for x in said), said)
+            self.assertIn(f"The key for theorg ends {end}; the mirror warns you two weeks before.", said)
+            self.assertEqual(w.go()[0], 0)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(w.forge_refs("theorg--proof"), w.gh_refs("theorg/proof"))
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("restore check: 1 copies, 1 whole, 0 difference(s), 0 could not be read", out)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"key for theorg: expires {end}", out)
+            self.assertRegex(out, r"key scan: \d+ file\(s\) read, no key found")
+            hits, read = files_holding(w.home.tmp, pat)
+            self.assertGreater(read, 0, "the scan read no files")
+            self.assertEqual(hits, [mirror.key_path(w.p, "theorg")], "the key was written somewhere else")
+            self.assertEqual(w.gh.writes(), [], "something was written to GitHub")
+
 
 def put_settings(p, **kw):
     s = mirror.load_json(p["settings"], {})

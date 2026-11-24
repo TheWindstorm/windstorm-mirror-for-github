@@ -605,9 +605,9 @@
   {
    "owner": "maintainer",
    "first_ship_in": "0.1.0",
-   "ship_in": "0.1.1",
+   "ship_in": "0.1.0",
    "proven": "",
-   "moved_why": "By the maintainer's word, 2026-11-23: GitHub's own end-date answer for a fine-grained key needs the owner's key, and 0.1.0 goes out without it; the README says it was not seen by us, and that the tests use a stand-in for that answer while the tool promises no warning when the date could not be read.",
+   "moved_why": "By the maintainer's word, 2026-11-23: GitHub's own end-date answer for a fine-grained key needs the owner's key, and 0.1.0 goes out without it; the README says it was not seen by us, and that the tests use a stand-in for that answer while the tool promises no warning when the date could not be read. By the maintainer's word, 2026-11-24: back to 0.1.0. That reason is gone: the key is made before the tag, and the tag waits for a try with it on a real machine; this row's code and test ship in 0.1.0 and its sentence is said before every go.",
    "moved_by_person": "",
    "id": "M38",
    "codon": "G6.9",
@@ -1481,6 +1481,22 @@
    "moved_why": "By the maintainer's word, 2026-11-24: seen in a restore on a stock virtual machine; due 0.1.1.",
    "seen": "2026-11-24, on a fresh stock Ubuntu 24.04.5 virtual machine: after setup --from with a backup a minute old, restore printed \"Until then, `status` shows them behind.\"; status a minute later printed \"1 copied, 0 behind\", answered 0 and said nothing about the key. A copy is behind only by age (older than twice the sync interval) or by a recorded problem, and status's key lines walk only the keys that are kept. The restored account's first sync said \"no key is kept for it\" and answered 1, and its line began \"sync: 0 on GitHub\" for an owner that was not asked.",
    "promise": "status names at once every owner in the settings with no key kept, with the one step (`key set OWNER`); restore's sentence says what status shows at that moment; with an owner that was not asked, the sync line does not print \"0 on GitHub\": a number never stands for a read that was not made. Its test restores a fresh backup and reads status."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#125",
+   "id": "M99",
+   "codon": "G2.7",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G2_7_a_fine_grained_key_for_one_project_of_an_organisation_is_set_copied_and_proved",
+   "stand_in": "GitHub (a stand-in that answers a fine-grained key as GitHub's docs describe it: the github_pat_ shape, no X-OAuth-Scopes header, an end date in its header, an organisation's listing)",
+   "moved_why": "",
+   "seen": "2026-11-24, by reading before 0.1.0's tag: every run against the real GitHub, cold starts included, used a broad login of ours in place of the key the steps give, so key set, the listing, the end-date line, the first copy and restore --check had never met a fine-grained key outside the tests' stand-in.",
+   "promise": "The road the steps give works with the key they give: with a fine-grained read-only key whose resource owner is an organisation, key set keeps it, the announcement names the project and the key's end as GitHub gives it, the first copy follows the person's go, restore --check proves it from the forge alone, and the key is in its own file only."
   }
  ],
  "declined": []

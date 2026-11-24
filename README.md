@@ -220,7 +220,10 @@ with no key; a sync and a restore on a Mac are not seen yet.
     nothing to keep yet;
   - in an account with no user service manager (one that was never logged in, entered with `sudo -u`), setup
     writes its files and then stops, saying the forge's service did not start; `uninstall` then takes off what
-    setup made, except the folder of copies, which it keeps and names, as it always does.
+    setup made, except the folder of copies, which it keeps and names, as it always does;
+  - for a key that ends in less than two weeks, the line before the go still says the mirror warns two weeks
+    before it ends, and `status` names the key as a problem from its first day; make the key for longer than
+    two weeks.
 
 ## Taking it off
 
