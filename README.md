@@ -215,7 +215,12 @@ with no key; a sync and a restore on a Mac are not seen yet.
     half an hour and says nothing about the missing key; `sync` says "no key is kept for it" and answers 1;
   - setup can answer 0 while the forge does not answer, for example when another program holds the forge's port;
     `status` is the read: it then says the forge does not answer. Once the port is free, the forge starts by
-    itself.
+    itself;
+  - a backup made before the first copy exists fails with Gitea's own words; nothing is lost, as there is
+    nothing to keep yet;
+  - in an account with no user service manager (one that was never logged in, entered with `sudo -u`), setup
+    writes its files and then stops, saying the forge's service did not start; `uninstall` then takes off what
+    setup made, except the folder of copies, which it keeps and names, as it always does.
 
 ## Taking it off
 
