@@ -2994,7 +2994,12 @@ class G7(unittest.TestCase):
                 self.assertIn("2 copies are back, on http://127.0.0.1:", out)
                 self.assertIn("counted in the forge itself", out)
                 self.assertIn("The forge runs as your own service.", out)
-                self.assertIn("After a restart it starts by itself.", out)
+                if mirror.system()[0] == "darwin":   # a Mac that does not log in by itself says so instead
+                    said = ["After a restart it starts by itself." in out,
+                            mirror.NO_LOGIN_NOTE in out]
+                    self.assertEqual(said.count(True), 1, out)
+                else:
+                    self.assertIn("After a restart it starts by itself.", out)
                 self.assertIn("make new keys and run `key set` for each owner: someone", out)
                 rc, out = quiet(mirror.main, ["restore", "--check"])
                 self.assertEqual(rc, 0, out)
