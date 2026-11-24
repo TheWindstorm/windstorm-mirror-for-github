@@ -983,9 +983,23 @@ class G1(unittest.TestCase):
 
     def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
         saved, saved_proc = mirror.system, mirror.own_process_for_polkit
+        saved_doors = mirror.read_door, mirror.door_floor
         mirror.system = lambda: ("linux", "x86_64")
         if not os.path.exists("/proc/self/stat"):        # a Mac runner standing in for Linux has no /proc to read
             mirror.own_process_for_polkit = lambda: f"{os.getpid()},1,{os.getuid()}"
+        if not os.path.exists(mirror.PROC_TCP[0]):
+            # Seen on GitHub's Mac runners at 649ee99: with no /proc/net/tcp, setup's floor said the door cannot be
+            # read and stopped. The door is then read for real the Mac's own way (netstat); lingering stays Linux's.
+            def the_mac_way(read):
+                def run(*a, **kw):
+                    was = mirror.system
+                    mirror.system = saved
+                    try:
+                        return read(*a, **kw)
+                    finally:
+                        mirror.system = was
+                return run
+            mirror.read_door, mirror.door_floor = map(the_mac_way, saved_doors)
         me = mirror.getpass.getuser()
         try:
             # (a, b) The dry run says what lingering means, from this computer's own three answers.
@@ -1080,6 +1094,7 @@ class G1(unittest.TestCase):
                 self.assertIn("syncs only while you are logged in", out)
         finally:
             mirror.system, mirror.own_process_for_polkit = saved, saved_proc
+            mirror.read_door, mirror.door_floor = saved_doors
 
     def test_G1_13_a_mac_is_written_as_what_was_seen(self):
         """The family's rule on Macs (2026-11-23): we have no stock Mac. A Mac sighting is written as what it was, a
@@ -3309,7 +3324,16 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = answer
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+import errno, time
+end = time.monotonic() + 90
+while True:
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+        break
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE or time.monotonic() > end:
+            raise
+        time.sleep(0.5)
 print("LISTENING", flush=True)
 srv.serve_forever()
 '''
@@ -3318,7 +3342,10 @@ srv.serve_forever()
 class Stranger:
     """G8.7: another program on the forge's port, answering every request as a forge would (200, a version) and
     writing down each one it is sent, and whether it carried an Authorization header. as_account: the account it runs
-    as (another account, by sudo without a password), or None for this account's own."""
+    as (another account, by sudo without a password), or None for this account's own. Its bind waits up to 90 s on
+    "Address already in use": seen on GitHub's Mac runners at 649ee99, where the forge's port, free to this account,
+    was refused to the stranger; a Mac keeps another account off a port this account's closed connections still
+    hold (TIME_WAIT), where Linux does not (our reading; the next Mac leg is its test)."""
 
     def __init__(self, port, as_account=None):
         py = "/usr/bin/python3" if as_account and os.path.exists("/usr/bin/python3") else sys.executable
@@ -3329,7 +3356,8 @@ class Stranger:
         first = self.pr.stdout.readline()
         if "LISTENING" not in first:
             self.pr.kill()
-            raise AssertionError(f"the stranger did not listen on {port}: {first}{self.pr.stdout.read()[-300:]}")
+            raise AssertionError(f"the stranger ({as_account or 'this account'}) did not listen on {port}: "
+                                 f"{first}{self.pr.stdout.read()[-300:]}")
         self.seen = []
 
     def close(self):
