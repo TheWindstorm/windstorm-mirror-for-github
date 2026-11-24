@@ -843,13 +843,19 @@ def install_timer(p, minutes):
     if system()[0] == "darwin":
         path = os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
         write_file(path, sync_plist_text(p, minutes))
-        out, _ = launchd_load(p, SYNC_LABEL, path)
-        return out is not None and out.returncode == 0
+        out, words = launchd_load(p, SYNC_LABEL, path)
+        if out is None:
+            return False, words
+        return out.returncode == 0, ("" if out.returncode == 0 else
+                                     f"this Mac did not load the sync's launch agent (code {out.returncode}); run "
+                                     "setup again, and if it stops here again, run status")
     base = os.path.dirname(p["unit"])
     write_file(os.path.join(base, SYNC_UNIT + ".service"), sync_unit_text(p))
     write_file(os.path.join(base, SYNC_UNIT + ".timer"), sync_timer_text(minutes))
     run(["systemctl", "--user", "daemon-reload"])
-    return run(["systemctl", "--user", "enable", "--now", SYNC_UNIT + ".timer"]).returncode == 0
+    if run(["systemctl", "--user", "enable", "--now", SYNC_UNIT + ".timer"]).returncode == 0:
+        return True, ""
+    return False, "systemd did not switch the sync's timer on; run setup again, and if it stops here again, run status"
 
 
 def next_sync():
@@ -1081,31 +1087,41 @@ MAC_NO_SESSION = ("this account is not logged in at this Mac's screen, and on a 
 
 
 LAUNCHD_WAIT = 30      # seconds launchd is given to let go of a job it was told to take off
+# What `launchctl print gui/<uid>` answers in an account that is not logged in at the Mac's screen: seen 2026-11-24
+# over ssh on macOS 13.7.8 (x86_64), a test account with no desktop process; the job's own print and bootout
+# answered 125 there too. Only this code is read as "no domain, so nothing of this account is loaded".
+LAUNCHD_NO_SCREEN = 125
 
 
 def launchd_off(p, label):
     """G1.17 (seen 2026-11-24 on a Mac, macOS 27.2.1: setup run while the forge ran answered "code 5" and left it
     unloaded): take the job off and read it gone. 'gone' when `launchctl print` answers 113 (the family's rule 24),
     'there' when it still names the job at LAUNCHD_WAIT, 'unread' when it answered neither; with the seconds waited
-    and the last code. The wait is written in the forge's own log folder, launchd.log, when that folder is there."""
+    and the last code. The wait is written in the forge's own log folder, launchd.log, when that folder is there.
+    The account's domain is read first: answered LAUNCHD_NO_SCREEN, the job is gone with no wait (0 reads)."""
     job = f"gui/{os.getuid()}/{label}"
-    run(["launchctl", "bootout", job])
     start, reads = time.monotonic(), 0
-    while True:
+    if run(["launchctl", "print", f"gui/{os.getuid()}"]).returncode == LAUNCHD_NO_SCREEN:
+        answer, code = "gone", LAUNCHD_NO_SCREEN        # no domain at the screen: nothing of this account is loaded
+    else:
+        run(["launchctl", "bootout", job])
+        answer = None
+    while answer is None:
         out = run(["launchctl", "print", job])
         reads += 1
         code = out.returncode
         answer = "gone" if code == 113 else ("there" if code == 0 and out.stdout.strip() else "unread")
-        if answer == "gone" or time.monotonic() - start >= LAUNCHD_WAIT:
-            break
-        time.sleep(0.2)
+        if answer != "gone" and time.monotonic() - start < LAUNCHD_WAIT:
+            answer = None
+            time.sleep(0.2)
     waited = time.monotonic() - start
     log = os.path.join(p["forge"], "log")
     if os.path.isdir(log):
         try:
             with open(os.path.join(log, "launchd.log"), "a", encoding="utf-8") as f:
                 f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {label}: {answer} after "
-                        f"{waited:.1f} s, {reads} read(s), last code {code}\n")
+                        f"{waited:.1f} s, {reads} read(s), last code {code}"
+                        f"{' (no domain at the screen)' if reads == 0 else ''}\n")
         except OSError:
             pass
     return answer, waited, code
@@ -1115,8 +1131,7 @@ def launchd_not_off(label_words, answer, waited, code, again):
     """The words for a job launchd did not let go of: the true state and the one next step."""
     if answer == "there":
         return (f"launchd still had {label_words} {waited:.0f} s after it was told to take it off, so it was not "
-                f"loaded again; it is as it was before. Run {again} again in a minute, and if it stops here again, "
-                "run status")
+                f"loaded again. Run {again} again in a minute, and if it stops here again, run status")
     return (f"whether launchd let go of {label_words} could not be read (launchctl print answered code {code}), so "
             f"it was not loaded again. Run {again} again, and if it stops here again, run status")
 
@@ -3012,8 +3027,7 @@ def cmd_setup(args):
             "Nothing was started. Run setup again; if it stops here again, open an issue with this line.")
         return 1
     ok, why = install_service(p)
-    if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
-        ok, why = False, "the sync timer could not be switched on"
+    timer_why = install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min")))[1] if ok else ""
     shut = None
     if ok:
         try:
@@ -3029,6 +3043,9 @@ def cmd_setup(args):
         say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
     else:
         say(not_answering_yet(p, st["port"], SETUP_WAIT))
+    if timer_why:                                   # G1.17: the forge's own line stands; the sync's is its own
+        ok = False
+        say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -3719,8 +3736,7 @@ def setup_from(p, args):
         os.replace(p["script"] + ".tmp", p["script"])
         claim(p["script"])
     ok, why = install_service(p)
-    if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
-        ok, why = False, "the sync timer could not be switched on"
+    timer_why = install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min")))[1] if ok else ""
     # M88 (G7.4, rule 24): what restore says is what it read. The person acts on these lines after losing a
     # computer, so "back" and "runs" are said only when the forge itself answered and held the copies.
     shut = None
@@ -3764,6 +3780,9 @@ def setup_from(p, args):
         say("The forge runs as your own service.")
     else:
         say(not_answering_yet(p, port, SETUP_WAIT))
+    if timer_why:
+        ok = False
+        say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -4054,20 +4073,27 @@ def cmd_uninstall(args):
             say(f"Not now: a sync is still running (process {lock_holder(p)}) after {UNINSTALL_WAIT // 60} minutes, "
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
-    removed, linger_said, left_service, foreign, unreadable, still_loaded = [], "", [], [], None, []
+    removed, linger_said, left_service, foreign, unreadable = [], "", [], [], None
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
-            for label, plist, words in ((LAUNCHD_LABEL, p["plist"], "the forge's job"),
-                                        (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"),
-                                         "the sync's job")):
-                answer, waited, code = launchd_off(p, label)        # G1.17: off only once read gone
-                if answer == "gone":
-                    take_service_file(p, plist, removed, left_service)
-                else:
-                    still_loaded.append(f"{words} ({plist}): " + (
-                        f"launchd still had it {waited:.0f} s after it was told to take it off" if answer == "there"
-                        else f"whether launchd let go of it could not be read (launchctl print answered code {code})"))
+            # G1.17 and the family's rule 30: both jobs are told off and read first; while either is not read gone,
+            # nothing at all is removed (a job launchd still holds would go on starting a program taken from it).
+            jobs = [(plist, words, *launchd_off(p, label)) for label, plist, words in (
+                (LAUNCHD_LABEL, p["plist"], "the forge's job"),
+                (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"), "the sync's job"))]
+            if any(answer != "gone" for _, _, answer, _, _ in jobs):
+                said = []
+                for plist, words, answer, waited, code in jobs:
+                    said.append(f"{words} is off, and its file {plist} stays too" if answer == "gone" else
+                                f"launchd still had {words} {waited:.0f} s after it was told to take it off"
+                                if answer == "there" else f"whether launchd let go of {words} could not be read "
+                                f"(launchctl print answered code {code})")
+                again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                say("Not now: " + "; ".join(said) + f". Nothing was removed. Run uninstall again in a minute: {again}")
+                return 3
+            for plist, _, _, _, _ in jobs:
+                take_service_file(p, plist, removed, left_service)
         else:
             run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
             base = os.path.dirname(p["unit"])
@@ -4119,8 +4145,8 @@ def cmd_uninstall(args):
         take_data(p, removed, "the skill's folder", None)
     if record == "read":
         take_made_folders(st, removed)
-    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service, still_loaded)
-    return 1 if still_loaded else rc
+    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service)
+    return rc
 
 
 def take_data(p, removed, what, copies_line):
@@ -4293,7 +4319,7 @@ def stayed_for(p, foreign):
 
 
 def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
-                     left_service=(), still_loaded=()):
+                     left_service=()):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
     it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
@@ -4316,14 +4342,10 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
             say("Folders of the skill's that stayed because they hold those:")
             for d in sorted(held):
                 say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
-    if still_loaded:                                # G1.17: never said to be off before it was read gone
-        say("Still loaded: " + "; ".join(still_loaded) + (". Its file is kept so it can" if len(still_loaded) == 1
-                                                           else ". Their files are kept so they can")
-            + " be taken off. Run uninstall again in a minute.")
     if left_service:
         say("Not taken, and still there: " + "; ".join(left_service) + ". It is switched off; look at it, and keep "
             "or delete it as you choose.")
-    if not removed and not unreadable and not foreign and not left_service and not still_loaded:
+    if not removed and not unreadable and not foreign and not left_service:
         say("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and the keys were "
             "already gone.")
     if linger_said:
@@ -4345,9 +4367,7 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         say("Still on this computer, and not uninstall's to take:")
         for x in left:
             say(f"  {x}")
-    if still_loaded:
-        pass                                        # not off: the line above says what is still loaded, and the step
-    elif foreign or left_service or unreadable:
+    if foreign or left_service or unreadable:
         say("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or delete "
             "after you look at it.")
 

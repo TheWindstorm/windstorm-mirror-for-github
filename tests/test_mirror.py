@@ -221,6 +221,11 @@ class Home:
         """launchctl's bootstrap, bootout and print of one job, or None for every other command."""
         dom = f"gui/{os.getuid()}"
         done = lambda rc, out="", err="": subprocess.CompletedProcess(cmd, rc, out, err)
+        if not self.mac_session and cmd[:2] in (["launchctl", "bootstrap"], ["launchctl", "bootout"],
+                                                ["launchctl", "print"]) and cmd[2].startswith(dom):
+            # Seen 2026-11-24 over ssh on macOS 13.7.8, a test account with no screen login: print of the domain
+            # and of a job, and bootout of a job, each answered 125.
+            return done(125, "", "Could not print domain: 125: Domain does not support specified action\n")
         if cmd[:3] == ["launchctl", "bootstrap", dom] and len(cmd) == 4 and self.service_ok:
             label = os.path.basename(cmd[3])[:-len(".plist")]
             if label in self.loaded or label in self.tearing:
@@ -737,7 +742,7 @@ class G1(unittest.TestCase):
         loaded and running stopped with "did not load the forge's launch agent (code 5)" and left it unloaded; the
         next setup loaded it; so every second setup broke the forge. A job booted out while it runs is still there
         for a moment. Each load waits until launchd no longer has the job (its print answers 113, the family's rule
-        24) before loading it, and a load answered 5 or 37 while it goes is tried again."""
+        24) before loading it; while it is still there, nothing is loaded over it (a load is never tried again)."""
         saved = mirror.system
         mirror.system = lambda: ("darwin", "arm64")
         try:
@@ -747,7 +752,7 @@ class G1(unittest.TestCase):
                 h.teardown_reads = 3
                 for n in range(3):                              # setup, setup again, and once more
                     self.assertEqual(mirror.install_service(p), (True, ""), n)
-                    self.assertTrue(mirror.install_timer(p, 15), n)
+                    self.assertEqual(mirror.install_timer(p, 15), (True, ""), n)
                     self.assertEqual({mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL} - h.loaded, set(), n)
                 self.assertEqual([c for c, rc in h.answered if rc == 5], [], "a load met the job still there")
                 self.assertTrue(mirror.service(p, "stop"))
@@ -763,7 +768,7 @@ class G1(unittest.TestCase):
                 self.assertTrue(mirror.service(p, "start"))
                 saved_wait, mirror.LAUNCHD_WAIT = mirror.LAUNCHD_WAIT, 2
                 try:
-                    # A job that never goes: nothing is loaded over it, and the words say it is as it was.
+                    # A job that never goes: nothing is loaded over it, and the words say only what was read.
                     h.teardown_reads = 10 ** 6
                     n = len(h.calls)
                     t = time.monotonic()
@@ -771,8 +776,8 @@ class G1(unittest.TestCase):
                     self.assertLess(time.monotonic() - t, 10)
                     self.assertFalse(ok)
                     self.assertRegex(why, r"^launchd still had the forge's job \d+ s after it was told to take it off, "
-                                          r"so it was not loaded again; it is as it was before\. Run setup again in a "
-                                          r"minute, and if it stops here again, run status$")
+                                          r"so it was not loaded again\. Run setup again in a minute, and if it stops "
+                                          r"here again, run status$")
                     self.assertFalse([c for c in h.calls[n:] if c[:2] == ["launchctl", "bootstrap"]], "loaded over it")
                     self.assertFalse(mirror.service(p, "stop"), "a stop is not said done while the job is there")
                     # A read that answers neither 113 nor the job: could not be read, never "gone".
@@ -788,10 +793,11 @@ class G1(unittest.TestCase):
         finally:
             mirror.system = saved
 
-    def test_G1_17_uninstall_says_a_job_is_off_only_once_launchd_let_go_of_it(self):
-        """G1.17 (the owner's ruling, 11-24): an error is never an absence. While launchd still has a job uninstall
-        told it to take off, uninstall names it as still loaded, keeps its file, does not say the mirror is off, and
-        ends 1 with one step; that step, taken as printed once launchd lets go, takes it off."""
+    def test_G1_17_uninstall_removes_nothing_while_launchd_has_a_job(self):
+        """G1.17 and the family's rule 30 (the owner's ruling, 3:03 PM ET 11-24): an error is never an absence. Both
+        jobs are told off and read first; while either is not read gone, uninstall removes nothing (a job launchd
+        still holds would go on starting a program taken from under it), names each job with what was read, and ends
+        with the one step as the whole command line; that line, run as printed once launchd lets go, ends 0."""
         saved, saved_wait = mirror.system, getattr(mirror, "LAUNCHD_WAIT", 30)
         mirror.system = lambda: ("darwin", "arm64")
         try:
@@ -799,28 +805,92 @@ class G1(unittest.TestCase):
                 p = mirror.paths()
                 os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
                 self.assertEqual(mirror.install_service(p), (True, ""))
-                self.assertTrue(mirror.install_timer(p, 15))
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
                 sync = os.path.join(os.path.dirname(p["plist"]), mirror.SYNC_LABEL + ".plist")
-                h.teardown_reads, mirror.LAUNCHD_WAIT = 10 ** 6, 1
-                rc, out = quiet(mirror.main, ["uninstall"])
-                self.assertEqual(rc, 1, out)
-                self.assertIn(f"Still loaded: the forge's job ({p['plist']}): launchd still had it 1 s after it was "
-                              f"told to take it off; the sync's job ({sync}): launchd still had it 1 s after it was "
-                              "told to take it off. Their files are kept so they can be taken off. Run uninstall again "
-                              "in a minute.", out.splitlines())
-                self.assertEqual(out.count("Run uninstall again"), 1, out)
-                self.assertNotIn("is off this computer", out)
-                self.assertNotIn("Gone now", out)
-                self.assertTrue(os.path.exists(p["plist"]) and os.path.exists(sync), "the files stay with the jobs")
-                h.tearing.clear()                              # launchd lets go; the step, as printed
+                kept = [p["script"], p["bin"], p["mirror_key"], os.path.join(p["keys"], "someone"), p["settings"],
+                        p["state"]]
+                for x in kept:
+                    mirror.write_file(x, "{}\n")
+                    mirror.claim(x)
+                kept += [p["plist"], sync, os.path.join(p["data"], mirror.MADE_RECORD)]
+                mirror.LAUNCHD_WAIT = 1
+                for case in ("both", "sync"):                   # neither lets go; then the forge's does, the sync's not
+                    h.tearing.clear()
+                    if case == "both":
+                        h.teardown_reads = 10 ** 6
+                    else:
+                        h.teardown_reads, h.loaded = 0, {mirror.LAUNCHD_LABEL}
+                        h.gone.discard(mirror.SYNC_LABEL)
+                        h.tearing = {mirror.SYNC_LABEL: 10 ** 6}
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, out)
+                    self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{case}: something was removed")
+                    self.assertNotIn("Gone now", out)
+                    self.assertNotIn("is off this computer", out)
+                    line = [l for l in out.splitlines() if l.startswith("Not now: ")]
+                    self.assertEqual(len(line), 1, out)
+                    step = mirror.own_command(p, "uninstall")
+                    self.assertTrue(line[0].endswith(f". Nothing was removed. Run uninstall again in a minute: {step}"))
+                    self.assertIn("launchd still had the sync's job 1 s after it was told to take it off", line[0])
+                    self.assertIn("launchd still had the forge's job 1 s after it was told to take it off" if
+                                  case == "both" else f"the forge's job is off, and its file {p['plist']} stays too",
+                                  line[0])
+                h.tearing.clear()                              # launchd lets go; the step, exactly as printed
                 h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
-                h.teardown_reads = 0
-                rc, out = quiet(mirror.main, ["uninstall"])
+                h.loaded.clear()
+                args = shlex.split(step)
+                self.assertEqual(args[:3], ["python3", "-I", p["script"]])
+                rc, out = quiet(mirror.main, args[3:])
                 self.assertEqual(rc, 0, out)
-                self.assertNotIn("Still loaded", out)
-                self.assertEqual({mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL} & (h.loaded | set(h.tearing)), set())
+                self.assertNotIn("Not now", out)
+                self.assertFalse(os.path.exists(p["plist"]) or os.path.exists(sync) or os.path.exists(p["script"]))
         finally:
             mirror.system, mirror.LAUNCHD_WAIT = saved, saved_wait
+
+    def test_G1_17_an_account_not_at_the_screen_can_leave_and_the_sync_says_its_own_words(self):
+        """The owner's read of 3:03 PM ET 11-24: in an account not logged in at the Mac's screen (seen that day over
+        ssh on macOS 13.7.8: `launchctl print gui/<uid>` and the job's own print answered 125), setup has already
+        written the forge's file when it says to log in at the screen; uninstall then ends 0 with that file gone,
+        with no 30 s wait; any other answer of the domain stays "could not be read". And a sync's job that launchd
+        does not let go of reaches the person in its own words with its step; the forge's line is not "did not
+        start" when the forge did."""
+        saved, saved_wait = mirror.system, getattr(mirror, "LAUNCHD_WAIT", 30)
+        mirror.system = lambda: ("darwin", "x86_64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                h.mac_session = False
+                self.assertEqual(mirror.install_service(p), (False, mirror.MAC_NO_SESSION))
+                self.assertTrue(os.path.exists(p["plist"]), "setup wrote the file before the session read")
+                t = time.monotonic()
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertLess(time.monotonic() - t, 5)
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(os.path.exists(p["plist"]), out)
+                self.assertIn(p["plist"], out.split("Gone now:")[1] if "Gone now:" in out else "", out)
+                self.assertNotIn("Not now", out)
+                # a domain that answers anything else is never "no domain": could not be read
+                self.assertEqual(mirror.LAUNCHD_NO_SCREEN, 125)
+                h.mac_session = True
+                h.print_code, mirror.LAUNCHD_WAIT = 1, 1
+                self.assertEqual(mirror.launchd_off(p, mirror.LAUNCHD_LABEL)[0], "unread")
+                h.print_code = None
+                # the sync's job held by launchd: its own words reach the person, with the step
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                h.loaded.add(mirror.SYNC_LABEL)
+                h.teardown_reads = 10 ** 6
+                ok, why = mirror.install_timer(p, 15)
+                self.assertFalse(ok)
+                self.assertRegex(why, r"^launchd still had the sync's job \d+ s after it was told to take it off, so "
+                                      r"it was not loaded again\. Run setup again in a minute, and if it stops here "
+                                      r"again, run status$")
+        finally:
+            mirror.system, mirror.LAUNCHD_WAIT = saved, saved_wait
+        for fn in (mirror.cmd_setup, mirror.setup_from):    # the forge's own line stands; the sync's is said after it
+            src = inspect.getsource(fn)
+            self.assertNotIn('"the sync timer could not be switched on"', src)
+            self.assertIn("The sync's timer is not on, so nothing is copied until it is: {timer_why}", src)
 
     def test_G1_16_on_a_mac_with_no_login_session_setup_says_so_in_the_persons_words(self):
         """M58 (a Mac test account, 2026-11-23): setup over ssh into an account that is not logged in at the Mac's
