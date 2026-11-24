@@ -706,6 +706,14 @@ def gitea(p, *args):
 
 # ---------------------------------------------------------------- G1.4 the two accounts
 
+def set_up_misses(p, st):
+    """M84 (G1.4): what the commands need of setup, the one check they all make and setup's own last act makes: the
+    forge's port in the state and the mirror account's key on disk. What is missing, or "" when it is set up."""
+    miss = ([] if st.get("port") else ["the forge's port"]) + ([] if os.path.exists(p["mirror_key"])
+                                                                 else ["the mirror account's key"])
+    return " and ".join(miss)
+
+
 def person_name():
     n = re.sub(r"[^a-z0-9-]", "-", getpass.getuser().lower()).strip("-")[:30]
     return n if n and n not in ("admin", MIRROR_USER, "api", "user", "explore") else "owner"
@@ -2048,7 +2056,7 @@ def sync(p, args):
         say("waiting for the person's go: nothing is copied until they give it in a terminal of their own (go) and "
             "a sync is run")
         return 0
-    if not st.get("port") or not os.path.exists(p["mirror_key"]):
+    if set_up_misses(p, st):
         say("Run setup first.")
         return 2
     wait = epoch_of(st.get("github_wait_until"))
@@ -2389,9 +2397,15 @@ def setup_plan(p, st):
     if not st.get("person"):
         plan.append(f"make your Gitea account '{person_name()}' (administrator) and save its first password in "
                     f"{p['password']}, readable by you only")
+    elif not os.path.exists(p["password"]):
+        plan.append(f"leave your Gitea account '{st['person']}' as it is, from before: setup does not change it or "
+                    "its password")
     if not st.get("mirror_user"):
         plan.append(f"make the '{MIRROR_USER}' account that owns the copies, with a key of its own in "
                     f"{p['mirror_key']}, readable by you only")
+    elif not os.path.exists(p["mirror_key"]):
+        plan.append(f"give the '{st['mirror_user']}' account that owns the copies a new key of its own in "
+                    f"{p['mirror_key']}, readable by you only (its key went with uninstall)")
     plan.append(f"copy this script to {p['script']}")
     if system()[0] == "darwin":
         plan.append("install the forge as your own service (a launch agent) and start it")
@@ -2464,18 +2478,29 @@ def cmd_setup(args):
         name = person_name()
         if name not in users:
             write_private(p["password"], create_user(p, name, admin=True) + "\n")
+            say(f"Your Gitea account '{name}' is made. Its first password is in {p['password']} (readable by you "
+                "only).")
+        else:
+            say(f"Your Gitea account '{name}' is there from before: setup did not change it or its password.")
         st["person"] = name
-        say(f"Your Gitea account '{name}' is made. Its first password is in {p['password']} (readable by you only).")
-    if not st.get("mirror_user"):
-        if MIRROR_USER not in users:
+    elif not os.path.exists(p["password"]):
+        say(f"Your Gitea account '{st['person']}' is there from before: setup did not change it or its password.")
+    # M84: the key is made whenever its file is missing (after an uninstall that kept the copies, or a cut one), under
+    # a name of its own, since Gitea refuses a key name the account already holds.
+    if not st.get("mirror_user") or not os.path.exists(p["mirror_key"]):
+        had = MIRROR_USER in users
+        if not had:
             create_user(p, MIRROR_USER, admin=False)
         out = gitea(p, "admin", "user", "generate-access-token", "--username", MIRROR_USER,
-                    "--token-name", "windstorm-mirror", "--scopes", MIRROR_SCOPES, "--raw")
+                    "--token-name", "windstorm-mirror" + ("-" + time.strftime("%Y%m%d%H%M%S", time.gmtime())
+                                                          + "-" + os.urandom(3).hex() if had else ""),
+                    "--scopes", MIRROR_SCOPES, "--raw")
         if out.returncode != 0 or not out.stdout.strip():
             raise SystemExit("Gitea did not give the mirror account its key; nothing was printed. Run setup again.")
         write_private(p["mirror_key"], out.stdout.strip() + "\n")
         st["mirror_user"] = MIRROR_USER
-        say(f"The '{MIRROR_USER}' account that owns the copies is made; its key is in {p['mirror_key']}.")
+        say(f"The '{MIRROR_USER}' account that owns the copies is {'there from before; it has a new key' if had else 'made; its key is'}"
+            f" in {p['mirror_key']}.")
     here = os.path.abspath(__file__)
     if os.path.abspath(p["script"]) != here:
         shutil.copyfile(here, p["script"] + ".tmp")
@@ -2492,6 +2517,11 @@ def cmd_setup(args):
         st["setup_from" if kind == "folder" else "setup_from_file"] = where
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
+    missing = set_up_misses(p, st)
+    if missing:
+        say(f"Setup did not finish: {missing} is not in place, so the other commands would say \"Run setup first.\" "
+            "Nothing was started. Run setup again; if it stops here again, open an issue with this line.")
+        return 1
     ok, why = install_service(p)
     if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
         ok, why = False, "the sync timer could not be switched on"
@@ -2696,7 +2726,7 @@ def cmd_status(args):
     p = paths()
     st = load_json(p["state"], {})
     s = load_json(p["settings"], {})
-    if not st.get("port") or not os.path.exists(p["mirror_key"]):
+    if set_up_misses(p, st):
         say("Run setup first.")
         return 2
     forge = Forge(p, st)
@@ -2835,7 +2865,7 @@ def clone_copy(forge, name, into):
 def cmd_restore(args):
     p = paths()
     st = load_json(p["state"], {})
-    if not st.get("port") or not os.path.exists(p["mirror_key"]):
+    if set_up_misses(p, st):
         say("Run setup first.")
         return 2
     forge = Forge(p, st)
@@ -3657,7 +3687,9 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         pass
     elif os.path.exists(p["forge"]) and record_here and set(os.listdir(p["forge"])) & FORGE_NAMES:
         say(f"Kept: the folder of copies, {p['data']} ({n} copies), with the record of what the skill did here. It "
-            "is yours; delete it only when you are sure, with: uninstall --delete-copies")
+            "is yours; delete it only when you are sure, with: uninstall --delete-copies. Setup run again later finds "
+            "this folder and goes on from it: the mirror account gets a new key, and your Gitea account and its "
+            "password are left as they are.")
     elif record_here:
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
     elif not foreign:
