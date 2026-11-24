@@ -1147,6 +1147,10 @@ def launchd_load(p, label, plist):
 
 
 SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told it to stop
+# systemctl --user's words in a shell with no user bus: "Failed to connect to bus: No medium found" (systemd 255, a
+# stock Ubuntu 24.04, 2026-11-24) and "Failed to connect to user scope bus via local transport: ..." (systemd 262,
+# another skill's log the same day). "Failed to connect to", then "bus" in the same line.
+NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
 SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
 
 
@@ -4144,7 +4148,7 @@ def cmd_uninstall(args):
                     else:
                         said.append(f"whether systemd stopped {words} could not be read (systemctl --user answered "
                                     f"{what})")
-                        no_bus = no_bus or "Failed to connect to bus" in what
+                        no_bus = no_bus or bool(NO_USER_BUS.search(what))
                 again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
                 say("Not now: " + "; ".join(said) + ". Nothing was removed. " + (
                     "This shell cannot reach your account's own systemd (it has no user bus), so run uninstall again "

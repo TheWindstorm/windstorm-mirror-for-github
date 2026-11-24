@@ -217,6 +217,7 @@ class Home:
         # bus: No medium found" and changes nothing; stop_reads: how many reads a stopped unit still reads deactivating.
         self.units_up, self.user_bus, self.stop_reads, self.stopping = set(), True, 0, {}
         self.show_answer = None      # (code, stdout) every `show <unit> -p ActiveState` answers instead, when set
+        self.no_bus_words = "Failed to connect to bus: No medium found"     # systemd 255's; 262 says it otherwise
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -294,7 +295,7 @@ class Home:
             self.calls.append(cmd)
             if cmd[:2] == ["systemctl", "--user"]:
                 if not self.user_bus:
-                    return subprocess.CompletedProcess(cmd, 1, "", "Failed to connect to bus: No medium found\n")
+                    return subprocess.CompletedProcess(cmd, 1, "", self.no_bus_words + "\n")
                 verb = [c for c in cmd[2:] if not c.startswith("-")]
                 if verb[:1] in (["enable"], ["start"]) and ("--now" in cmd or verb[0] == "start"):
                     self.units_up |= set(verb[1:])
@@ -982,6 +983,20 @@ class G1(unittest.TestCase):
                     + ". Nothing was removed. This shell cannot reach your account's own systemd (it has no user "
                     "bus), so run uninstall again from a login of your own to this computer, such as ssh or a "
                     f"terminal at the screen: {step}"], out)
+                # (1b) systemd 262's words for the same (another skill's log, an Arch test account, 2026-11-24)
+                for words in ("Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and "
+                              "$XDG_RUNTIME_DIR not defined (consider using --machine=<user>@.host --user to connect "
+                              "to bus of other user)",
+                              "Failed to connect to user scope bus via local transport: No such file or directory"):
+                    h.no_bus_words = words
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, out)
+                    self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{words}: something was removed")
+                    self.assertIn("This shell cannot reach your account's own systemd (it has no user bus), so run "
+                                  "uninstall again from a login of your own to this computer, such as ssh or a "
+                                  f"terminal at the screen: {step}", out)
+                    self.assertNotIn("in a minute", out)
+                h.no_bus_words = "Failed to connect to bus: No medium found"
                 # (2) a unit systemd does not stop in time: named with what was read; the stopped ones too
                 h.user_bus, mirror.SYSTEMD_WAIT, h.stop_reads = True, 1, 10 ** 6
                 rc, out = quiet(mirror.main, ["uninstall"])
