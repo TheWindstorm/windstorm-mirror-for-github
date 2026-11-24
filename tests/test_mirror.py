@@ -3931,10 +3931,14 @@ class G8(unittest.TestCase):
                          {"gh_get", "gh_public", "fetch_forge"},
                          "a connection made outside the forge's one opener, GitHub's two roads and the pinned download")
         self.assertNotIn("def port_answers", src)
-        # 2. each road reads the door before it sends
+        # 2. each road reads the door before it sends, and sends only on "mine" (the owner's ruling F1: on "none"
+        # nothing is sent either): its first act is `if door(...) != 'mine': return ...`
         for name in ("Forge.call", "forge_call"):
             st = first_call(funcs[name])
-            self.assertEqual(ast.unparse(st).split("(")[0], "door", name)
+            self.assertIsInstance(st, ast.If, name)
+            self.assertRegex(ast.unparse(st.test), r"^door\(.*\) != 'mine'$", name)
+            self.assertEqual([type(x) for x in st.body], [ast.Return], name)
+            self.assertEqual(st.orelse, [], name)
         self.assertIn("door", called(funcs["wait_forge"]))
         self.assertIn("door", called(funcs["wait_stopped"]))
         wf = ast.unparse(funcs["wait_forge"])
@@ -4195,8 +4199,174 @@ class G8(unittest.TestCase):
             self.assertRegex(said(out), (again % "/proc/net/tcp could not be read") + r" Setup made nothing\.$")
             self.assertFalse(os.path.exists(mirror.paths()["app_ini"]))
 
+    def test_G8_7_a_forge_that_closed_its_port_and_lives_on_is_not_stopped(self):
+        """The owner's ruling F4 (11-24): "stopped" needs both, no listener on the port AND no process of this account
+        running this forge on this folder: a forge that has closed its listener can still be writing its database
+        while it ends, and a dump or a migration then reads a torn one. True keeps the wait (it ends "running"); a
+        read of our own processes that fails ends it "unread". The real case: a real Gitea of ours on this folder,
+        our own binary on our own settings file, that no longer listens on the forge's port (started on another
+        port, as a forge that closed its listener and lives on); backup then dumps nothing."""
+        real_read, real_own = mirror.read_door, mirror.own_forge_running
+        try:                                   # the wait's three answers on "none", by what our own processes read
+            mirror.read_door = lambda p, port: ("none", "nothing listens")
+            for ours, kind in ((True, "running"), (None, "unread"), (False, "stopped")):
+                mirror.own_forge_running = lambda p, ours=ours: ours
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.wait_stopped({"app_ini": "/nowhere/app.ini"}, 20001, seconds=1), kind, ours)
+        finally:
+            mirror.read_door, mirror.own_forge_running = real_read, real_own
+            mirror.DOOR_SEEN.clear()
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            w.home.forge_follows = False
+            port = stop_forge(w.home)
+            ini = fread(w.p["app_ini"])
+            other = mirror.free_port()
+            lives = subprocess.Popen([mirror.running_bin(w.p), "--config", w.p["app_ini"], "--work-path", w.p["forge"],
+                                      "web", "--port", str(other)], env=mirror.forge_env(w.p),
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            STARTED.append(lives)
+            backups = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(backups)
+            waits = mirror.wait_stopped.__defaults__
+            try:
+                end = time.monotonic() + mirror.FIRST_START_WAIT
+                while True:
+                    try:
+                        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                            f"http://127.0.0.1:{other}/api/healthz", timeout=2)
+                        break
+                    except (urllib.error.URLError, OSError):
+                        self.assertIsNone(lives.poll(), "the second Gitea of ours stopped")
+                        self.assertLess(time.monotonic(), end, "the second Gitea of ours did not answer")
+                        time.sleep(0.5)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(w.p, port)[0], "none")        # nothing on the forge's own port
+                self.assertTrue(mirror.own_forge_running(w.p))                  # and ours lives on, on this folder
+                mirror.wait_stopped.__defaults__ = (3,)
+                rc, out = quiet(mirror.main, ["backup", backups])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The forge did not stop, so no backup was made (a backup of a running forge can be "
+                              "torn). Run backup again; if the forge still does not stop, run status.", out)
+                self.assertEqual(os.listdir(backups), [])
+            finally:
+                mirror.wait_stopped.__defaults__ = waits
+                lives.terminate()
+                lives.wait(30)
+            with open(w.p["app_ini"], "w") as f:      # Gitea's own `web --port` writes LOCAL_ROOT_URL there
+                f.write(ini)                           # (seen 11-24): the stand-in's mark, not the tool's, undone
+            # once ours has ended, the same backup is made: the wait's "stopped" is the process's end, not the port's
+            mirror.DOOR_SEEN.clear()
+            self.assertFalse(mirror.own_forge_running(w.p))
+            w.home.forge_follows = True
+            rc, out = quiet(mirror.main, ["backup", backups])
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(os.listdir(backups)), 1, out)
+            self.assertEqual(w.sync()[0], 0)
 
-PINS_28_3 ={("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
+    def test_G8_7_status_calls_what_answers_the_forge_only_when_the_door_read_it(self):
+        """The owner's ruling, 11-24 (the rehearsal's two lines): status says only what was read. The forge line by
+        the door's answer: other "(not asked: another program answers on its port)", unread "(not asked: who holds
+        its port could not be read)", none "(not answering)". The network line and its problem line call what
+        answers "the forge" only when the door read mine and the forge answered; otherwise the subject is "a
+        program". Read in four states: the forge down; another program on every address; the door unread; the
+        forge up (the words as before)."""
+        def lines(out, head):
+            return [x for x in out.splitlines() if x.startswith(head)]
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            read, caught, real_addrs, real_ans = [], [], mirror.own_addresses, mirror.answers_on
+
+            def addrs():
+                read.append(real_addrs())
+                return read[-1]
+
+            def ans(a, p):
+                caught.append(real_ans(a, p))
+                return caught[-1]
+
+            def others():
+                return len([a for a in read[-1] if not (a == "::1" or a.startswith("127."))])
+            mirror.own_addresses, mirror.answers_on = addrs, ans
+            wide = None
+            try:
+                w.home.forge_follows = False
+                port = stop_forge(w.home)
+                rc, out = status()                                   # 1. the forge down
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(lines(out, "forge: "), [f"forge: Gitea (not answering) on http://127.0.0.1:{port}/ "
+                                                         f"(pinned {mirror.GITEA_VERSION})"])
+                self.assertEqual(caught[-1], [])
+                self.assertEqual(lines(out, "network: "), [
+                    "network: the forge was not reached, so where it answers was not checked (nothing answers on this "
+                    f"port at the {others()} other address(es) of this computer)"])
+                self.assertNotIn("the forge answers on", out)
+                wide = socket.socket(socket.AF_INET, socket.SOCK_STREAM)       # 2. another program, every address
+                wide.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                wide.bind(("0.0.0.0", port))
+                wide.listen(8)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(w.p, port)[0], "other")
+                rc, out = status()
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(lines(out, "forge: "), [
+                    f"forge: Gitea (not asked: another program answers on its port) on http://127.0.0.1:{port}/ "
+                    f"(pinned {mirror.GITEA_VERSION})"])
+                v4 = [a for a in read[-1] if ":" not in a and not a.startswith("127.")]
+                if v4:                                 # an address on a bridge that is down answers nothing at all
+                    self.assertTrue(caught[-1], "a listener on every address was not caught on any of them")
+                for a in caught[-1]:
+                    self.assertIn(f"problem: a program answers on port {port} at {a}, and it is not this mirror's "
+                                  "forge as far as this computer says", out)
+                self.assertEqual(lines(out, "network: "), [
+                    f"network: the forge was not reached; a program answers on this port at {', '.join(caught[-1])}"
+                    if caught[-1] else "network: the forge was not reached, so where it answers was not checked "
+                    f"(nothing answers on this port at the {others()} other address(es) of this computer)"])
+                self.assertNotIn("the forge answers on", out)
+                real_read = mirror.read_door                                   # 3. the door unread
+
+                def unread(p, port):
+                    raise mirror.DoorUnread(False, "a process holding it could not be read")
+                mirror.read_door = unread
+                mirror.DOOR_SEEN.clear()
+                try:
+                    rc, out = status()
+                finally:
+                    mirror.read_door = real_read
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(lines(out, "forge: "), [
+                    f"forge: Gitea (not asked: who holds its port could not be read) on http://127.0.0.1:{port}/ "
+                    f"(pinned {mirror.GITEA_VERSION})"])
+                for a in caught[-1]:
+                    self.assertIn(f"problem: a program answers on port {port} at {a}; whether it is this mirror's "
+                                  "forge could not be read", out)
+                self.assertNotIn("the forge answers on", out)
+                wide.close()
+                wide = None
+                mirror.DOOR_SEEN.clear()
+                w.port, _ = w.home.start_forge()                               # 4. the forge up: words as before
+                w.home.forge_follows = True
+                rc, out = status()
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(lines(out, "forge: "), [f"forge: Gitea {mirror.GITEA_VERSION} on http://127.0.0.1:"
+                                                         f"{w.port}/ (pinned {mirror.GITEA_VERSION})"])
+                self.assertEqual(lines(out, "network: "), [
+                    f"network: the forge answers on 127.0.0.1 only (tried {others()} other address(es) of this "
+                    "computer)"])
+            finally:
+                mirror.own_addresses, mirror.answers_on = real_addrs, real_ans
+                if wide:
+                    wide.close()
+                mirror.DOOR_SEEN.clear()
+
+
+PINS_28_3 = {("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
              ("darwin", "x86_64"): ("darwin-amd64", "4420bb44df8047cd4f3bec9162d559c0245dee7ef3b58bc5540d7a1eefd8b94f"),
              ("darwin", "arm64"): ("darwin-arm64", "0aca8f1f1d6a0b31abc2c7e5c40feec18f3e45ab0c7b11deaef259794ce45812")}
 

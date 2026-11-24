@@ -3145,10 +3145,10 @@ def cmd_status(args):
     problems += open_folders(p)                     # rule 28: said again each time, until it is closed
     try:
         code, ver = forge.call("GET", "/version")
-        shut = None
+        shut = shut_kind = None
     except DoorShut as e:                           # G8.7: said in its one line, and nothing sent to that port
-        code, ver, shut = 0, None, str(e)[len("problem: "):]
-    up = code == 200
+        code, ver, shut, shut_kind = 0, None, str(e)[len("problem: "):], e.kind
+    up = code == 200                                # the door read mine AND the forge answered
     if shut:
         problems.append(shut)
     elif not up:
@@ -3202,7 +3202,13 @@ def cmd_status(args):
     addrs = own_addresses()
     outside = answers_on(addrs, st["port"])
     for a in outside:
-        problems.append(f"the forge answers on {a}, not only on 127.0.0.1: other computers may reach it")
+        # "the forge" is what answers only when the door read mine and the forge answered: then every listener on
+        # the port is ours (the owner's ruling, 11-24: the subject of the sentence is what was read)
+        problems.append(f"the forge answers on {a}, not only on 127.0.0.1: other computers may reach it" if up else
+                        f"a program answers on port {st['port']} at {a}, and it is not this mirror's forge as far as "
+                        "this computer says" if shut_kind == "other" else
+                        f"a program answers on port {st['port']} at {a}; whether it is this mirror's forge could not "
+                        "be read")
     when, tproblem = next_sync()
     if tproblem:
         problems.append(tproblem)
@@ -3226,12 +3232,19 @@ def cmd_status(args):
         + " (it shows what will be copied and waits for your Enter); a sync then starts it")
     for x in notes:
         say(x)
-    say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "
-        f"(pinned {GITEA_VERSION})")
+    said_ver = ((ver or {}).get("version") if up else "(not asked: another program answers on its port)"
+                if shut_kind == "other" else "(not asked: who holds its port could not be read)" if shut_kind else
+                "(not answering)")
+    say(f"forge: Gitea {said_ver} on http://127.0.0.1:{st['port']}/ (pinned {GITEA_VERSION})")
     say(f"disk: {free_mb} MB free (floor {floor_mb} MB)")
     others = [a for a in addrs if not (a == "::1" or a.startswith("127."))]
-    say(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es) of this computer)"
-        if not outside else f"network: the forge answers on {', '.join(outside)} too")
+    if up:
+        say(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es) of this computer)"
+            if not outside else f"network: the forge answers on {', '.join(outside)} too")
+    else:
+        say(f"network: the forge was not reached, so where it answers was not checked (nothing answers on this port "
+            f"at the {len(others)} other address(es) of this computer)" if not outside else
+            f"network: the forge was not reached; a program answers on this port at {', '.join(outside)}")
     last = st.get("last_sync") or {}
     say(f"last good sync: {st.get('last_good_sync') or 'none yet'}")
     if last:
@@ -3706,24 +3719,27 @@ def wait_forge(p, port, seconds=FIRST_START_WAIT, again="status"):
 
 
 def wait_stopped(p, port, seconds=30):
-    """After the service is told to stop: 'stopped' (no listener), 'other' (another program holds the port AND no
-    process of this account runs this forge on this folder: the forge did stop), 'running' (ours still runs at the
-    end), 'unread' (the door or our own processes stayed unread to the end, so neither is said). "other" alone is
-    not "stopped" (the owner's ruling F2): a stranger can sit on ::1 while our forge still runs on 127.0.0.1."""
+    """After the service is told to stop: 'stopped' (no listener on the port AND no process of this account runs
+    this forge on this folder), 'other' (another program holds the port AND none of ours runs: the forge did stop),
+    'running' (ours still runs at the end), 'unread' (the door or our own processes stayed unread to the end, so
+    neither is said). The port alone is never the answer (the owner's rulings F2 and F4, 11-24): a stranger can sit
+    on ::1 while our forge still runs on 127.0.0.1, and a forge that has closed its listener can still be writing
+    its database while it ends, so a dump or a migration then would read a torn database."""
     kind = "unread"
     for _ in range(seconds * 2):
         try:
-            if door(p, port, fresh=True) == "none":
-                return "stopped"
-            kind = "running"
+            seen = door(p, port, fresh=True)          # "mine" or "none"
         except DoorShut as e:
-            if e.kind == "other":
-                ours = own_forge_running(p)
-                if ours is False:
-                    return "other"
-                kind = "running" if ours else "unread"
-            else:
-                kind = "unread"
+            seen = e.kind                              # "other" or "unread"
+        if seen == "mine":
+            kind = "running"
+        elif seen == "unread":
+            kind = "unread"
+        else:
+            ours = own_forge_running(p)
+            if ours is False:
+                return "stopped" if seen == "none" else "other"
+            kind = "running" if ours else "unread"
         time.sleep(0.5)
     return kind
 
