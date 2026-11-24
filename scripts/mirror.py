@@ -22,6 +22,7 @@ import shlex
 import getpass
 import urllib.parse
 import hashlib
+import random
 import json
 import os
 import platform
@@ -586,14 +587,6 @@ def fetch_forge(p, base=None):
 
 
 # ---------------------------------------------------------------- G1.3 the forge's settings
-
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
 
 def port_is_free(port):
     s = socket.socket()
@@ -1419,16 +1412,322 @@ class CouldNotRead(RuntimeError):
     """G5.4: a read that failed. It is a third answer, never taken for "not there"."""
 
 
+# ---------------------------------------------------------------- G8.7 the forge's door (M102)
+# Nothing that carries the forge's key or a copy goes to 127.0.0.1:<port> until this computer has said who holds
+# that port. Three answers, and a fourth for no listener at all: "mine" (every listener on the port is of this
+# account AND is this mirror's own forge: our binary, started on our settings file), "other" (certainly not: another
+# account's, or a program of this account that is not our forge), "unread" (the computer did not say: a table not
+# there or with columns this release does not know, a process gone between two reads). Only "mine" is sent to; an
+# "other" is never said on a guess, since setup acts on it. Every road reaches the port through Forge.call,
+# forge_call or wait_forge, and each reads the door first (the suite lists every caller).
+# THE EDGE, written down and not solved (the owner's ruling, 11-24): between the read and the request there is a
+# moment (the read is reused for up to DOOR_FRESH_S seconds, then the request itself) in which our forge could stop
+# and another program take its port. The port is picked below the system's short-lived range, so the system never
+# hands it out by itself; only a program that asks for that number by name can take it in that moment.
+
+DOOR_FRESH_S = 2.0
+DOOR_SEEN = {}
+PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
+LINUX_TCP_HEADS = ("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode",
+                   "sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode")
+# netstat -anv -p tcp on macOS, by its header: only the headers read on a real Mac are known; any other = unread.
+# Read 2026-11-24 on macOS 27.2.1 arm64.
+MAC_NETSTAT_HEADS = (
+    "Proto Recv-Q Send-Q Local Address Foreign Address (state) rxbytes txbytes rhiwat shiwat process:pid state "
+    "options gencnt flags flags1 usecnt rtncnt fltrs",
+)
+NETSTAT = ["netstat", "-anv", "-p", "tcp"]
+
+
+class DoorUnread(Exception):
+    """Who holds the port could not be read. never=True: not on this computer at all (the read itself is not
+    there); never=False: not this time."""
+
+    def __init__(self, never, why):
+        super().__init__(why)
+        self.never = never
+
+
+class DoorShut(HardStop):
+    """The forge's port is held by another program, or who holds it could not be read: nothing was sent."""
+
+    def __init__(self, kind, line, never=False):
+        super().__init__(line)
+        self.kind, self.never = kind, never
+
+
+def linux_listeners(port, files=None):
+    """[(uid, inode)] of every TCP listener on this port, from the kernel's own tables."""
+    rows = []
+    for f in files or PROC_TCP:
+        try:
+            with open(f, encoding="ascii") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            if f.endswith("6"):
+                continue                        # a computer without IPv6 has no tcp6 table
+            raise DoorUnread(True, f"{f} is not there")
+        except (OSError, UnicodeError):
+            raise DoorUnread(False, f"{f} could not be read")
+        lines = text.splitlines()
+        if not lines or " ".join(lines[0].split()) not in LINUX_TCP_HEADS:
+            raise DoorUnread(True, f"{f} has columns this release does not know")
+        for line in lines[1:]:
+            c = line.split()
+            try:
+                lport, uid, inode = int(c[1].rsplit(":", 1)[1], 16), int(c[7]), int(c[9])
+            except (IndexError, ValueError):
+                raise DoorUnread(True, f"{f} has a row this release does not know")
+            if c[3] == "0A" and lport == port:
+                rows.append((uid, inode))
+    return rows
+
+
+def linux_proc(pid):
+    """(uid, exe, args) of one process; DoorUnread when it could not be read (gone, or not ours to read)."""
+    try:
+        uid = os.stat(f"/proc/{pid}").st_uid
+        exe = os.readlink(f"/proc/{pid}/exe")
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            args = fh.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        raise DoorUnread(False, "a process holding it could not be read")
+    return uid, exe[:-len(" (deleted)")] if exe.endswith(" (deleted)") else exe, [a for a in args if a]
+
+
+def linux_holders(inodes, first=()):
+    """{inode: [pid]} for the listening sockets held by this account's processes. The pids in `first` (our own
+    forge's, by its binary) are looked at before the rest."""
+    want, found, me = {f"socket:[{i}]": i for i in inodes}, {}, os.getuid()
+    try:
+        pids = [x for x in os.listdir("/proc") if x.isdigit()]
+    except OSError:
+        raise DoorUnread(False, "the list of processes could not be read")
+    for pid in [*first, *[x for x in pids if x not in first]]:
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != me:
+                continue
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                link = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if link in want:
+                found.setdefault(want[link], []).append(int(pid))
+        if found and set(found) == set(inodes):
+            break
+    return found
+
+
+def mac_listeners(port, text):
+    """[(pid)] of every TCP listener on this port, from netstat -anv's own columns, read by their header."""
+    lines = text.splitlines()
+    head = next((i for i, x in enumerate(lines) if x.split()[:1] == ["Proto"]), None)
+    if head is None or " ".join(lines[head].split()) not in MAC_NETSTAT_HEADS:
+        raise DoorUnread(True, "netstat names columns this release does not know")
+    cols = lines[head].split()
+    after = len(cols) - cols.index("process:pid") - 1
+    pids = []
+    for line in lines[head + 1:]:
+        c = line.split()
+        if len(c) < after + 7 or not c[0].startswith("tcp"):
+            continue
+        if c[5] != "LISTEN" or c[3].rsplit(".", 1)[-1] != str(port):
+            continue
+        try:
+            pids.append(int(c[-(after + 1)].rsplit(":", 1)[1]))
+        except (IndexError, ValueError):
+            raise DoorUnread(True, "netstat named a process this release cannot read")
+    return pids
+
+
+def mac_proc(pid):
+    try:
+        a = subprocess.run(["ps", "-ww", "-o", "uid=", "-o", "comm=", "-p", str(pid)], capture_output=True,
+                           text=True, timeout=10)
+        b = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise DoorUnread(False, "ps could not be asked")
+    uid, _, exe = a.stdout.strip().partition(" ")
+    if a.returncode != 0 or not uid.isdigit() or not exe.strip():
+        raise DoorUnread(False, "a process holding it could not be read")
+    return int(uid), exe.strip(), b.stdout.strip()
+
+
+def our_forge(p, exe, args):
+    """Is this process this mirror's own forge: our pinned binary (any version beside it: upgrade-forge keeps both),
+    started on our own settings file. args: a list (Linux, exact) or the one line ps prints (macOS)."""
+    d, name = os.path.split(exe)
+    if not re.fullmatch(r"gitea-\d+(?:\.\d+)*(?:[-+][0-9A-Za-z]+)?", name):
+        return False
+    try:
+        if os.path.realpath(d) != os.path.realpath(os.path.dirname(p["bin"])):
+            return False
+    except OSError:
+        return False
+    if isinstance(args, list):
+        return any(args[i:i + 2] == ["--config", p["app_ini"]] for i in range(len(args)))
+    return f"--config {p['app_ini']}" in args
+
+
+def read_door(p, port):
+    """('mine' | 'other' | 'none', why); DoorUnread when the computer did not say. Never cached."""
+    me = os.getuid()
+    if system()[0] == "darwin":
+        try:
+            out = subprocess.run(NETSTAT, capture_output=True, text=True, timeout=20)
+        except FileNotFoundError:
+            raise DoorUnread(True, "netstat is not there")
+        except (OSError, subprocess.SubprocessError):
+            raise DoorUnread(False, "netstat did not answer")
+        if out.returncode != 0:
+            raise DoorUnread(False, "netstat did not answer")
+        pids = mac_listeners(port, out.stdout)
+        if not pids:
+            return "none", "no program listens on it"
+        procs = [mac_proc(x) for x in sorted(set(pids))]
+    else:
+        rows = linux_listeners(port)
+        if not rows:
+            return "none", "no program listens on it"
+        if any(uid != me for uid, _ in rows):
+            return "other", "a program of another account holds it"
+        first = []
+        try:
+            for x in os.listdir("/proc"):
+                if x.isdigit():
+                    try:
+                        if os.path.dirname(os.readlink(f"/proc/{x}/exe")) == os.path.dirname(p["bin"]):
+                            first.append(x)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        held = linux_holders([i for _, i in rows], first)
+        if set(held) != {i for _, i in rows}:
+            raise DoorUnread(False, "a listener of this account was not found among its processes")
+        procs = [linux_proc(x) for x in sorted({x for v in held.values() for x in v})]
+    if any(uid != me for uid, _, _ in procs):
+        return "other", "a program of another account holds it"
+    if not all(our_forge(p, exe, args) for _, exe, args in procs):
+        return "other", "a program of this account that is not this mirror's forge holds it"
+    return "mine", "this mirror's own forge holds it"
+
+
+def door_line(kind, port, why, never=False, again="status"):
+    if kind == "other":
+        return (f"problem: another program answers on the forge's port 127.0.0.1:{port}, not this mirror's own forge "
+                f"({why}), so nothing was sent to it: no key, no copy. Run setup: it moves the forge to a free port "
+                "and starts it again; every copy stays.")
+    if never:
+        return (f"problem: who holds the forge's port 127.0.0.1:{port} cannot be read on this computer ({why}), so "
+                "nothing was sent to it: no key, no copy. The mirror needs that read to run; the README's section "
+                "\"What it runs\" says where it can.")
+    return (f"problem: who holds the forge's port 127.0.0.1:{port} could not be read this time ({why}), so nothing "
+            f"was sent to it: no key, no copy. Run {again} again.")
+
+
+def door(p, port, fresh=False, again="status"):
+    """The one place every road to the forge passes: 'mine' or 'none' (no listener: the old "does not answer"
+    lines stay); DoorShut on 'other' or unread, with its one line. A read is reused for DOOR_FRESH_S seconds."""
+    key = (int(port), p["app_ini"])
+    seen = DOOR_SEEN.get(key)
+    if fresh or not seen or time.monotonic() - seen[0] > DOOR_FRESH_S:
+        try:
+            kind, why = read_door(p, int(port))
+            never = False
+        except DoorUnread as e:
+            kind, why, never = "unread", str(e), e.never
+        seen = DOOR_SEEN[key] = (time.monotonic(), kind, why, never)
+    _, kind, why, never = seen
+    if kind in ("mine", "none"):
+        return kind
+    raise DoorShut(kind, door_line(kind, port, why, never, again), never)
+
+
+def door_floor():
+    """Setup's first act (the owner's ruling: a floor is checked, not only named): a listener of its own for a
+    moment, and the door read on it. None when this computer says who holds a port; otherwise the line."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        me = os.getuid()
+        try:
+            if system()[0] == "darwin":
+                out = subprocess.run(NETSTAT, capture_output=True, text=True, timeout=20)
+                if out.returncode != 0:
+                    raise DoorUnread(True, "netstat did not answer")
+                pids = mac_listeners(port, out.stdout)
+                ok = pids == [os.getpid()] and mac_proc(os.getpid())[0] == me
+            else:
+                rows = linux_listeners(port)
+                held = linux_holders([i for _, i in rows], [str(os.getpid())])
+                ok = (len(rows) == 1 and rows[0][0] == me and held.get(rows[0][1]) == [os.getpid()]
+                      and linux_proc(os.getpid())[0] == me)
+            if not ok:
+                raise DoorUnread(True, "a listener of setup's own was not named as its own")
+        except FileNotFoundError:
+            return door_line("unread", port, "netstat is not there", True)
+        except DoorUnread as e:
+            return door_line("unread", port, str(e), True)
+        except (OSError, subprocess.SubprocessError) as e:
+            return door_line("unread", port, "the read could not be made", True)
+        return None
+    finally:
+        s.close()
+
+
+def short_lived_start():
+    """Where this system's short-lived ports begin: the ones it hands out by itself, for a bind to port 0 and for
+    outgoing connections (Linux: ip_local_port_range, 32768 by default; macOS: net.inet.ip.portrange.first, 49152)."""
+    try:
+        if system()[0] == "darwin":
+            out = subprocess.run(["sysctl", "-n", "net.inet.ip.portrange.first"], capture_output=True, text=True,
+                                 timeout=10)
+            return int(out.stdout.strip())
+        with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as fh:
+            return int(fh.read().split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return 49152
+
+
+PORT_FLOOR = 20000
+
+
+def free_port():
+    """A free port on 127.0.0.1 below the system's short-lived range, at random from 20000 (G8.7): the system never
+    hands such a number to a program by itself, so only one that asks for it by name can take it. Seen on a GitHub
+    runner (11-24): a number from that range was handed to another program between the check and Gitea's bind."""
+    hi = short_lived_start()
+    if hi - PORT_FLOOR < 200:
+        raise SystemExit(f"This computer hands out every port from {hi} up to any program that asks, which leaves "
+                         f"too little room between {PORT_FLOOR} and {hi} for the forge's own. Nothing was changed. "
+                         "Open an issue with this line.")
+    for _ in range(200):
+        port = random.randrange(PORT_FLOOR, hi)
+        if port_is_free(port):
+            return port
+    raise SystemExit(f"No free port was found between {PORT_FLOOR} and {hi} in 200 tries. Nothing was changed. Run "
+                     "setup again.")
+
+
 class Forge:
     """The person's own forge, through its API, as the mirror account."""
 
     def __init__(self, p, st):
+        self.p, self.port = p, int(st["port"])
         self.base = f"http://127.0.0.1:{st['port']}"
         with open(p["mirror_key"], encoding="utf-8") as f:
             self.key = secret(f.read().strip())
         self.user = st.get("mirror_user", MIRROR_USER)
 
     def call(self, method, path, body=None):
+        door(self.p, self.port)                  # G8.7: nothing with the key goes to a port that is not ours
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + "/api/v1" + path, data=data, method=method,
                                      headers={"Authorization": f"token {self.key}", "Content-Type": "application/json",
@@ -1516,6 +1815,7 @@ def forge_call(forge, cache, *args, env=None, timeout=GIT_TIMEOUT):
     forge is on this computer, so no proxy of the person's is asked to reach it: no_proxy names this computer, and
     git and git-lfs both keep to it, for a proxy in git's settings and one in the environment alike; the forge's
     key only in this one process's environment."""
+    door(forge.p, forge.port)                    # G8.7: nothing with the key or a copy to a port that is not ours
     e = dict(forge.git_env(), **(env or {}))
     e.update(no_proxy=THIS_COMPUTER, NO_PROXY=THIS_COMPUTER)     # the call reaches only this computer
     return git(cache, *args, env=e, timeout=timeout)
@@ -1876,9 +2176,23 @@ def cmd_sync(args):
     try:
         if note:
             say(note)
-        return sync(p, args)
+        try:
+            return sync(p, args)
+        except DoorShut as e:
+            door_stopped(p, e)
+            say(str(e))
+            return 1
     finally:
         drop_lock(p)
+
+
+def door_stopped(p, e):
+    """G8.7: the sync's own record says why it stopped, as its line does."""
+    st = load_json(p["state"], {})
+    st["last_sync"] = {"at": now_utc(), "calls": 0, "copied": 0, "problems": 1,
+                       "stopped": "another program holds the forge's port" if e.kind == "other" else
+                       "who holds the forge's port could not be read"}
+    save_state(p, st)
 
 
 def save_state(p, st):
@@ -2059,6 +2373,7 @@ def sync(p, args):
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
+    door(p, st["port"], fresh=True, again="sync")    # G8.7: before GitHub is asked anything
     wait = epoch_of(st.get("github_wait_until"))
     if wait > time.time():
         say(spent_line(st))
@@ -2210,6 +2525,10 @@ def sync(p, args):
         save_state(p, st)
         try:
             why = copy_one(p, forge, key, rec, r, report, limit, s.get("kept_days"))
+        except DoorShut:
+            rec.pop("copying_since", None)
+            save_state(p, st)
+            raise
         except HardStop as e:
             rec["problem"] = "cannot refresh: the sync stopped"
             rec.pop("copying_since", None)
@@ -2417,8 +2736,67 @@ def setup_plan(p, st):
     return plan
 
 
+def own_forge_running(p):
+    """True when a process of this account runs this mirror's forge binary on this folder; None when that could not
+    be read (taken as yes: setup then moves nothing)."""
+    me = os.getuid()
+    if system()[0] == "darwin":
+        try:
+            out = subprocess.run(["ps", "-ww", "-x", "-U", str(me), "-o", "args="], capture_output=True, text=True,
+                                 timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode != 0:
+            return None
+        return any(f"--config {p['app_ini']}" in x and os.path.dirname(p["bin"]) + "/gitea-" in x
+                   for x in out.stdout.splitlines())
+    try:
+        pids = [x for x in os.listdir("/proc") if x.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        try:
+            uid, exe, args = linux_proc(pid)
+        except DoorUnread:
+            continue
+        if uid == me and our_forge(p, exe, args):
+            return True
+    return False
+
+
+def move_forge_port(p, st):
+    """G8.7 (the owner's condition 5): the forge's port moves only on a certain "other", after its service is
+    stopped and no process of this account runs this forge's binary on this folder. Two forges on one data folder
+    are worse than a mirror that stands, so otherwise nothing moves and it is said. 0 when moved."""
+    old = st["port"]
+    service(p, "stop")
+    if own_forge_running(p) is not False:
+        say(f"problem: another program holds the forge's port 127.0.0.1:{old}, and this mirror's own forge may "
+            "still run on its folder, so setup did not move it: two forges on one folder would harm the copies. "
+            "Nothing else was changed. Run setup again in a minute.")
+        return 1
+    port = free_port()
+    with open(p["app_ini"], encoding="utf-8") as fh:
+        ini = fh.read()
+    ini = re.sub(r"^HTTP_PORT\s*=.*$", f"HTTP_PORT = {port}", ini, flags=re.M)
+    ini = re.sub(r"^ROOT_URL\s*=.*$", f"ROOT_URL = http://127.0.0.1:{port}/", ini, flags=re.M)
+    write_file(p["app_ini"], ini, 0o600)
+    st["port"] = port
+    save_state(p, st)
+    say(f"The forge's address changed: another program holds 127.0.0.1:{old}, so the forge moves to "
+        f"http://127.0.0.1:{port}/. Every copy stays.")
+    return 0
+
+
 def cmd_setup(args):
     p = paths()
+    # G8.7 (the owner's ruling: a floor is checked, not only named): before setup makes anything, it makes a
+    # listener of its own for a moment and reads who holds it. A computer that does not say makes nothing here, so
+    # no one finishes setup and then finds every sync stopped.
+    floor = door_floor()
+    if floor:
+        say(floor + " Setup made nothing.")
+        return 2
     other = other_install_stop(p, "setup") or home_is_not_ours(p)
     if other:
         say(other)
@@ -2467,6 +2845,14 @@ def cmd_setup(args):
         write_file(p["app_ini"], app_ini(p, port), 0o600)
         st["port"] = port
     st.setdefault("port", int(ini_value(p["app_ini"], "server", "HTTP_PORT") or 0))
+    try:
+        door(p, st["port"], fresh=True, again="setup")
+    except DoorShut as e:
+        if e.kind != "other":
+            say(str(e))
+            return 1
+        if move_forge_port(p, st):
+            return 1
     for d in ("data", "log", "custom/conf"):
         os.makedirs(os.path.join(p["forge"], d), exist_ok=True)
     out = gitea(p, "migrate")
@@ -2525,9 +2911,18 @@ def cmd_setup(args):
     ok, why = install_service(p)
     if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
         ok, why = False, "the sync timer could not be switched on"
+    shut = None
+    if ok:
+        try:
+            up = wait_forge(p, st["port"], seconds=SETUP_WAIT, again="setup")
+        except DoorShut as e:
+            up, shut = False, str(e)
     if not ok:
         say(f"The forge's service did not start: {why}")
-    elif wait_forge(st["port"], seconds=SETUP_WAIT):
+    elif shut:
+        ok = False
+        say(shut)
+    elif up:
         say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
     else:
         say(not_answering_yet(p, st["port"], SETUP_WAIT))
@@ -2735,9 +3130,15 @@ def cmd_status(args):
     if not shutil.which("git"):
         problems.append("git is not installed on this computer, so no copy can refresh until it is")
     problems += open_folders(p)                     # rule 28: said again each time, until it is closed
-    code, ver = forge.call("GET", "/version")
+    try:
+        code, ver = forge.call("GET", "/version")
+        shut = None
+    except DoorShut as e:                           # G8.7: said in its one line, and nothing sent to that port
+        code, ver, shut = 0, None, str(e)[len("problem: "):]
     up = code == 200
-    if not up:
+    if shut:
+        problems.append(shut)
+    elif not up:
         problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}")
     elif (ver or {}).get("version") != GITEA_VERSION:
         problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, and this release pins {GITEA_VERSION}"
@@ -2759,7 +3160,8 @@ def cmd_status(args):
         refs = forge_refs_of(forge, cur["name"]) if cur else None
         if rec.get("last_good") and refs is None:
             unreadable += 1
-            problems.append(f"{name}: its copy could not be read from the forge")
+            if not shut:                            # G8.7: one line says why no copy was read; not one per copy
+                problems.append(f"{name}: its copy could not be read from the forge")
             continue
         ok, why = copy_state(rec, refs, max_age)
         if not ok:
@@ -2869,6 +3271,11 @@ def cmd_restore(args):
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
+    try:
+        door(p, st["port"], fresh=True, again="restore --check" if args.check else "status")
+    except DoorShut as e:
+        say(str(e))
+        return 1
     forge = Forge(p, st)
     if args.to:
         return restore_to(p, st, forge, args.to, args.repository)
@@ -3023,14 +3430,6 @@ def service(p, verb):
     return run(cmd).returncode == 0
 
 
-def port_answers(port):
-    try:
-        with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
-            return True
-    except OSError:
-        return False
-
-
 def safe_extract(archive, into):
     with tarfile.open(archive) as tf:
         if hasattr(tarfile, "data_filter"):
@@ -3069,13 +3468,16 @@ def make_backup(p, st, folder):
     work = scratch(p, "backup")
     try:
         service(p, "stop")
-        for _ in range(60):
-            if not port_answers(st["port"]):
-                break
-            time.sleep(0.5)
-        else:
+        # G8.7: "stopped" is read by the door: another program that takes the port meanwhile is not our forge
+        # running, and a door that stays unread is not said as either.
+        gone = wait_stopped(p, st["port"])
+        if gone == "running":
             say("The forge did not stop, so no backup was made (a backup of a running forge can be torn). Run "
                 "backup again; if the forge still does not stop, run status.")
+            return 1
+        if gone == "unread":
+            say(f"Who holds the forge's port 127.0.0.1:{st['port']} could not be read after the forge was told to "
+                "stop, so no backup was made (a backup of a running forge can be torn). Run backup again.")
             return 1
         dump = os.path.join(work, "gitea-dump.tar.gz")
         out = gitea(p, "dump", "--type", "tar.gz", "--file", dump, "--tempdir", work)
@@ -3107,6 +3509,11 @@ def make_backup(p, st, folder):
         say("problem: the forge's service did not start again after the backup; run setup to start it")
         return 1
     st["last_backup"] = name
+    try:
+        door(p, st["port"], fresh=True)          # G8.7: another program took the port while the forge was stopped
+    except DoorShut as e:
+        say(str(e))
+        return 1
     return 0
 
 
@@ -3190,7 +3597,11 @@ def setup_from(p, args):
         ok, why = False, "the sync timer could not be switched on"
     # M88 (G7.4, rule 24): what restore says is what it read. The person acts on these lines after losing a
     # computer, so "back" and "runs" are said only when the forge itself answered and held the copies.
-    up = ok and wait_forge(port, seconds=SETUP_WAIT)
+    shut = None
+    try:
+        up = ok and wait_forge(p, port, seconds=SETUP_WAIT)
+    except DoorShut as e:
+        up, shut = False, e
     ids = [r["forge_id"] for r in (st.get("repos") or {}).values() if r.get("forge_id")]
     n = len(ids)
     owners = ", ".join(sorted((load_json(p["settings"], {}).get("owners") or {}))) or "(none)"
@@ -3210,6 +3621,11 @@ def setup_from(p, args):
             say(f"Restored from {name}: the forge holds {held} of the {n} copies in the restored record"
                 + (f", and {unread} could not be read" if unread else "") + f", on http://127.0.0.1:{port}/ (this "
                 "computer only). Run status: it names each copy that is not there.")
+    elif shut:
+        say(f"Restored from {name}: {n} copies are in the restored data; they are not counted in the forge, since "
+            "nothing was sent to its port:")
+        say(str(shut))
+        ok = False
     else:
         say(f"Restored from {name}: {n} copies are in the restored data; the forge has not answered, so they are not "
             "counted there yet.")
@@ -3254,18 +3670,44 @@ def not_answering_yet(p, port, waited):
             f"own words are the last lines of {os.path.join(p['forge'], 'log', 'gitea.log')}.")
 
 
-def wait_forge(port, up=True, seconds=FIRST_START_WAIT):
+def wait_forge(p, port, seconds=FIRST_START_WAIT, again="status"):
+    """G1.9, G8.7: the forge is up only when the door reads it as ours AND its health check answers. Another
+    program on the port stops the wait at once (DoorShut); a door that stays unread to the end is said as that."""
+    shut = None
     for _ in range(seconds * 2):
-        if port_answers(port) == up:
-            if not up:
-                return True
-            try:
+        try:
+            if door(p, port, fresh=True, again=again) == "mine":
                 with forge_opener().open(f"http://127.0.0.1:{port}/api/healthz", timeout=2):
                     return True
-            except (urllib.error.URLError, OSError):
-                pass
+            shut = None
+        except DoorShut as e:
+            if e.kind == "other":
+                raise
+            shut = e
+        except (urllib.error.URLError, OSError):
+            pass
         time.sleep(0.5)
+    if shut:
+        raise shut
     return False
+
+
+def wait_stopped(p, port, seconds=30):
+    """After the service is told to stop: 'stopped' (no listener), 'other' (our forge is gone and another program
+    holds the port: the forge did stop), 'running' (ours still listens at the end), 'unread' (the door stayed
+    unread to the end, so neither is said)."""
+    kind = "unread"
+    for _ in range(seconds * 2):
+        try:
+            if door(p, port, fresh=True) == "none":
+                return "stopped"
+            kind = "running"
+        except DoorShut as e:
+            if e.kind == "other":
+                return "other"
+            kind = "unread"
+        time.sleep(0.5)
+    return kind
 
 
 def cmd_upgrade_forge(args):
@@ -3284,6 +3726,11 @@ def cmd_upgrade_forge(args):
         say(f"The forge runs Gitea {cur}, newer than the {new} this release pins. A forge is never moved back. "
             "Nothing was changed. Run self-update for the newest release of this skill.")
         return 2
+    try:
+        door(p, st["port"], fresh=True, again="upgrade-forge")     # G8.7: before anything is stopped or made
+    except DoorShut as e:
+        say(str(e) + " Nothing was upgraded.")
+        return 1
     ok, why = take_lock(p)
     if not ok:
         say(f"No upgrade: {why}. Run upgrade-forge again when it has ended.")
@@ -3303,10 +3750,22 @@ def cmd_upgrade_forge(args):
             say(f"{e} The forge was not touched. Run upgrade-forge again.")
             return 1
         service(p, "stop")
-        if not wait_forge(st["port"], up=False, seconds=30):
+        gone = wait_stopped(p, st["port"])
+        if gone == "other":
+            # G8.7 (the owner's condition ii): the forge did stop; another program took its port meanwhile. Not
+            # "did not stop": nothing is upgraded, nothing is sent to that program, and the forge stays stopped,
+            # since its service cannot start on a port another program holds.
+            say(f"problem: the forge stopped for the upgrade, and another program took its port 127.0.0.1:"
+                f"{st['port']} meanwhile, so nothing was upgraded and nothing was sent to that program: no key, no "
+                "copy. Run setup: it moves the forge to a free port and starts it again; every copy stays. Then run "
+                "upgrade-forge again.")
+            return 1
+        if gone != "stopped":
             service(p, "start")
             say("The forge did not stop, so it was not upgraded. Run upgrade-forge again; if the forge still does "
-                "not stop, run status.")
+                "not stop, run status." if gone == "running" else
+                f"Who holds the forge's port 127.0.0.1:{st['port']} could not be read after the forge was told to "
+                "stop, so it was not upgraded. Run upgrade-forge again.")
             return 1
         shutil.rmtree(rollback, ignore_errors=True)
         os.makedirs(rollback, mode=0o700)
@@ -3322,21 +3781,28 @@ def cmd_upgrade_forge(args):
             why = "Gitea's migration failed: " + last_line(out.stderr or out.stdout)
         else:
             service(p, "start")
-            if not wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT):
-                why = "the new forge did not answer within 90 s"
-            else:
-                code, ver = Forge(p, st).call("GET", "/version")
-                if code != 200 or (ver or {}).get("version") != new:
-                    why = f"the new forge says it is {(ver or {}).get('version')}, not {new}"
+            try:
+                if not wait_forge(p, st["port"], seconds=FIRST_START_WAIT, again="upgrade-forge"):
+                    why = "the new forge did not answer within 90 s"
+                else:
+                    code, ver = Forge(p, st).call("GET", "/version")
+                    if code != 200 or (ver or {}).get("version") != new:
+                        why = f"the new forge says it is {(ver or {}).get('version')}, not {new}"
+            except DoorShut as e:
+                why = ("another program holds the forge's port" if e.kind == "other" else
+                       "who holds the forge's port could not be read") + ", so nothing was sent to it"
         if why:
             service(p, "stop")
-            wait_forge(st["port"], up=False, seconds=30)
+            wait_stopped(p, st["port"])
             shutil.copy2(os.path.join(rollback, "gitea.db"), db)
             shutil.copy2(os.path.join(rollback, "app.ini"), p["app_ini"])
             st["gitea"] = cur
             save_state(p, st)
             service(p, "start")
-            back = wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT)
+            try:
+                back = wait_forge(p, st["port"], seconds=FIRST_START_WAIT)
+            except DoorShut:
+                back = False
             say(f"The upgrade to Gitea {new} failed: {why}. "
                 + (f"The old forge, Gitea {cur}, is back with its database as it was before."
                    if back else f"The old forge, Gitea {cur}, was put back but does not answer yet; run status.")
@@ -3820,7 +4286,11 @@ def main(argv=None):
                "Nothing of the skill's is set up on this computer; to use it, install the plugin again and run "
                "setup."))
         return 3
-    return a.fn(a)
+    try:
+        return a.fn(a)
+    except DoorShut as e:
+        say(str(e))
+        return 1
 
 
 if __name__ == "__main__":

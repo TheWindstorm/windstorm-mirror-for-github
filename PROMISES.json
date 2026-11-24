@@ -1361,14 +1361,14 @@
    "exception": "",
    "issue": "#111",
    "id": "M85",
-   "codon": "G1.9",
+   "codon": "G1.10",
    "first_ship_in": "0.1.1",
-   "ship_in": "0.1.1",
-   "test": "",
-   "stand_in": "none",
-   "moved_why": "By the maintainer's word, 2026-11-24: read in the code while fixing row M84; written the day it was read; due 0.1.1.",
+   "ship_in": "0.1.0",
+   "test": "test_G1_10_a_stranger_on_the_forges_port_is_never_said_to_be_the_forge",
+   "stand_in": "the service manager (the suite starts and stops the forge itself where the service would)",
+   "moved_why": "By the maintainer's word, 2026-11-24: read in the code while fixing row M84; written the day it was read; due 0.1.1. Moved to 0.1.0 by the maintainer's word, 2026-11-24: it comes with row M102 (G8.7), whose door is what this row asks for. Its codon is G1.10 (setup says the forge runs only once it answers), not G1.9 (lingering), as first written.",
    "seen": "2026-11-24, read in the code: setup keeps the port in the forge's kept settings; when another program has taken that port since, the forge cannot listen; the service is installed and started, the forge's health check never answers, setup says only that the forge was not answering yet, \"run `status` in 5 minutes\", and that its own words are in gitea.log, and setup answers 0. Seen 2026-11-24 on a fresh stock Ubuntu 24.04.5 virtual machine (0.1.0's mirror.py (sha256 e45385ae3961f237)): a throwaway listener held the kept port; setup run again answered 0, printed \"was not answering yet ... after 90 s ... run `status` in 5 minutes\" and also \"After a restart it starts by itself.\"; the service was activating, with 29 restarts; status answered 1, \"the forge does not answer\". With the listener stopped and nothing run, 30 s later the service was active by itself and status answered 0; setup again answered 0, \"The forge runs as your own service\". Nobody is stuck: freeing the port is the way out. Read too (2026-11-24): setup and restore read that a forge answers on the port, not that it is this skill's own; with another forge on the kept port they would say it runs.",
-   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then. Setup and restore say the forge runs only when the listener on the port is this skill's own forge (the listening process is the one the service started, of this account), never from an answer alone."
+   "promise": "when the forge's port is taken by another program, setup and status say so in those words (the port answers and the forge's health check does not), apart from \"the forge is slow\" (the port does not answer yet), with the port and one next step; setup does not answer 0 then. Setup and restore say the forge runs only when the listener on the port is this skill's own forge (the listening process is the one the service started, of this account), never from an answer alone. Setup answers 0 only when its forge runs on a port no other program holds: it moves the forge off a port another program certainly holds (row M102)."
   },
   {
    "owner": "maintainer",
@@ -1497,6 +1497,22 @@
    "moved_why": "",
    "seen": "2026-11-24, by reading before 0.1.0's tag: every run against the real GitHub, cold starts included, used a broad login of ours in place of the key the steps give, so key set, the listing, the end-date line, the first copy and restore --check had never met a fine-grained key outside the tests' stand-in.",
    "promise": "The road the steps give works with the key they give: with a fine-grained read-only key whose resource owner is an organisation, key set keeps it, the announcement names the project and the key's end as GitHub gives it, the first copy follows the person's go, restore --check proves it from the forge alone, and the key is in its own file only."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#128",
+   "id": "M102",
+   "codon": "G8.7",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G8_7_nothing_with_the_key_goes_to_a_port_that_is_not_the_forges_own",
+   "stand_in": "the service manager (the suite starts and stops the forge itself where the service would)",
+   "moved_why": "",
+   "seen": "2026-11-24, on a GitHub runner (release 0.1.0's pull_request run, a test job): in the seconds between the forge's start check and Gitea's bind, a program that is none of the suite's took the forge's port and answered there. Read in the code that day: every road of the tool's (the API calls, git to the forge, and the waits for the forge to answer) took any answer on 127.0.0.1:<port> for the forge, and the API calls and git carry the forge's key; nothing asked who holds the port. The edge left open: between the read and the request is a moment (the read is reused for up to 2 s) in which the forge could stop and another program take its port; the port is picked below the system's short-lived range, so only a program that asks for that number by name can take it.",
+   "promise": "Nothing carrying the forge's key or a copy goes to the forge's port until this computer has said that every listener on it is of this account and is this mirror's own forge. Another program there, of this account or another, is said as that by sync, status and restore in one line with one next step, and in the sync's own record; a read that fails is said as that, never taken for ours or for another's. Setup's first act checks that this computer can say who holds a port, and where it cannot, setup stops having made nothing. Setup moves the forge to a free port below the system's short-lived range only when another program certainly holds the old one and the mirror's own forge is stopped, and says the new address."
   }
  ],
  "declined": []

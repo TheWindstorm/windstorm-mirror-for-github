@@ -49,6 +49,7 @@ jobs:
           WSM_REQUIRE_GITEA: "1"
           WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
           WSM_TEST_REPORT: ${{ runner.temp }}/report.json
+          WSM_OTHER_ACCOUNT: nobody       # G8.7: another account holds the forge's port (sudo, no password, on runners)
         run: python -I tests/test_mirror.py -v
       - name: Keep what this job saw pass, for the join
         if: always()
@@ -90,6 +91,7 @@ jobs:
           WSM_REQUIRE_GITEA: "1"
           WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
           WSM_TEST_REPORT: ${{ runner.temp }}/report.json
+          WSM_OTHER_ACCOUNT: nobody       # G8.7: another account holds the forge's port (sudo, no password, on runners)
         run: python -I tests/test_mirror.py -v
       - name: Keep what this job saw pass, for the join
         if: always()

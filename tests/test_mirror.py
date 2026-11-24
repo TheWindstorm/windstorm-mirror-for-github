@@ -367,14 +367,10 @@ def low_free_port():
     raise AssertionError(f"no free port from {lo} to {hi} for the suite's forge (200 tried)")
 
 
-# The tool's own pick, as setup and restore make it inside the suite, comes from below that range; the tool itself
-# is not changed. Run as its own program (run-forge, a sync in a process of its own), the tool picks no port.
-mirror.free_port = low_free_port
-
 
 def below_short_lived_ports(p):
-    """The guard: a forge the suite starts listens below the short-lived range. With the tool's pick made there
-    already (low_free_port), it finds the port low and changes nothing; a port written some other way is moved as
+    """The guard: a forge the suite starts listens below the short-lived range. With the tool's own pick made there
+    (free_port, G8.7), it finds the port low and changes nothing; a port written some other way is moved as
     restore writes it (HTTP_PORT, ROOT_URL, and the state's port)."""
     port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT") or 0)
     if 20000 <= port < short_lived_ports_start():
@@ -830,16 +826,63 @@ class G1(unittest.TestCase):
             return
         self.assertIn(MAC_COPY_UNSEEN, " ".join(readme.split()))
 
+    def test_G1_10_a_stranger_on_the_forges_port_is_never_said_to_be_the_forge(self):
+        """M85 (read 11-24, due 0.1.0 with M102): setup and restore said the forge runs from an answer on its port
+        alone. Now another program there is said in its own words, apart from "not answering yet", setup and restore
+        answer 1, and the stranger is sent nothing. (Setup moving the kept port, and status: test_G8_7.)"""
+        if not real_gitea() and not os.environ.get("WSM_REQUIRE_GITEA"):
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        real_free, wait = mirror.free_port, mirror.SETUP_WAIT
+        with contextlib.ExitStack() as stack:
+            ports = [low_free_port() for _ in range(2)]
+            strangers = [Stranger(x) for x in ports]
+            for s in strangers:
+                stack.callback(s.close)
+            picks = iter(ports)
+            stack.callback(setattr, mirror, "free_port", real_free)
+            stack.callback(setattr, mirror, "SETUP_WAIT", wait)
+            # setup: the first port it picks is taken by the time it reads it, and so is the one it moves to
+            with Home(linger="yes") as h:
+                h.place_gitea()
+                mirror.free_port = lambda: next(picks)
+                mirror.SETUP_WAIT = 5
+                rc, out = h.setup()
+                mirror.SETUP_WAIT = wait
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"The forge's address changed: another program holds 127.0.0.1:{ports[0]}, so the forge "
+                              f"moves to http://127.0.0.1:{ports[1]}/.", out)
+                self.assertIn(f"problem: another program answers on the forge's port 127.0.0.1:{ports[1]}, not this "
+                              "mirror's own forge", out)
+                self.assertNotIn("The forge runs as your own service", out)
+                self.assertNotIn("not answering yet", out)
+                mirror.free_port = real_free
+            # restore: setup --from, with another program on the port it picks
+            backup = backup_of_one_copy(self)
+            with Home(linger="yes") as h2:
+                h2.place_gitea()
+                mirror.free_port = lambda: ports[1]
+                mirror.SETUP_WAIT = 5
+                rc, out = h2.setup("--from", backup)
+                mirror.SETUP_WAIT = wait
+                self.assertEqual(rc, 1, out)
+                self.assertIn("copies are in the restored data; they are not counted in the forge, since nothing was "
+                              "sent to its port:", out)
+                self.assertIn(f"problem: another program answers on the forge's port 127.0.0.1:{ports[1]}", out)
+                self.assertNotIn("copies are back", out)
+                self.assertNotIn("The forge runs as your own service", out)
+            for s in strangers:
+                self.assertEqual(s.close(), [], "a stranger was sent requests")
+
     def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
         with Home() as h:
             h.place_gitea()
             saved = mirror.wait_forge
             try:
-                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                mirror.wait_forge = lambda p, port, seconds=60, again="status": False
                 rc, out = h.setup()
                 self.assertIn("not answering yet", out)
                 self.assertNotIn("The forge runs as your own service", out)
-                mirror.wait_forge = lambda port, up=True, seconds=60: True
+                mirror.wait_forge = lambda p, port, seconds=60, again="status": True
                 rc, out = h.setup()
                 self.assertIn("The forge runs as your own service", out)
             finally:
@@ -920,7 +963,7 @@ class G1(unittest.TestCase):
             h.place_gitea()
             saved = mirror.wait_forge
             try:
-                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                mirror.wait_forge = lambda p, port, seconds=60, again="status": False
                 rc, out = h.setup()
             finally:
                 mirror.wait_forge = saved
@@ -3190,6 +3233,105 @@ def restore_with_the_forge_answering(home, backup):
         mirror.install_service, mirror.SETUP_WAIT = real, wait
 
 
+STRANGER = r'''
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def answer(self):
+        print("REQ", self.command, self.path.split("?")[0], "auth=%d" % ("Authorization" in self.headers), flush=True)
+        body = b'{"version": "28.4.0"}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = answer
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+print("LISTENING", flush=True)
+srv.serve_forever()
+'''
+
+
+class Stranger:
+    """G8.7: another program on the forge's port, answering every request as a forge would (200, a version) and
+    writing down each one it is sent, and whether it carried an Authorization header. as_account: the account it runs
+    as (another account, by sudo without a password), or None for this account's own."""
+
+    def __init__(self, port, as_account=None):
+        py = "/usr/bin/python3" if as_account and os.path.exists("/usr/bin/python3") else sys.executable
+        cmd = [py, "-I", "-c", STRANGER, str(port)]
+        if as_account:
+            cmd = ["sudo", "-n", "-u", as_account, *cmd]
+        self.pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd="/")
+        first = self.pr.stdout.readline()
+        if "LISTENING" not in first:
+            self.pr.kill()
+            raise AssertionError(f"the stranger did not listen on {port}: {first}{self.pr.stdout.read()[-300:]}")
+        self.seen = []
+
+    def close(self):
+        if self.pr.poll() is None:
+            self.pr.terminate()
+            try:
+                self.pr.wait(10)
+            except subprocess.TimeoutExpired:
+                self.pr.kill()
+                self.pr.wait(10)
+        self.seen = [x for x in self.pr.stdout.read().splitlines() if x.startswith("REQ ")]
+        return self.seen
+
+
+def stop_forge(h):
+    """The forge stops (its service told to stop), as a person's computer might do it, and the port is free."""
+    for pr in h.procs:
+        if pr.poll() is None:
+            pr.terminate()
+            pr.wait(30)
+    port = int(mirror.ini_value(mirror.paths()["app_ini"], "server", "HTTP_PORT"))
+    end = time.monotonic() + 30
+    while not mirror.port_is_free(port):
+        if time.monotonic() > end:
+            raise AssertionError(f"the forge did not let go of {port}")
+        time.sleep(0.2)
+    mirror.DOOR_SEEN.clear()
+    return port
+
+
+def backup_of_one_copy(tc):
+    """A backup file of a forge holding one copy (Gitea's dump needs a copy to hold), made by the skill's own backup."""
+    with World(tc) as w:
+        w.gh.add_repo("someone", "alpha")
+        w.gh.commit("someone/alpha", {"a": b"1"})
+        tc.assertEqual(w.key_set()[0], 0)
+        tc.assertEqual(w.first_sync()[0], 0)
+        folder = tempfile.mkdtemp(prefix="wsm-bk-")
+        TEMPS.append(folder)
+        w.home.forge_follows = True
+        rc, out = quiet(mirror.main, ["backup", folder])
+        tc.assertEqual(rc, 0, out)
+        return os.path.join(folder, os.listdir(folder)[0])
+
+
+def said(out):
+    """What a command said, without the line every command in the suite starts with (WSM_HOME is set: ...)."""
+    return "\n".join(x for x in out.strip().splitlines() if not x.startswith("WSM_HOME is set:"))
+
+
+def other_account():
+    """The account another program runs as for the second half of G8.7's proof: WSM_OTHER_ACCOUNT (CI names
+    'nobody', and its runners lend sudo without a password). Where it is not named, that half is not run here and the
+    test says so; on CI it must be named."""
+    name = os.environ.get("WSM_OTHER_ACCOUNT")
+    if not name:
+        if os.environ.get("CI"):
+            raise AssertionError("CI runs G8.7 with another account: WSM_OTHER_ACCOUNT is not set")
+        return None
+    out = subprocess.run(["sudo", "-n", "-u", name, "true"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise AssertionError(f"WSM_OTHER_ACCOUNT={name}, and sudo -n -u {name} does not run: {out.stderr[-200:]}")
+    return name
+
+
 class G8(unittest.TestCase):
     def test_G8_1_the_forge_answers_on_this_computer_only(self):
         addrs = mirror.own_addresses()
@@ -3481,6 +3623,399 @@ class G8(unittest.TestCase):
             rc, out = w.sync("--announce")
             self.assertIn(sentence, out)
             self.assertEqual(w.forge_get("/user/repos")[1], [], "something was copied before the person was told")
+
+
+    def test_G8_7_nothing_with_the_key_goes_to_a_port_that_is_not_the_forges_own(self):
+        """M102 (the owner's ruling, 11-24): every road reads who holds the forge's port first; another program there,
+        of this account or of another, gets nothing: no request at all, so no key and no copy. sync and status each
+        say it in one line with one next step, the sync's own record says it, and setup moves the forge to a free
+        port only while its own forge is stopped, saying the new address."""
+        if not real_gitea() and not os.environ.get("WSM_REQUIRE_GITEA"):
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        other = other_account()
+        with contextlib.ExitStack() as stack:
+            w = stack.enter_context(World(self))
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            self.assertEqual(mirror.read_door(w.p, w.port), ("mine", "this mirror's own forge holds it"))
+            backups = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(backups)
+            rounds = [(None, "a program of this account that is not this mirror's forge holds it")]
+            if other:
+                rounds.append((other, "a program of another account holds it"))
+            else:
+                print("\nG8.7: the other account's half is not run here (WSM_OTHER_ACCOUNT unset); CI runs it",
+                      file=sys.stderr)
+            for who, why in rounds:
+                w.home.forge_follows = False
+                port = stop_forge(w.home)
+                s = Stranger(port, who)
+                stack.callback(s.close)
+                self.assertEqual(mirror.read_door(w.p, port), ("other", why))
+                line = (f"problem: another program answers on the forge's port 127.0.0.1:{port}, not this mirror's own "
+                        f"forge ({why}), so nothing was sent to it: no key, no copy. Run setup: it moves the forge "
+                        "to a free port and starts it again; every copy stays.")
+                rc, out = w.sync()
+                self.assertEqual((rc, said(out)), (1, line))
+                self.assertEqual(mirror.load_json(w.p["state"], {})["last_sync"]["stopped"],
+                                 "another program holds the forge's port")
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertEqual(rc, 1)
+                self.assertEqual([x for x in out.splitlines() if x.startswith("problem:")], [line], out)
+                self.assertIn("last sync: ", out)
+                self.assertIn("stopped: another program holds the forge's port", out)
+                for cmd in (["restore", "--check"], ["restore", "--to", "/nowhere/new.git", "someone/alpha"]):
+                    rc, out = quiet(mirror.main, cmd)
+                    self.assertEqual((rc, said(out)), (1, line), cmd)
+                with pinned("28.4.1", mirror.PINS):
+                    rc, out = quiet(mirror.main, ["upgrade-forge"])
+                self.assertEqual((rc, said(out)), (1, line + " Nothing was upgraded."))
+                self.assertEqual(mirror.load_json(w.p["state"], {})["gitea"], mirror.GITEA_VERSION)
+                rc, out = quiet(mirror.main, ["backup", backups])        # the forge is stopped: a backup of it is whole
+                self.assertEqual(rc, 1, out)                              # its service cannot start on a held port
+                self.assertIn("backup: ", out)
+                self.assertEqual(said(out).splitlines()[-1], line)
+                self.assertEqual(w.key_set()[0], 0)
+                self.assertEqual(s.close(), [], f"the stranger was sent requests ({who or 'this account'})")
+                # setup: moves the forge only now that its own is stopped, says the new address, and starts it there
+                s = Stranger(port, who)
+                stack.callback(s.close)
+                w.home.forge_follows = True
+                rc, out = w.home.setup()
+                self.assertEqual(rc, 0, out)
+                new = mirror.load_json(w.p["state"], {})["port"]
+                self.assertNotEqual(new, port)
+                self.assertTrue(mirror.PORT_FLOOR <= new < mirror.short_lived_start(), new)
+                self.assertIn(f"The forge's address changed: another program holds 127.0.0.1:{port}, so the forge "
+                              f"moves to http://127.0.0.1:{new}/. Every copy stays.", out)
+                self.assertNotIn("problem", out)
+                self.assertEqual(mirror.ini_value(w.p["app_ini"], "server", "HTTP_PORT"), str(new))
+                self.assertEqual(mirror.ini_value(w.p["app_ini"], "server", "ROOT_URL"), f"http://127.0.0.1:{new}/")
+                w.port, _ = w.home.start_forge()          # the service's start, as World stands in for it
+                self.assertEqual(w.port, new)
+                self.assertEqual(mirror.read_door(w.p, new)[0], "mine")
+                self.assertEqual(w.sync()[0], 0)
+                self.assertEqual(quiet(mirror.main, ["restore", "--check"])[0], 0)
+                self.assertEqual(s.close(), [], f"the stranger was sent requests ({who or 'this account'})")
+
+    def test_G8_7_setup_never_starts_a_second_forge_on_one_folder(self):
+        """The owner's condition 5: the port moves only on a certain "other", after the service is stopped and no
+        process of this account runs the forge's binary on this folder; otherwise setup stops and says so."""
+        with World(self) as w:
+            w.home.forge_follows = False                  # the service manager does not stop it: it runs on
+            ini = fread(w.p["app_ini"])
+            real = mirror.read_door
+            try:
+                mirror.read_door = lambda p, port: ("other", "a program of another account holds it")
+                rc, out = w.home.setup()
+            finally:
+                mirror.read_door = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: another program holds the forge's port 127.0.0.1:{w.port}, and this mirror's "
+                          "own forge may still run on its folder, so setup did not move it: two forges on one folder "
+                          "would harm the copies. Nothing else was changed. Run setup again in a minute.", out)
+            self.assertEqual(fread(w.p["app_ini"]), ini)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["port"], w.port)
+            self.assertTrue(mirror.own_forge_running(w.p))
+            mirror.DOOR_SEEN.clear()
+            self.assertEqual(mirror.read_door(w.p, w.port)[0], "mine")
+            # an unread door is not "other": setup moves nothing and says the read's own line
+            try:
+                def unread(p, port):
+                    raise mirror.DoorUnread(False, "a process holding it could not be read")
+                mirror.read_door = unread
+                rc, out = w.home.setup()
+            finally:
+                mirror.read_door = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: who holds the forge's port 127.0.0.1:{w.port} could not be read this time (a "
+                          "process holding it could not be read), so nothing was sent to it: no key, no copy. Run "
+                          "setup again.", out)
+            self.assertEqual(fread(w.p["app_ini"]), ini)
+
+    def test_G8_7_a_door_that_cannot_be_read_stops_every_road_and_setup_makes_nothing(self):
+        """The owner's conditions b and 4: each read fails in turn, and none is taken for "other" or for "mine";
+        a computer that cannot say makes setup stop as its first act, having made nothing."""
+        mac = mirror.system()[0] == "darwin"
+        bad_head = os.path.join(tempfile.mkdtemp(prefix="wsm-door-"), "tcp")
+        TEMPS.append(os.path.dirname(bad_head))
+        with open(bad_head, "w") as f:
+            f.write("  sl  local_address rem_address   st something_new uid inode\n")
+        # setup, as its first act, on a computer whose table this release cannot read
+        with Home() as h:
+            saved = mirror.PROC_TCP, mirror.NETSTAT
+            try:
+                if mac:
+                    mirror.NETSTAT = [sys.executable, "-I", "-c", "print('Proto Recv-Q Local Address (state) pid')"]
+                else:
+                    mirror.PROC_TCP = (bad_head,)
+                rc, out = h.setup()
+            finally:
+                mirror.PROC_TCP, mirror.NETSTAT = saved
+            self.assertEqual(rc, 2, out)
+            self.assertRegex(said(out), r"^problem: who holds the forge's port 127\.0\.0\.1:\d+ cannot be read on "
+                             r"this computer \((?:netstat names|\S+ has) columns this release does not know\), so "
+                             r"nothing was sent to it: no key, no copy\.")
+            self.assertTrue(said(out).endswith("\"What it runs\" says where it can. Setup made nothing."), out)
+            self.assertEqual(os.listdir(h.env["WSM_HOME"]), [mirror.SUITE_MARKER], "setup made something")
+            self.assertEqual(os.listdir(h.env["HOME"]), [])
+        # each read of this platform failing in turn, on a set-up mirror: sync, status and restore say it, send nothing
+        with World(self) as w:
+            opened = []
+            real_opener = mirror.forge_opener
+            mirror.forge_opener = lambda: opened.append(1) or real_opener()
+            faults = {
+                "the table is not there": ("PROC_TCP", ("/nonexistent/tcp",), True),
+                "the table cannot be read": ("PROC_TCP", (os.path.dirname(bad_head),), False),
+                "the table's columns are new": ("PROC_TCP", (bad_head,), True),
+                "a process holding it is gone": ("linux_proc", None, False),
+                "its holder is not found": ("linux_holders", None, False),
+            } if not mac else {
+                "netstat is not there": ("NETSTAT", ["/nonexistent/netstat"], True),
+                "netstat fails": ("NETSTAT", [sys.executable, "-I", "-c", "import sys; sys.exit(1)"], False),
+                "netstat's columns are new": ("NETSTAT", [sys.executable, "-I", "-c", "print('Proto Local pid')"], True),
+                "ps cannot read the process": ("mac_proc", None, False),
+            }
+            try:
+                for name, (attr, val, never) in faults.items():
+                    saved = getattr(mirror, attr)
+                    if val is None:
+                        def fail(*a, **k):
+                            if attr == "linux_holders":
+                                return {}
+                            raise mirror.DoorUnread(False, "a process holding it could not be read")
+                        val = fail
+                    setattr(mirror, attr, val)
+                    mirror.DOOR_SEEN.clear()
+                    try:
+                        with self.assertRaises(mirror.DoorUnread, msg=name) as e:
+                            mirror.read_door(w.p, w.port)
+                        self.assertEqual(e.exception.never, never, name)
+                        word = "cannot be read on this computer" if never else "could not be read this time"
+                        rc, out = w.sync()
+                        self.assertEqual(rc, 1, (name, out))
+                        self.assertEqual(len(said(out).splitlines()), 1, (name, out))
+                        self.assertIn(f"problem: who holds the forge's port 127.0.0.1:{w.port} {word}", out)
+                        self.assertTrue(said(out).endswith("\"What it runs\" says where it can." if never else
+                                                             "Run sync again."), (name, out))
+                        self.assertEqual(mirror.load_json(w.p["state"], {})["last_sync"]["stopped"],
+                                         "who holds the forge's port could not be read")
+                        rc, out = quiet(mirror.main, ["status"])
+                        self.assertEqual(rc, 1, name)
+                        self.assertIn(f"problem: who holds the forge's port 127.0.0.1:{w.port} {word}", out)
+                        self.assertNotIn("does not answer", out)
+                        rc, out = quiet(mirror.main, ["restore", "--check"])
+                        self.assertEqual(rc, 1, name)
+                        self.assertIn(word, out)
+                        self.assertEqual(opened, [], f"{name}: a request went to the forge's port")
+                    finally:
+                        setattr(mirror, attr, saved)
+            finally:
+                mirror.forge_opener = real_opener
+            mirror.DOOR_SEEN.clear()
+            self.assertEqual(mirror.read_door(w.p, w.port)[0], "mine")
+            self.assertNotIn("forge's port", w.sync()[1])         # past the door: the read works again
+
+    def test_G8_7_the_listener_tables_are_read_by_their_headers(self):
+        """The two reads, Linux's tables and the Mac's netstat, each from its header; rows read as the kernel and
+        netstat write them (the Mac's as read on a real Mac, 11-24); anything else is unread, never mine."""
+        d = tempfile.mkdtemp(prefix="wsm-door-")
+        TEMPS.append(d)
+        me = os.getuid()
+        tcp, tcp6 = os.path.join(d, "tcp"), os.path.join(d, "tcp6")
+        with open(tcp, "w") as f:
+            f.write("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+                    f"   0: 0100007F:5208 00000000:0000 0A 00000000:00000000 00:00000000 00000000  {me}        0 4242 1\n"
+                    "   1: 0100007F:5208 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  999        0 4243 1\n"
+                    "   2: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 17 1\n")
+        with open(tcp6, "w") as f:
+            f.write("  sl  local_address                         remote_address                        st tx_queue "
+                    "rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+                    "   0: 00000000000000000000000000000000:5208 00000000000000000000000000000000:0000 0A "
+                    "00000000:00000000 00:00000000 00000000   999        0 5151 1\n")
+        self.assertEqual(mirror.linux_listeners(0x5208, (tcp,)), [(me, 4242)])
+        self.assertEqual(mirror.linux_listeners(0x5208, (tcp, tcp6)), [(me, 4242), (999, 5151)])
+        self.assertEqual(mirror.linux_listeners(22, (tcp,)), [(0, 17)])
+        self.assertEqual(mirror.linux_listeners(1, (tcp, os.path.join(d, "no-tcp6"))), [])
+        with open(tcp, "a") as f:
+            f.write("   3: garbled\n")
+        with self.assertRaises(mirror.DoorUnread) as e:
+            mirror.linux_listeners(1, (tcp,))
+        self.assertTrue(e.exception.never)
+        head = ("Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      "
+                "txbytes  rhiwat  shiwat          process:pid    state  options           gencnt    flags   flags1 "
+                "usecnt rtncnt fltrs")
+        rows = [
+            "tcp4       0      0  127.0.0.1.21000        *.*                    LISTEN                 0            0 "
+            " 131072  131072        gitea-28.4.0:812 00000 00000006 0000000000a1b2c3 00000000 00000800      1      0 000000",
+            "tcp46      0      0  *.21000                *.*                    LISTEN                 0            0 "
+            " 131072  131072     Google Chrome H:913 00000 00000006 0000000000a1b2c4 00000000 00000800      1      0 000000",
+            "tcp4       0      0  127.0.0.1.21000        127.0.0.1.50000        ESTABLISHED            0            0 "
+            " 131072  131072        gitea-28.4.0:812 00000 00000006 0000000000a1b2c5 00000000 00000800      1      0 000000",
+            "tcp4       0      0  127.0.0.1.2100         *.*                    LISTEN                 0            0 "
+            " 131072  131072            other:77 00000 00000006 0000000000a1b2c6 00000000 00000800      1      0 000000",
+        ]
+        text = "Active Internet connections (including servers)\n" + head + "\n" + "\n".join(rows) + "\n"
+        self.assertEqual(mirror.mac_listeners(21000, text), [812, 913])
+        self.assertEqual(mirror.mac_listeners(2100, text), [77])
+        self.assertEqual(mirror.mac_listeners(9, text), [])
+        for changed in (head.replace("process:pid", "pid"), head + " newcolumn", "nothing like a header"):
+            with self.assertRaises(mirror.DoorUnread) as e:
+                mirror.mac_listeners(21000, text.replace(head, changed))
+            self.assertTrue(e.exception.never, changed)
+        # our forge: our pinned binary (any version beside it), on our settings file; nothing else
+        with Home():
+            p = mirror.paths()
+            b = os.path.dirname(p["bin"])
+            ours = [os.path.join(b, "gitea-28.4.0"), "--config", p["app_ini"], "--work-path", p["forge"], "web"]
+            self.assertTrue(mirror.our_forge(p, ours[0], ours))
+            self.assertTrue(mirror.our_forge(p, os.path.join(b, "gitea-28.3.0"), ours))
+            self.assertTrue(mirror.our_forge(p, ours[0], " ".join(ours)))
+            self.assertFalse(mirror.our_forge(p, os.path.join(b, "gitea-28.4.0.download"), ours))
+            self.assertFalse(mirror.our_forge(p, "/usr/bin/gitea-28.4.0", ours))
+            self.assertFalse(mirror.our_forge(p, ours[0], [*ours[:2], p["app_ini"] + ".other", *ours[3:]]))
+            self.assertFalse(mirror.our_forge(p, sys.executable, ours))
+
+    def test_G8_7_every_road_to_the_forge_reads_the_door_and_every_caller_is_named(self):
+        """The owner's condition c: one place. Every request to the forge's port goes through Forge.call, forge_call
+        or wait_forge (and wait_stopped for a stop), each reads the door first; the commands that reach the port are
+        named here, so a new road fails this test until it is named; key set and uninstall send the forge nothing."""
+        import ast
+        src = fread(SCRIPT)
+        tree_ = ast.parse(src)
+        funcs, cls = {}, {}
+        for node in ast.walk(tree_):
+            if isinstance(node, ast.ClassDef):
+                for f in node.body:
+                    if isinstance(f, ast.FunctionDef):
+                        cls[f] = node.name
+        for node in ast.walk(tree_):
+            if isinstance(node, ast.FunctionDef):
+                funcs[(cls[node] + "." if node in cls else "") + node.name] = node
+
+        def called(fn):
+            out = set()
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Call):
+                    f = n.func
+                    out.add(f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None)
+            return out - {None}
+
+        def first_call(fn):
+            for st in fn.body:
+                if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant):
+                    continue
+                return st
+        # 1. the only openers of a connection to the forge
+        openers = {k for k, f in funcs.items() if "forge_opener" in called(f)}
+        self.assertEqual(openers, {"Forge.call", "wait_forge"})
+        self.assertEqual({k for k, f in funcs.items() if {"create_connection", "urlopen"} & called(f)},
+                         {"gh_get", "gh_public", "fetch_forge"},
+                         "a connection made outside the forge's one opener, GitHub's two roads and the pinned download")
+        self.assertNotIn("def port_answers", src)
+        # 2. each road reads the door before it sends
+        for name in ("Forge.call", "forge_call"):
+            st = first_call(funcs[name])
+            self.assertEqual(ast.unparse(st).split("(")[0], "door", name)
+        self.assertIn("door", called(funcs["wait_forge"]))
+        self.assertIn("door", called(funcs["wait_stopped"]))
+        wf = ast.unparse(funcs["wait_forge"])
+        self.assertLess(wf.index("door("), wf.index("forge_opener()"))
+        # 3. every command, and what of the forge's roads it reaches
+        roads = {"Forge", "forge_call", "wait_forge", "wait_stopped"}
+        reach = {}
+        for k, f in funcs.items():
+            reach[k] = called(f)
+        names = {k.split(".")[-1]: k for k in funcs}
+
+        def reaches(start, seen=None):
+            seen = seen if seen is not None else set()
+            for c in reach.get(start, ()):
+                if c in roads:
+                    return True
+                k = names.get(c)
+                if k and k not in seen:
+                    seen.add(k)
+                    if reaches(k, seen):
+                        return True
+            return False
+        cmds = {k for k in funcs if k.startswith("cmd_")}
+        to_forge = {k for k in cmds if reaches(k)}
+        self.assertEqual(to_forge, {"cmd_sync", "cmd_go", "cmd_status", "cmd_restore", "cmd_setup", "cmd_backup",
+                                    "cmd_upgrade_forge"},
+                         "a command reaches the forge's port that this test does not name")
+        self.assertNotIn("cmd_key_set", to_forge)
+        self.assertNotIn("cmd_uninstall", to_forge)
+        # the commands named read the door before their first request (sync, restore, setup and upgrade-forge read
+        # it fresh as an act of their own; status, backup, left-out and go through the roads above)
+        for k in ("sync", "cmd_restore", "cmd_upgrade_forge", "cmd_setup"):
+            self.assertIn("door", called(funcs[k]) | ({"door_floor"} & called(funcs[k])), k)
+        self.assertEqual(ast.unparse(funcs["cmd_setup"].body[1]), "floor = door_floor()",
+                         "setup's first act is not the floor")
+
+
+    def test_G8_7_our_own_forge_reads_mine_on_every_road_that_starts_it(self):
+        """The owner's condition ii: setup, restore and the service's own restart after a failure each start the
+        forge, and on each the door reads it as ours, with every read on the way "mine" or "none" (upgrade-forge,
+        at each step: test_G9_1). Never "other" for our own forge."""
+        if not real_gitea() and not os.environ.get("WSM_REQUIRE_GITEA"):
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        kinds, real_read = [], mirror.read_door
+
+        def record(p, port):
+            try:
+                k = real_read(p, port)
+            except mirror.DoorUnread as e:
+                kinds.append("unread: " + str(e))
+                raise
+            kinds.append(k[0])
+            return k
+        real_install, wait = mirror.install_service, mirror.SETUP_WAIT
+        mirror.read_door = record
+        try:
+            with contextlib.ExitStack() as stack:
+                h = stack.enter_context(Home(linger="yes"))
+                h.place_gitea()
+
+                def install_and_start(p):
+                    r = real_install(p)
+                    if r[0]:
+                        h.start_forge()
+                    return r
+                mirror.install_service, mirror.SETUP_WAIT = install_and_start, 30
+                rc, out = h.setup()                                     # setup
+                mirror.install_service, mirror.SETUP_WAIT = real_install, wait
+                port = mirror.load_json(mirror.paths()["state"], {})["port"]
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"The forge runs as your own service on http://127.0.0.1:{port}/", out)
+                self.assertIn("mine", kinds)
+                self.assertEqual(set(kinds) - {"mine", "none"}, set(), kinds)
+                # the service's own restart after a failure: the forge killed, run-forge started again
+                kinds.clear()
+                for pr in h.procs:
+                    if pr.poll() is None:
+                        pr.kill()
+                        pr.wait(30)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(mirror.paths(), port)[0], "none")
+                h.start_forge()
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(mirror.paths(), port)[0], "mine")
+            # restore: a backup, and setup --from on a new home
+            backup = backup_of_one_copy(self)
+            kinds.clear()
+            with Home(linger="yes") as h2:
+                h2.auto_login = mirror.getpass.getuser()
+                h2.place_gitea()
+                rc, out = restore_with_the_forge_answering(h2, backup)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("counted in the forge itself", out)
+                self.assertIn("mine", kinds)
+                self.assertEqual(set(kinds) - {"mine", "none"}, set(), kinds)
+        finally:
+            mirror.read_door, mirror.install_service, mirror.SETUP_WAIT = real_read, real_install, wait
 
 
 PINS_28_3 = {("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
@@ -4106,7 +4641,23 @@ class G9(unittest.TestCase):
             mirror.drop_lock(w.p)
             self.assertEqual(rc, 3, out)
             self.assertEqual(forge_version(w), "28.3.0")
+            kinds, real_read = [], mirror.read_door
+
+            def record(p, port):                 # G8.7, the owner's condition ii: each step's read of the door
+                try:
+                    k = real_read(p, port)
+                except mirror.DoorUnread as e:
+                    kinds.append("unread: " + str(e))
+                    raise
+                kinds.append(k[0])
+                return k
+            mirror.read_door = record
+            stack.callback(setattr, mirror, "read_door", real_read)
             rc, out = quiet(mirror.main, ["upgrade-forge"])
+            mirror.read_door = real_read
+            self.assertEqual(set(kinds) - {"mine", "none"}, set(), kinds)       # never "other" for our own forge
+            self.assertEqual((kinds[0], kinds[-1]), ("mine", "mine"), kinds)     # 28.3.0 before, 28.4.0 after
+            self.assertIn("none", kinds)                                          # stopped between
             self.assertIn("upgrade-forge: Gitea 28.3.0 to 28.4.0. First, a backup.", out)
             self.assertIn("The forge runs Gitea 28.4.0 now.", out)
             self.assertEqual(rc, 0, out)
