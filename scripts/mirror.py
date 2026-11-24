@@ -1327,6 +1327,15 @@ NO_PUSH = "no-push://the-skill-never-writes-to-github"
 GIT_TIMEOUT = 600
 
 
+ADDRESS_UNREAD = ("the address git would use for GitHub could not be read ({why}), so nothing was fetched and this copy "
+                  "was not refreshed. `git config --global --list` shows the git setting it stops at; with that "
+                  "line mended, the next sync refreshes it.")
+REWRITTEN = ("your git settings send GitHub's address for this repository to {where} (a url.<...>.insteadOf line in "
+             "your git config, for this repository's whole address); the mirror reads GitHub only over HTTPS with its "
+             "read-only key, so this copy was not refreshed. `git config --global --get-regexp insteadof` lists those "
+             "lines; with that one taken out, the next sync refreshes it.")
+
+
 def github_git():
     return test_setting("WSM_GITHUB_GIT") or GITHUB_GIT
 
@@ -1486,12 +1495,56 @@ def github_env(key):
     return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"http.{github_git()}/.extraheader", "GIT_CONFIG_VALUE_0": hdr}
 
 
-def git(cache, *args, env=None, timeout=GIT_TIMEOUT):
+def road(url):
+    """The skill's own road to GitHub, held against a person's git settings (row M74): git takes the longest
+    url.<...>.insteadOf that matches, so one that names this repository's whole address and maps it to itself
+    keeps a line like url."git@github.com:".insteadOf "https://github.com/" from sending the fetch over ssh with
+    the person's own ssh key; and no transport but GitHub's own scheme is allowed at all."""
+    scheme = urllib.parse.urlsplit(url).scheme
+    return ["-c", f"url.{url}.insteadOf={url}", "-c", "protocol.allow=never", "-c", f"protocol.{scheme}.allow=always"]
+
+
+def github_call(cache, url, *args, key=None, timeout=GIT_TIMEOUT):
+    """Every git call that names GitHub's address goes through here, and only here (row M74): the road held to the
+    project's own full address, no transport but its scheme, and the key, when there is one, only in this one
+    process's environment and only for that address (G3.4)."""
+    return git(cache, *args, env=github_env(key) if key else None, timeout=timeout, via=url)
+
+
+def address_read(cache, url):
+    """What git will really use for the remote `github`, read before any fetch: (True, None) when it is the address
+    the skill set; (False, where) when the person's git settings send it elsewhere; (None, why) when it could not be
+    read. Nothing is fetched on the second or the third."""
+    r = github_call(cache, url, "remote", "get-url", "github")
+    got = r.stdout.strip()
+    if r.returncode != 0 or not got:
+        return None, git_reason(r.stderr) or f"git answered {r.returncode}"
+    return (True, None) if got == url else (False, where_to(got))
+
+
+def where_to(url):
+    """Only the scheme and the host of an address git was sent to, never a name, a path or a credential in it."""
+    s = urllib.parse.urlsplit(url)
+    if s.scheme and s.hostname:
+        return f"{s.scheme}://{s.hostname}"
+    m = re.match(r"^(?:[^@/:]+@)?([^:/]+):", url)
+    return f"an ssh address on {m.group(1)}" if m else "another address"
+
+
+def git_reason(text):
+    """Why git failed, in its own words: its first fatal or error line (its last line can be the tail of a
+    sentence), with anything that looks like a credential hidden."""
+    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
+    first = next((x for x in lines if x.startswith(("fatal:", "error:"))), lines[-1] if lines else "")
+    return redact(first)
+
+
+def git(cache, *args, env=None, timeout=GIT_TIMEOUT, via=None):
     e = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
     for k in [k for k in e if k.startswith("GIT_CONFIG_")]:
         e.pop(k)
     e.update(env or {})
-    cmd = ["git", "-c", "http.followRedirects=false", "-c", "credential.helper="]
+    cmd = ["git", "-c", "http.followRedirects=false", "-c", "credential.helper="] + (road(via) if via else [])
     if cache:
         cmd += ["--git-dir", cache]
     return run(cmd + list(args), env=e, timeout=timeout)
@@ -1644,26 +1697,32 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         if git(None, "init", "-q", "--bare", cache).returncode != 0:
             return "the local cache could not be made"
         claim(cache, "tree:git")
-    git(cache, "config", "remote.github.url", f"{github_git()}/{full}.git")
+    url = f"{github_git()}/{full}.git"
+    github_call(cache, url, "config", "remote.github.url", url)
     git(cache, "config", "remote.github.pushurl", NO_PUSH)       # G5.3: a push to GitHub cannot even start
     for i, spec in enumerate(FETCH_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.github.fetch", spec)
     fetched_from = now_utc()
-    out = twice(lambda: git(cache, "fetch", "--prune", "--quiet", "github", env=github_env(key), timeout=limit))
+    same, said = address_read(cache, url)
+    if same is None:
+        return ADDRESS_UNREAD.format(why=said)
+    if not same:
+        return REWRITTEN.format(where=said)
+    out = twice(lambda: github_call(cache, url, "fetch", "--prune", "--quiet", "github", key=key, timeout=limit))
     if out is None:
         return f"the fetch from GitHub took longer than {limit} s, and so did the retry"
     if out.returncode != 0:
-        return "the fetch from GitHub failed: " + last_line(out.stderr).replace(key, "<the key>")
+        return "the fetch from GitHub failed: " + git_reason(out.stderr).replace(key, "<the key>")
     rec.update(seen_refs=refs_of(cache), seen_at=now_utc())      # G7.1: what GitHub showed, written down
     lfs = None
     if not refs_of(cache):
         pass                                   # an empty repository has no large files to fetch or push
     elif has_git_lfs():
-        out = twice(lambda: git(cache, "lfs", "fetch", "--all", "github", env=github_env(key), timeout=limit))
+        out = twice(lambda: github_call(cache, url, "lfs", "fetch", "--all", "github", key=key, timeout=limit))
         if out is None:
             return f"the large files took longer than {limit} s to fetch, and so did the retry"
         if out.returncode != 0:
-            return "the large files could not be fetched: " + last_line(out.stderr).replace(key, "<the key>")
+            return "the large files could not be fetched: " + git_reason(out.stderr).replace(key, "<the key>")
         lfs = True
     elif uses_lfs(cache):
         lfs = False

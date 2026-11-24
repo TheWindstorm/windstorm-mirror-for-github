@@ -1177,6 +1177,22 @@
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
+  },
+  {
+   "id": "M74",
+   "seen": "2026-11-24, a sighting in the suite (real pinned Gitea, the stand-in GitHub): a person's ~/.gitconfig with the common line url.\"ssh://...\".insteadOf \"https://github.com/\" pointed at the stand-in, and a logging ssh stand-in first on PATH; the first sync ran ssh git-upload-pack twice instead of the HTTPS fetch. The read-only key's header did not travel (it is keyed to the HTTPS address); against real GitHub with a working ssh agent the person's own ssh key, with the whole account's rights, would have read the project. The sync broke, 0 copied, and said only \"the fetch from GitHub failed: and the repository exists.\" (git's last stderr line).",
+   "promise": "every git call that names GitHub's address goes through one function that holds the road to the project's full address, allows only the scheme of the address the skill set (https for GitHub) and carries the read-only key; a person's insteadOf line for the host, in either common form, never moves the fetch or the large files' fetch; one for the project's whole address, or an address git cannot read, stops that copy with a sentence and the one step that mends it; a failed fetch is said by git's first fatal line.",
+   "codon": "G3.14",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G3_14_the_fetch_stays_on_the_road_the_read_only_key_travels",
+   "stand_in": "GitHub (a stand-in on loopback over http; real GitHub's scheme is https)",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
   }
  ],
  "declined": []
