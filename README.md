@@ -49,6 +49,9 @@ list (`ip` or `ifconfig`), on Linux `pkcheck`, read-only and never asking for a 
 person may switch on lingering themselves, on a Mac the two settings it reads (`defaults read` of the
 automatic-login account, `fdesetup status`), both read-only, and Python itself to check a self-update.
 
+Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
+forge on this computer; it still carries the mirror's calls to GitHub.
+
 ## What setup does
 
 `setup --dry-run` shows all of this first, and changes nothing.

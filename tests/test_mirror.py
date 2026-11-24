@@ -310,7 +310,9 @@ class Home:
         end = time.monotonic() + seconds
         while True:
             try:
-                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/healthz", timeout=2)
+                # the suite's own read of the forge on this computer takes no proxy of the environment (G8.6)
+                urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                    f"http://127.0.0.1:{port}/api/healthz", timeout=2)
                 return port, pr
             except (urllib.error.URLError, OSError):
                 if pr.poll() is not None:
@@ -3072,6 +3074,100 @@ class G8(unittest.TestCase):
                              f"SSH_ROOT_PATH = {mirror.paths()['forge']}/ssh"):
                     self.assertIn(line, ini)
 
+    def test_G8_6_the_skills_own_roads_take_no_proxy_and_run_no_hook_of_the_persons(self):
+        """M76 (seen 2026-11-24, a lived-in sighting in the suite): with http.proxy at a dead address in the person's
+        git config, the skill's git sent the push to its own forge on 127.0.0.1 to that proxy and the sync stopped,
+        0 copied; with http_proxy in the environment, the skill's calls to its own forge went the same way and the
+        sync stopped at its first step; with core.hooksPath set, the person's hooks ran inside the skill's own git.
+        Now, with both proxies dead from before the forge starts (as from a person's shell), GitHub's stand-in
+        exempted as a working proxy would carry GitHub, marking hooks in core.hooksPath and in init.templateDir,
+        and a project with large files: the sync copies everything, status says nothing is wrong, and no hook of the
+        person's ran. Every road to the forge goes through forge_call (git and git-lfs) or forge_opener (urllib)."""
+        lfs = mirror.has_git_lfs()
+        if not lfs and os.environ.get("WSM_REQUIRE_GITEA"):
+            raise AssertionError("git lfs is needed for this test in CI")
+        data = os.urandom(120_000)
+        dead = "http://127.0.0.1:9"
+        proxies = {k: dead for k in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+        proxies.update(no_proxy="localhost", NO_PROXY="localhost")
+        saved = {k: os.environ.get(k) for k in proxies}
+        os.environ.update(proxies)                       # from before the forge starts, as from a person's shell
+        urllib.request.install_opener(None)              # urllib builds its default opener, proxies and all, anew
+        try:
+            with World(self) as w:
+                home = os.environ["HOME"]
+                marks = os.path.join(home, "marks")
+                os.makedirs(marks)
+                hooks, template = os.path.join(home, "my-hooks"), os.path.join(home, "my-template")
+                for d in (hooks, os.path.join(template, "hooks")):
+                    os.makedirs(d)
+                    for h in ("pre-push", "reference-transaction", "post-update", "pre-receive", "post-checkout"):
+                        with open(os.path.join(d, h), "w") as f:
+                            f.write(f"#!/bin/sh\necho \"$0\" >> {marks}/hook\ncat >/dev/null 2>&1\nexit 0\n")
+                        os.chmod(os.path.join(d, h), 0o755)
+                for k in ("WSM_GITHUB_API", "WSM_GITHUB_GIT"):            # GitHub's stand-in, carried
+                    os.environ[k] = os.environ[k].replace("127.0.0.1", "localhost")
+                gh = os.environ["WSM_GITHUB_GIT"].rstrip("/")
+                with open(os.path.join(home, ".gitconfig"), "w") as f:
+                    f.write(f'[http]\n\tproxy = {dead}\n[http "{gh}/"]\n\tproxy = \n[core]\n\thooksPath = {hooks}\n'
+                            f'[init]\n\ttemplateDir = {template}\n')
+                w.gh.add_repo("someone", "alpha")
+                w.gh.commit("someone/alpha", {"a": b"1"})
+                if lfs:
+                    w.gh.add_repo("someone", "big")
+                    w.gh.commit("someone/big", {".gitattributes": b"*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                                                 "blob.bin": w.gh.lfs_file(data)})
+                w.key_set()
+                rc, out = w.first_sync()
+                self.assertEqual(rc, 0, out)
+                w.gh.commit("someone/alpha", {"b": b"2"})
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, out)
+                rc, st = quiet(mirror.main, ["status"])
+                self.assertEqual(rc, 0, st)
+                rc, chk = quiet(mirror.main, ["restore", "--check"])
+                self.assertEqual(rc, 0, chk)
+                # The older way of global hooks alone: init.templateDir, which git copies into each new cache.
+                with open(os.path.join(home, ".gitconfig"), "w") as f:
+                    f.write(f'[http]\n\tproxy = {dead}\n[http "{gh}/"]\n\tproxy = \n[init]\n\ttemplateDir = {template}\n')
+                w.gh.add_repo("someone", "gamma")
+                w.gh.commit("someone/gamma", {"g": b"1"})
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(any(os.path.exists(os.path.join(c, "hooks", "pre-push"))
+                                    for c in [os.path.join(w.p["cache"], x) for x in os.listdir(w.p["cache"])]),
+                                "git copied no hook from the template: the case did not happen")
+                self.assertFalse(os.path.exists(os.path.join(marks, "hook")),
+                                 "a hook of the person's ran: " + (fread(os.path.join(marks, "hook"))
+                                                                   if os.path.exists(os.path.join(marks, "hook")) else ""))
+                for k, v in saved.items():                       # the suite's own reads take no proxy
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                os.remove(os.path.join(home, ".gitconfig"))
+                self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+                self.assertEqual(w.forge_refs("someone--gamma"), w.gh_refs("someone/gamma"))
+                if lfs:
+                    key = fread(w.p["mirror_key"]).strip()
+                    req = urllib.request.Request(f"http://127.0.0.1:{w.port}/api/v1/repos/mirror/someone--big/media/blob.bin",
+                                                 headers={"Authorization": f"token {key}"})
+                    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    self.assertEqual(no_proxy.open(req, timeout=10).read(), data)
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            urllib.request.install_opener(None)          # no later test inherits an opener built with the dead proxies
+        # Every road to the forge goes through forge_call or forge_opener; every git runs with hooks off.
+        src = fread(SCRIPT)
+        body = re.search(r"\ndef forge_call\(.*?(?=\n\S)", src, re.S).group(0)
+        rest = src.replace(body, "")
+        self.assertEqual(re.findall(r"git_env\(\)", rest.replace("def git_env(self)", "")), [],
+                         "the forge's key handed to git around forge_call")
+        calls = re.findall(r"(?<!def )\bgit\((?:[^()]|\([^()]*\))*\)", rest)
+        self.assertEqual([c for c in calls if '"forge"' in c or '"origin"' in c or "forge.base" in c], [],
+                         "a git call names the forge's address around forge_call")
+        self.assertEqual(re.findall(r"urllib\.request\.(?:urlopen|build_opener)\([^)]*(?:127\.0\.0\.1|self\.base)", src), [],
+                         "a call to the forge around forge_opener")
+        self.assertIn('"-c", f"core.hooksPath={os.devnull}"', inspect.getsource(mirror.git))
+
     def test_G8_5_the_forge_never_writes_or_follows_a_git_config_of_the_persons(self):
         """M73 (seen 2026-11-24 with the real pinned Gitea, by T6's guard): the forge was handed the whole
         environment, and stock Gitea's git took an inherited GIT_CONFIG_GLOBAL over its own git home and wrote its
@@ -4736,7 +4832,8 @@ class Invariants(unittest.TestCase):
                    "http://127.0.0.1:9"}                  # the dead proxy that shuts every other host off (G7.2)
         found = set(re.findall(r"https?://[A-Za-z0-9.:_/-]*[A-Za-z0-9]", fread(SCRIPT)))
         self.assertEqual(found - allowed, set(), "an address outside the allowed ones")
-        self.assertEqual(len(re.findall(r"urlopen\(|build_opener\(", fread(SCRIPT))), 5,
+        # Four: GitHub's API, its releases, Gitea's download site, and the one opener for the skill's own forge (G8.6).
+        self.assertEqual(len(re.findall(r"urlopen\(|build_opener\(", fread(SCRIPT))), 4,
                          "a new way to reach the network: name it here and in the plan")
         # What it runs: git, the forge's binary, the system's service manager, the system's own address list,
         # and itself (to check a self-update before it is swapped in).

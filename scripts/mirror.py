@@ -1425,12 +1425,8 @@ class Forge:
         req = urllib.request.Request(self.base + "/api/v1" + path, data=data, method=method,
                                      headers={"Authorization": f"token {self.key}", "Content-Type": "application/json",
                                               "User-Agent": USER_AGENT})
-
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *a, **k):
-                return None
         try:
-            with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as r:
+            with forge_opener().open(req, timeout=30) as r:
                 return r.status, json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
             try:
@@ -1504,6 +1500,27 @@ def road(url):
     return ["-c", f"url.{url}.insteadOf={url}", "-c", "protocol.allow=never", "-c", f"protocol.{scheme}.allow=always"]
 
 
+THIS_COMPUTER = "127.0.0.1,localhost"
+
+
+def forge_call(forge, cache, *args, env=None, timeout=GIT_TIMEOUT):
+    """Every git call that names the skill's own forge's address goes through here, and only here (row M76): the
+    forge is on this computer, so no proxy of the person's is asked to reach it: no_proxy names this computer, and
+    git and git-lfs both keep to it, for a proxy in git's settings and one in the environment alike; the forge's
+    key only in this one process's environment."""
+    e = dict(forge.git_env(), **(env or {}))
+    e.update(no_proxy=THIS_COMPUTER, NO_PROXY=THIS_COMPUTER)     # the call reaches only this computer
+    return git(cache, *args, env=e, timeout=timeout)
+
+
+def forge_opener():
+    """The one opener for the skill's own forge: no proxy of the person's (row M76), and no redirect followed (C7)."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+
+
 def github_call(cache, url, *args, key=None, timeout=GIT_TIMEOUT):
     """Every git call that names GitHub's address goes through here, and only here (row M74): the road held to the
     project's own full address, no transport but its scheme, and the key, when there is one, only in this one
@@ -1540,11 +1557,15 @@ def git_reason(text):
 
 
 def git(cache, *args, env=None, timeout=GIT_TIMEOUT, via=None):
+    """Every git the skill runs: no prompt, no redirect, no credential helper, and no hook of the person's (row M76:
+    a core.hooksPath in the person's git config ran their hooks inside the skill's own caches); `via` holds the road
+    to GitHub (github_call); the road to the skill's own forge is forge_call's."""
     e = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
     for k in [k for k in e if k.startswith("GIT_CONFIG_")]:
         e.pop(k)
     e.update(env or {})
-    cmd = ["git", "-c", "http.followRedirects=false", "-c", "credential.helper="] + (road(via) if via else [])
+    cmd = ["git", "-c", "http.followRedirects=false", "-c", "credential.helper=", "-c", f"core.hooksPath={os.devnull}"]
+    cmd += road(via) if via else []
     if cache:
         cmd += ["--git-dir", cache]
     return run(cmd + list(args), env=e, timeout=timeout)
@@ -1735,7 +1756,7 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     git(cache, "config", "remote.forge.url", url)
     for i, spec in enumerate(FORGE_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.forge.fetch", spec)
-    out = twice(lambda: git(cache, "fetch", "--quiet", "--prune", "forge", env=forge.git_env(), timeout=limit))
+    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "forge", timeout=limit))
     if out is None or out.returncode != 0:
         return "what the copy holds now could not be read from the forge" + (
             "" if out is None else ": " + last_line(out.stderr))
@@ -1744,14 +1765,14 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         return "an old commit could not be kept, so the copy was not moved"
     dropped = drop_old_kept(cache, kept_days)
     if lfs:
-        out = twice(lambda: git(cache, "lfs", "push", "--all", "forge", env=forge.git_env(), timeout=limit))
+        out = twice(lambda: forge_call(forge, cache, "lfs", "push", "--all", "forge", timeout=limit))
         if out is None:
             return f"the large files took longer than {limit} s to push, and so did the retry"
         if out.returncode != 0:
             return "the large files could not be pushed into the forge: " + last_line(out.stderr)
     specs = push_specs(cache)
     if specs:
-        out = twice(lambda: git(cache, "push", "--quiet", "--atomic", "forge", *specs, env=forge.git_env(),
+        out = twice(lambda: forge_call(forge, cache, "push", "--quiet", "--atomic", "forge", *specs,
                                 timeout=limit))
         if out is None:
             return f"the push into the forge took longer than {limit} s, and so did the retry"
@@ -2520,7 +2541,7 @@ def copy_state(rec, forge_refs, max_age):
 
 
 def forge_refs_of(forge, name):
-    out = git(None, "ls-remote", f"{forge.base}/{forge.user}/{name}.git", env=forge.git_env(), timeout=60)
+    out = forge_call(forge, None, "ls-remote", f"{forge.base}/{forge.user}/{name}.git", timeout=60)
     if out.returncode != 0:
         return None
     return {r: s for s, r in (line.split("\t", 1) for line in out.stdout.splitlines() if "\t" in line)
@@ -2795,17 +2816,17 @@ def scratch(p, what):
 
 def clone_copy(forge, name, into):
     """A bare clone of one copy from the forge, with every host but this computer shut off (G7.2)."""
-    env = dict(forge.git_env(), **ONLY_THIS_COMPUTER)
-    out = git(None, "clone", "--quiet", "--bare", f"{forge.base}/{forge.user}/{name}.git", into, env=env)
+    out = forge_call(forge, None, "clone", "--quiet", "--bare", f"{forge.base}/{forge.user}/{name}.git", into,
+                     env=ONLY_THIS_COMPUTER)
     if out.returncode != 0:
         return "the copy could not be cloned from the forge: " + last_line(out.stderr)
     if uses_lfs(into):
         if not has_git_lfs():
             return "it holds large files, and git lfs is not installed here to check them"
-        out = git(into, "lfs", "fetch", "--all", "origin", env=env)
+        out = forge_call(forge, into, "lfs", "fetch", "--all", "origin", env=ONLY_THIS_COMPUTER)
         if out.returncode != 0:
             return "its large files could not be fetched from the forge: " + last_line(out.stderr)
-        out = git(into, "lfs", "fsck", env=env)
+        out = forge_call(forge, into, "lfs", "fsck", env=ONLY_THIS_COMPUTER)
         if out.returncode != 0:
             return "its large files are damaged: " + last_line(out.stdout + out.stderr)
     return ""
@@ -3181,7 +3202,7 @@ def wait_forge(port, up=True, seconds=FIRST_START_WAIT):
             if not up:
                 return True
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/healthz", timeout=2):
+                with forge_opener().open(f"http://127.0.0.1:{port}/api/healthz", timeout=2):
                     return True
             except (urllib.error.URLError, OSError):
                 pass
