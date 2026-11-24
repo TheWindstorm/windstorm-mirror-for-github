@@ -30,6 +30,9 @@ settings of yours and no other: `WSM_HOME` moves every folder of the skill's und
 `XDG_DATA_HOME` and `XDG_CONFIG_HOME` move its data and settings folders as they do for other programs. A command
 whose folders one of them moved says so first.
 
+Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
+forge on this computer; it still carries the mirror's calls to GitHub.
+
 ## Family
 
 Part of the Windstorm skills: [Pit Stop](https://github.com/TheWindstorm/windstorm-pit-stop),

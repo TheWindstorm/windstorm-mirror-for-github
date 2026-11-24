@@ -1209,6 +1209,38 @@
    "moved_why": "",
    "moved_by_person": "",
    "exception": ""
+  },
+  {
+   "id": "M76",
+   "seen": "2026-11-24, a lived-in sighting in the suite (real pinned Gitea, the stand-in GitHub), one setting of the person's at a time: http.proxy at a dead address in the person's git config sent the skill's git to its own forge on 127.0.0.1 to that proxy, and the sync stopped, 0 copied, status exit 1; http_proxy in the environment sent the skill's calls to its own forge the same way, and the sync stopped at its first step; core.hooksPath ran the person's reference-transaction and pre-push hooks inside the skill's own git (the sync still copied). credential.helper and core.sshCommand were never used.",
+   "promise": "every road to the skill's own forge (git, git-lfs, and the skill's HTTP calls) takes no proxy of the person's, from git's settings or the environment; every git the skill runs has hooks off, so no hook of the person's runs in the skill's own copies (core.hooksPath and init.templateDir alike); the person's proxy still carries the calls to GitHub.",
+   "codon": "G8.6",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G8_6_the_skills_own_roads_take_no_proxy_and_run_no_hook_of_the_persons",
+   "stand_in": "GitHub (a stand-in on loopback, exempted from the dead proxy as a working proxy would carry GitHub)",
+   "proven": "",
+   "issue": "",
+   "moved_why": "",
+   "moved_by_person": "",
+   "exception": ""
+  },
+  {
+   "id": "M77",
+   "seen": "2026-11-24, the lived-in sightings (rows M73, M74, M76): each setting a developer's machine carries and a stock one does not was found one at a time; tests/LIVED-IN.md lists what was tried and what was not.",
+   "promise": "the shape is decided with sightings: either the list beside the tests grows by one sighting at a time, or the skill's git runs with a global file of its own that takes from the person's settings only what their network needs, by name.",
+   "codon": "G8.6",
+   "owner": "maintainer",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "proven": "",
+   "issue": "",
+   "moved_why": "By the maintainer's word, 2026-11-24: decided in 0.1.1 with sightings, not before the first release.",
+   "moved_by_person": "",
+   "exception": ""
   }
  ],
  "declined": []
