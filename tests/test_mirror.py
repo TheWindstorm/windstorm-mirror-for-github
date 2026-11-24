@@ -216,6 +216,7 @@ class Home:
         # `su -` from root, or XDG_RUNTIME_DIR unset), where every `systemctl --user` answers 1 "Failed to connect to
         # bus: No medium found" and changes nothing; stop_reads: how many reads a stopped unit still reads deactivating.
         self.units_up, self.user_bus, self.stop_reads, self.stopping = set(), True, 0, {}
+        self.show_answer = None      # (code, stdout) every `show <unit> -p ActiveState` answers instead, when set
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
         os.makedirs(self.env["HOME"])
@@ -304,6 +305,8 @@ class Home:
                         self.units_up.discard(u)
                 elif verb[:1] == ["show"] and cmd[-2:] == ["-p", "ActiveState"] and len(cmd) == 6:
                     u = cmd[3]
+                    if self.show_answer is not None:
+                        return subprocess.CompletedProcess(cmd, self.show_answer[0], self.show_answer[1], "")
                     if u in self.stopping:
                         self.stopping[u] -= 1
                         if self.stopping[u] <= 0:
@@ -988,6 +991,22 @@ class G1(unittest.TestCase):
                 self.assertIn("the sync's service is stopped, and its file stays too", out)
                 self.assertIn(f". Nothing was removed. Run uninstall again in a minute: {step}", out)
                 self.assertNotIn("Gone now", out)
+                # (2b) answers that name no state are never "stopped" (a parser that took a missing state for
+                # "inactive" turned a bus error and an empty answer into "gone", in another skill): exit 0 with
+                # nothing, exit 0 with another field, and a non-zero answer without the bus's words
+                h.stopping.clear()
+                h.stop_reads = 0
+                for answer in ((0, ""), (0, "LoadState=loaded\n"), (0, "ActiveState=\n"), (4, "")):
+                    h.show_answer = answer
+                    h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, f"{answer}: {out}")
+                    self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{answer}: something was removed")
+                    self.assertIn(f"whether systemd stopped the forge's service could not be read (systemctl --user "
+                                  f"answered code {answer[0]}", out)
+                    self.assertIn(f". Nothing was removed. Run uninstall again in a minute: {step}", out)
+                    self.assertNotIn("no user bus", out)
+                h.show_answer = None
                 # (3) systemd stops them; the step, exactly as printed
                 h.stopping.clear()
                 h.stop_reads = 0
