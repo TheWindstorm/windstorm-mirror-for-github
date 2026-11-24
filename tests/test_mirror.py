@@ -2988,18 +2988,15 @@ class G7(unittest.TestCase):
             want = {n: w.gh_refs(f"someone/{n}") for n in ("alpha", "beta")}
             w.gh.stop()                                # the new computer: GitHub out of reach, only the file
             with Home(linger="yes") as h2:
+                h2.auto_login = mirror.getpass.getuser()   # a Mac that logs this account in by itself, stood in
                 h2.place_gitea()
                 rc, out = restore_with_the_forge_answering(h2, backup)
                 self.assertEqual(rc, 0, out)
                 self.assertIn("2 copies are back, on http://127.0.0.1:", out)
                 self.assertIn("counted in the forge itself", out)
                 self.assertIn("The forge runs as your own service.", out)
-                if mirror.system()[0] == "darwin":   # a Mac that does not log in by itself says so instead
-                    said = ["After a restart it starts by itself." in out,
-                            mirror.NO_LOGIN_NOTE in out]
-                    self.assertEqual(said.count(True), 1, out)
-                else:
-                    self.assertIn("After a restart it starts by itself.", out)
+                self.assertIn("After a restart it starts by itself.", out)
+                self.assertNotIn(mirror.NO_LOGIN_NOTE, out)
                 self.assertIn("make new keys and run `key set` for each owner: someone", out)
                 rc, out = quiet(mirror.main, ["restore", "--check"])
                 self.assertEqual(rc, 0, out)
@@ -3013,6 +3010,14 @@ class G7(unittest.TestCase):
                 rc, out = h2.setup("--from", backup)
                 self.assertEqual(rc, 2)
                 self.assertIn("already has a forge", out)
+            # The other answer of the same read (the Mac job, 2026-11-24): a Mac with no automatic login, or Linux
+            # with lingering refused, is told the copy stands still until the person logs in, never that it starts.
+            with Home(linger="no", enable_linger_ok=False) as h3:
+                h3.place_gitea()
+                rc, out = restore_with_the_forge_answering(h3, backup)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(mirror.NO_LOGIN_NOTE, out)
+                self.assertNotIn("After a restart it starts by itself.", out)
 
     def test_G7_4_restore_says_back_and_runs_only_from_what_the_forge_answered(self):
         """M88 (rule 24): restore's lines are read from the forge at that moment. Each thing is taken away in turn
