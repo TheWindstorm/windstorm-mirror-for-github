@@ -221,6 +221,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G6.11 | A reader that stops reading (`status | head`) never gets a traceback: the tool does the whole of its work, ends with its own code, and the rest of its words go nowhere; a sync is never stopped halfway by a closed pipe (a real machine saw a traceback, M49). | `test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback` |
 | G6.12 | Every command the tool prints with its own copy's path runs as printed when pasted whole into a shell: the path is quoted (on a Mac it holds a space, `Application Support`), through one helper (M60). | `test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space` |
 | G6.13 | Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write | `test_G6_13_a_command_for_the_person_stands_alone_on_its_line` *(to build)* |
+| G6.14 | A value the tool did not write passes through one helper on its way into a sentence: holding a backtick or a dollar-parenthesis, it is shown changed and the line says so; a command that must carry it exactly stands alone on its line, quoted for the shell | `test_G6_14_a_value_the_tool_did_not_write_is_never_printed_in_a_form_a_shell_runs` *(to build)* |
 
 ### G7 Restore
 
