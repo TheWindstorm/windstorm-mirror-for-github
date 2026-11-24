@@ -1577,6 +1577,38 @@
    "moved_why": "By the maintainer's word, 2026-11-24: seen in a cold start while 0.1.0 was under its checks; due 0.1.1 unless the maintainer moves it. 2026-11-24, by the maintainer's word: the README half (the agent clones first, then reads skills/mirror/SKILL.md in its clone, the file itself, not a summary of it) went out with 0.1.0; the tool half and the test that reads both halves come with this row in 0.1.1.",
    "seen": "2026-11-24, in a cold start before 0.1.0's tag (a fresh agent, a stock Ubuntu VM, two accounts): the agent read SKILL.md through its web-fetch tool, which answered with a summary (\"I can't return the full content verbatim\") that left out the rule to give each block whole, word for word; it never read SKILL.md from its clone, and gave the person the dry run's block and the announcement's block in its own words (0 of 10 and 0 of 7 lines whole). The go held: `go` printed the 7 lines whole in the person's own terminal (row M61).",
    "promise": "Each block for the person carries its own instruction in the tool's output: a line just before `tell the person 1 of N` says to give lines 1 to N to the person whole, word for word and in order, before any words of the agent's own; and the README's agent line says to read skills/mirror/SKILL.md in the clone, the file itself, not a web page's summary of it. A test reads both."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#126",
+   "id": "M100",
+   "codon": "G2.1",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "GitHub (its key page and a select-repositories key's listing)",
+   "moved_why": "By the maintainer's word, 2026-11-24: seen in cold starts while 0.1.0 was under its checks; due 0.1.1 unless the maintainer moves it.",
+   "seen": "2026-11-24, in two cold-start sittings before 0.1.0's tag (fresh agents, stock Ubuntu VMs): three agents offered the person GitHub's narrower choice, Only select repositories, beside the steps' All repositories, and one told the person the narrower choice is fine, which our texts do not say. A key of that kind had not been tried with the tool then.",
+   "promise": "The key step in SKILL.md and the tool's own key lines say what each repository choice means, as seen with a real key: All repositories is every project of that owner now and later; Only select repositories is only those chosen, and a project made later is not copied until it is added to the key. A test reads both."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#127",
+   "id": "M101",
+   "codon": "G6.9",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "GitHub (a stand-in's key-expiry header)",
+   "moved_why": "",
+   "seen": "2026-11-24, by reading 0.1.0's code before its tag: the line said before the go promises a warning two weeks before the key ends for any end date that reads cleanly, with no clock; for a key that ends in less than 14 days (GitHub offers 7 days, and the steps leave the expiration to the person) the sentence is untrue, and status names the key as a problem from its first day.",
+   "promise": "The line before the go takes the clock into account: a key that ends in less than 14 days is said as that, with its date and the one step (make a key for longer, then key set), and no warning two weeks before is promised; a key already ended is said as ended. A test holds a 7-day key, a 30-day key and an ended key."
   }
  ],
  "declined": []
