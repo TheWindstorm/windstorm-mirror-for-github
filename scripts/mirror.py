@@ -18,6 +18,7 @@ import argparse
 import base64
 import calendar
 import fnmatch
+import shlex
 import getpass
 import urllib.parse
 import hashlib
@@ -107,16 +108,22 @@ def say(msg=""):
     msg = str(msg)
     for s in SECRETS:
         msg = msg.replace(s, "<a key>")
-    print(msg, flush=True)
+    try:
+        print(msg, flush=True)
+    except BrokenPipeError:
+        # G6.11 (M49): the reader stopped reading (`status | head`). The work goes on to its end; the rest of its
+        # words go nowhere, rather than a traceback, or a sync stopped halfway through by a closed pipe.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
-def tell(lines):
+def tell(lines, to_the_person=False):
     """G10.5: what the person must hear goes out as one numbered block, "tell the person 1 of N: ..." to "N of N",
     so a line dropped, shortened or merged on its way to the person shows (a cold start saw the smallest model
-    shorten the dry run to one line and drop a sentence of the privacy line)."""
+    shorten the dry run to one line and drop a sentence of the privacy line). G3.13: in the person's own terminal
+    the same lines go out numbered "1 of N: ...", to them directly."""
     lines = [x for x in lines if x]
     for i, x in enumerate(lines, 1):
-        say(f"tell the person {i} of {len(lines)}: {x}")
+        say(f"{'' if to_the_person else 'tell the person '}{i} of {len(lines)}: {x}")
 
 
 def load_json(path, default):
@@ -240,6 +247,12 @@ DOMAIN = 127.0.0.1
 ROOT_URL = http://127.0.0.1:{port}/
 DISABLE_SSH = true
 START_SSH_SERVER = false
+; G8.4 (M64): stock Gitea writes the account's ~/.ssh/authorized_keys when it starts, even with SSH off (seen
+; 2026-11-23: an empty file made where there was none, and the person's own file rewritten). Never: what may log in
+; to this computer is not the forge's to touch, and any SSH file of its own stays in its own folder.
+SSH_CREATE_AUTHORIZED_KEYS_FILE = false
+SSH_CREATE_AUTHORIZED_PRINCIPALS_FILE = false
+SSH_ROOT_PATH = {f}/ssh
 LFS_START_SERVER = true
 OFFLINE_MODE = true
 
@@ -616,17 +629,45 @@ def service_path():
 
 
 
-# G1.8: every install line named here was run as written on a fresh system first; the plan's "Install lines, as
-# seen" table says where and when, and a test holds that no line is named here that is not in it. An apt line
-# alone fails on a fresh Ubuntu or Debian image (stale or no package lists), so it starts with apt update.
-INSTALL_GIT = ("on Ubuntu or Debian: sudo apt update && sudo apt install git; "
-               "on Fedora: sudo dnf install git; "
-               # G1.13: a Mac is written as what was seen; what this shows on a Mac without the tools, nobody has.
-               "on a Mac: git comes with Apple's developer tools, and xcode-select --install is Apple's command for them")
-INSTALL_LFS = ("on Ubuntu or Debian: sudo apt update && sudo apt install git-lfs; "
-               "on Fedora: sudo dnf install git-lfs; "
-               "on a Mac: from the project's own site, https://git-lfs.com; setup and sync find it by themselves "
-               "once it is installed")
+# G1.8 and G1.14 (M51, the family's rule 7): every install line here was run exactly as printed, in a terminal,
+# its prompts answered by hand, on a fresh image of that system; the plan's "Install lines, as seen" table says
+# where and when, and a test holds that no line is named that is not in it. Only this computer's own way is said:
+# a person on Fedora has no use for the apt line. An apt line alone fails on a fresh Ubuntu or Debian image (stale
+# or no package lists), so it starts with apt update. A system not named here (a kin of these too: its line was
+# never run there) gets the program's own page, not a guess.
+OS_RELEASE = "/etc/os-release"
+INSTALL_SEEN = {
+    ("ubuntu", "git"): "sudo apt update && sudo apt install git",
+    ("debian", "git"): "sudo apt update && sudo apt install git",
+    ("fedora", "git"): "sudo dnf install git",
+    ("ubuntu", "git-lfs"): "sudo apt update && sudo apt install git-lfs",
+    ("debian", "git-lfs"): "sudo apt update && sudo apt install git-lfs",
+    ("fedora", "git-lfs"): "sudo dnf install git-lfs",
+}
+OWN_PAGE = {"git": "https://git-scm.com/downloads", "git-lfs": "https://git-lfs.com"}
+
+
+def os_id():
+    """'mac', or the ID line of /etc/os-release ('ubuntu', 'debian', 'fedora', ...), or '' when it cannot be read."""
+    if system()[0] == "darwin":
+        return "mac"
+    try:
+        with open(OS_RELEASE, encoding="utf-8") as f:
+            m = re.search(r'^ID="?([A-Za-z0-9._-]+)"?\s*$', f.read(), re.M)
+    except OSError:
+        return ""
+    return m.group(1).lower() if m else ""
+
+
+def install_words(tool):
+    """How to install git or git-lfs on this computer, said only as far as it was seen (G1.14)."""
+    here = os_id()
+    if here == "mac" and tool == "git":
+        # G1.13: a Mac is written as what was seen; what this shows on a Mac without the tools, nobody has.
+        return "git comes with Apple's developer tools, and xcode-select --install is Apple's command for them"
+    line = INSTALL_SEEN.get((here, tool))
+    name = "git lfs" if tool == "git-lfs" else "git"
+    return f"on this computer: {line}" if line else f"{name}'s own page is {OWN_PAGE[tool]}"
 
 def git_out_of_service_reach():
     """The sentence when git is here only in a folder the service does not look in, else ''."""
@@ -635,28 +676,40 @@ def git_out_of_service_reach():
     if not here or shutil.which("git", path=where):
         return ""
     return (f"git is at {here}, in a folder the mirror's service does not look in ({where}), so the forge and the "
-            f"sync would not find it. Install git for the whole computer ({INSTALL_GIT}); that is the person's "
+            f"sync would not find it. Install git for the whole computer ({install_words('git')}); that is the person's "
             f"step, or their administrator's. Nothing was changed.")
 
 
 def git_missing_sentence():
-    return (f"git is not installed on this computer. The skill and the forge both need it. Install it ({INSTALL_GIT}), "
+    return (f"git is not installed on this computer. The skill and the forge both need it. Install it ({install_words('git')}), "
             "then run setup again.")
 
 
 LFS_NOT_IN_COPY = ("its large files are NOT in the copy, because git lfs was not installed when it was copied; "
                    "install git lfs, and the next sync copies them")
-LFS_MISSING = ("git lfs is not installed here, so projects with large files are copied without them until it is "
-               f"({INSTALL_LFS}).")
+def lfs_missing():
+    return ("git lfs is not installed here, so projects with large files are copied without them until it is "
+            f"({install_words('git-lfs')}; setup and sync find it by themselves once it is installed).")
+
+
+MAC_NO_SESSION = ("this account is not logged in at this Mac's screen, and on a Mac the forge starts only in a "
+                  "login session at the screen; it starts once this account is. Log in to this account at this "
+                  "Mac's screen, then run setup again")
 
 
 def install_service(p):
     if system()[0] == "darwin":
         write_file(p["plist"], plist_text(p))
         uid = str(os.getuid())
+        # G1.16 (M58): a launch agent loads only into a login session at the screen. Over ssh into an account that
+        # is not logged in there, nothing can start: said in the person's words, never launchctl's.
+        if run(["launchctl", "print", f"gui/{uid}"]).returncode != 0:
+            return False, MAC_NO_SESSION
         run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"])
         out = run(["launchctl", "bootstrap", f"gui/{uid}", p["plist"]])
-        return out.returncode == 0, last_line(out.stderr)
+        return out.returncode == 0, ("" if out.returncode == 0 else
+                                     f"this Mac did not load the forge's launch agent (code {out.returncode}); run "
+                                     "setup again, and if it stops here again, run status")
     write_file(p["unit"], unit_text(p))
     run(["systemctl", "--user", "daemon-reload"])
     out = run(["systemctl", "--user", "enable", "--now", SERVICE])
@@ -692,10 +745,11 @@ def gh_get(key, path):
         return 0, {}, {"message": str(e)}
 
 
-def spent_until(code, headers, floor=0):
+def spent_until(code, headers, floor=0, note=None):
     """G4.8: the time (epoch) until which GitHub's allowance for this key is spent, else None. GitHub says it two ways:
     a 403 or 429 with no calls remaining (back at X-RateLimit-Reset), or with Retry-After (back that many seconds
-    on). Below the skill's own floor counts as spent too, until the same reset."""
+    on). Below the skill's own floor the sync waits too, until the same reset; that is not "spent", so `note` gets
+    below_floor = [left, floor] for the line to say what it is (M9: a real machine was told "spent" with 4755 left)."""
     h = {k.lower(): str(v) for k, v in (headers or {}).items()}
     reset = int(h["x-ratelimit-reset"]) if h.get("x-ratelimit-reset", "").isdigit() else int(time.time()) + 3600
     if code in (403, 429):
@@ -705,6 +759,8 @@ def spent_until(code, headers, floor=0):
             return reset
     left = h.get("x-ratelimit-remaining", "")
     if floor and left.isdigit() and int(left) < floor:
+        if note is not None:
+            note["below_floor"] = [int(left), floor]
         return reset
     return None
 
@@ -724,22 +780,35 @@ def read_key_from_stdin():
     return sys.stdin.readline().strip()
 
 
+def gh_unread(code):
+    """G5.5 (M52): a read of GitHub that got no answer is said as that, never as an answer of 0 (a real machine with
+    its road cut was told "GitHub answered 0")."""
+    return "GitHub could not be reached" if not code else f"GitHub did not answer as expected ({code})"
+
+
 def check_key(key, owner):
-    """(kind, message): kind is 'user' or 'org' when the key reaches that owner's repositories, else None."""
+    """(kind, message): kind is 'user' or 'org' when the key reaches that owner's repositories, else None. No
+    answer, or GitHub's own failure (5xx), is "could not be read", never "this key cannot see" (G5.4, G5.5)."""
     code, _, body = gh_get(key, "/user")
     if code == 401:
         return None, "GitHub refused this key (401). Make a new one; nothing was kept."
     if code != 200:
-        return None, f"GitHub did not answer as expected ({code}); nothing was kept. Run key set again in a few minutes."
+        return None, gh_unread(code) + "; nothing was kept. Run key set again in a few minutes."
     if (body or {}).get("login", "").lower() == owner.lower():
         kind, listing = "user", "/user/repos?affiliation=owner&per_page=1"
     else:
         code, _, _ = gh_get(key, f"/orgs/{urllib.parse.quote(owner)}")
+        if not code or code >= 500:
+            return None, (f"{gh_unread(code)} when asked about '{owner}'; nothing was kept. Run key set again in "
+                          "a few minutes.")
         if code != 200:
             return None, (f"This key cannot see '{owner}' (GitHub answered {code}). A key belongs to one owner: "
                           "make one for this owner. Nothing was kept.")
         kind, listing = "org", f"/orgs/{urllib.parse.quote(owner)}/repos?per_page=1"
     code, _, _ = gh_get(key, listing)
+    if not code or code >= 500:
+        return None, (f"{gh_unread(code)} when asked for the repositories of '{owner}'; nothing was kept. Run key "
+                      "set again in a few minutes.")
     if code != 200:
         return None, (f"This key cannot list the repositories of '{owner}' (GitHub answered {code}). Nothing was "
                       "kept. Check the key's resource owner and repository access on GitHub's key page, then run key "
@@ -774,6 +843,9 @@ def cmd_key_set(args):
     write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
     say(f"The key for {owner} ({'your account' if kind == 'user' else 'organisation'}) is kept in "
         f"{key_path(p, owner)}, readable by you only. It is used for {owner}'s repositories and nothing else.")
+    if not load_json(p["state"], {}).get("go"):
+        say("Once a key is kept for every owner to copy, the go for the first copy is yours, here in this window: run "
+            f"{own_command(p, 'go')}. It shows what will be copied and waits for your Enter.")
     return 0
 
 
@@ -834,7 +906,7 @@ def list_owner(owner, kind, key, floor=0, info=None):
         if info is not None and page == 1:
             info["expires"] = headers.get("github-authentication-token-expiration") or headers.get(
                 "Github-Authentication-Token-Expiration") or ""
-        until = spent_until(code, headers, floor if next_link(headers) else 0)
+        until = spent_until(code, headers, floor if next_link(headers) else 0, info)
         if until and info is not None:
             info["spent_until"] = until
             return None, "GitHub's allowance is spent", calls
@@ -842,7 +914,8 @@ def list_owner(owner, kind, key, floor=0, info=None):
             return None, (f"GitHub refused the key for {owner} (401): the key stopped working (it may have expired, "
                           f"been narrowed or lost an organisation's approval). Make a new one and run key set {owner}"), calls
         if code != 200 or not isinstance(body, list):
-            return None, f"the listing of {owner} failed at page {page} (GitHub answered {code})", calls
+            return None, (f"the listing of {owner} failed at page {page} ("
+                          + (f"GitHub answered {code})" if code else "GitHub could not be reached)")), calls
         repos.extend(r for r in body if r.get("owner", {}).get("login", "").lower() == owner.lower())
         url = next_link(headers)
     return repos, None, calls
@@ -923,7 +996,8 @@ class Forge:
 
     @staticmethod
     def why(code, body):
-        return f"it answered {code}" if code else f"no answer: {(body or {}).get('message', '')}"[:160]
+        # M53: no raw text from the library in a line for a person; no answer is said as that
+        return f"it answered {code}" if code else "it did not answer"
 
     def rename(self, rid, cur, new):
         code, body = self.call("PATCH", f"/repos/{self.user}/{urllib.parse.quote(cur)}", {"name": new})
@@ -1321,10 +1395,10 @@ def restart_line(st):
             f"with one command: {LINGER_COMMAND.format(user=getpass.getuser())} ({LINGER_MEANS}).")
 
 
-def announce_first_copy(p, st, picked, complete):
+def announce_first_copy(p, st, picked, complete, to_the_person=False):
     """G3.7, G3.9: what the person says yes to, named: how many, which (the first ANNOUNCE_NAMES by name, the whole
     list in a file of the person's own), how big, where they go, what is not copied, how private. It is kept, and the
-    go copies exactly this list."""
+    go copies exactly this list. G3.13: `go` prints the same block in the person's own terminal."""
     names = first_copy_names(picked)
     size = sum(int(r.get("size") or 0) for _, _, r in picked.values())
     write_file(p["first_copy_list"], "".join(n + "\n" for n in names), 0o600)
@@ -1336,12 +1410,39 @@ def announce_first_copy(p, st, picked, complete):
           else "There are none to copy yet.",
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
-          restart_line(st), LFS_MISSING if not has_git_lfs() else "",
+          restart_line(st), lfs_missing() if not has_git_lfs() else "",
           *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
-          NOT_COPIED, PRIVATE_AS_THIS_COMPUTER])
+          NOT_COPIED, PRIVATE_AS_THIS_COMPUTER], to_the_person)
     st["announced"] = st.get("announced") or now_utc()
     st["announced_list"] = names
     save_state(p, st)
+
+
+def ask_go(p, st, names):
+    """G3.13 (M61): the person's own go, after the block was printed in their own terminal: Enter alone gives it,
+    for exactly this list; anything else, or nothing (the end of input), gives nothing."""
+    say(f"Press Enter to give your go for the first copy of exactly these {len(names)} repositories. Type anything "
+        "else first, and no go is given.")
+    answer = sys.stdin.readline()
+    if answer != "\n" and answer != "\r\n":
+        say(f"No go was given. Nothing was copied or changed. To give it later, run this again: {own_command(p, 'go')}")
+        return 1
+    st["person_go"] = {"at": now_utc(), "list": names}
+    save_state(p, st)
+    say(f"Your go is kept, for these {len(names)} repositories only. The first copy starts with the next sync: tell "
+        f"your agent, or run it here yourself: {own_command(p, 'sync')}")
+    return 0
+
+
+def cmd_go(args):
+    """G3.13 (M61, the family's rule 7): what the person must hear before the first copy is printed by a command they
+    run themselves, in their own terminal, and the copy goes on only after they press a key. Nothing piped in counts."""
+    p = paths()
+    if not sys.stdin.isatty():
+        say("Needs you: the go for the first copy is the person's own: in a terminal window of their own, they run "
+            f"{own_command(p, 'go')}, read what it shows and press Enter. No go was given, and nothing was changed.")
+        return 2
+    return cmd_sync(argparse.Namespace(announce=False, go=True, from_timer=False))
 
 
 def left_out_line(skipped):
@@ -1391,9 +1492,13 @@ def cmd_left_out(args):
 
 
 def spent_line(st):
-    return (f"GitHub's allowance for your keys is spent until {local_time(st['github_wait_until'])}. The sync waits "
-            "until then and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer "
-            "starts the next sync by itself.")
+    """G4.8: "spent" only when GitHub said so; under the skill's own floor, how much is left and the floor."""
+    when, low = local_time(st["github_wait_until"]), st.get("github_wait_floor")
+    head = (f"GitHub's allowance for your keys is down to {low[0]}, under the floor of {low[1]} this skill keeps, so "
+            f"the sync waits until {when}" if low else
+            f"GitHub's allowance for your keys is spent until {when}. The sync waits until then")
+    return head + (" and asks GitHub nothing before it; every copy is as it was. Nothing to do: the timer starts the "
+                   "next sync by itself.")
 
 
 def sync(p, args):
@@ -1401,7 +1506,8 @@ def sync(p, args):
     s = load_json(p["settings"], {})
     owners = s.get("owners") or {}
     if getattr(args, "from_timer", False) and not st.get("go"):
-        say("waiting for the person's go: nothing is copied until they say go and a sync is run on their word")
+        say("waiting for the person's go: nothing is copied until they give it in a terminal of their own (go) and "
+            "a sync is run")
         return 0
     if not st.get("port") or not os.path.exists(p["mirror_key"]):
         say("Run setup first.")
@@ -1413,6 +1519,15 @@ def sync(p, args):
     if not owners:
         say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
         return 2
+    # G3.12 (M59): nothing is announced that cannot then be done. The announcement asks the forge first, as the sync
+    # does, and asks GitHub nothing when the forge does not answer.
+    person_go = getattr(args, "go", False)
+    if (args.announce or person_go) and not st.get("go") and Forge(p, st).call("GET", "/version")[0] != 200:
+        say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so the first copy is not announced: it "
+            "could not be made now. Nothing was changed, and GitHub was not asked. It is your own service on this "
+            "computer: run status; if it still does not answer, run setup, which starts it again, then run sync "
+            "--announce again.")
+        return 1
     floor_mb = setting(s, "disk_floor_mb")
     free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
     if free_mb < floor_mb:
@@ -1438,8 +1553,10 @@ def sync(p, args):
             # G4.8: one line for the whole sync, never a failed project; nothing more is asked of GitHub until the
             # reset, by this process or any later one (the time is kept in the state, so it survives a restart).
             st["github_wait_until"] = stamp_of(max(info["spent_until"], epoch_of(st.get("github_wait_until"))))
+            st["github_wait_floor"] = info.get("below_floor")
             st["last_sync"] = {"at": now_utc(), "calls": calls + n, "copied": 0, "problems": 0,
-                               "stopped": "GitHub's allowance is spent"}
+                               "stopped": "under the floor of GitHub's allowance this skill keeps"
+                               if info.get("below_floor") else "GitHub's allowance is spent"}
             save_state(p, st)
             say(spent_line(st))
             return 0
@@ -1464,18 +1581,24 @@ def sync(p, args):
             "the names (owner/name, as GitHub shows them) with config include, or clear the list with config "
             "include --clear.")
         return 2
-    if args.announce:
-        # G3.7: the announcement never copies, the first time or any time after; only a plain sync is the go.
+    if args.announce or person_go:
+        # G3.7: the announcement never copies, the first time or any time after. G3.13: neither does `go`; it keeps
+        # the person's go for exactly this list, and the copy is made by a sync.
         if st.get("go"):
             say(f"The first copy was made on {local_time(st['go'])}, on the person's go; there is nothing to "
                 "announce, and nothing was copied now. The timer keeps the copies current.")
             return 0
         if len(complete) < len(owners):
             say("The first copy is not announced: the list of projects could not be read for "
-                + "; ".join(problems) + ". Nothing was changed. Run sync --announce again when GitHub answers.")
+                + "; ".join(problems) + ". Nothing was changed. Run "
+                + ("go" if person_go else "sync --announce") + " again when GitHub answers.")
             return 1
-        announce_first_copy(p, st, picked, complete)
-        say("Nothing was copied. When the person says go, run: sync")
+        announce_first_copy(p, st, picked, complete, person_go)
+        if person_go:
+            return ask_go(p, st, first_copy_names(picked))
+        say("Nothing was copied. The go for the first copy is the person's own, given in a terminal window of their "
+            f"own: they run {own_command(p, 'go')}, which shows them this same block and waits for their Enter. When "
+            "it says their go is kept, run: sync")
         return 0
     if not st.get("announced"):
         say("Before the first copy, run: sync --announce (it says what will be copied, and how big it is).")
@@ -1495,7 +1618,17 @@ def sync(p, args):
             say(f"Needs you: the first copy would not be what the person was told ({more} more and {fewer} fewer "
                 "than the last announcement). Nothing was copied. It is said again here:")
             announce_first_copy(p, st, picked, complete)
-            say("Give the person the block above; when they say go to this list, run: sync")
+            say("Give the person the block above. Their go, if they gave one, was for the old list: in a terminal "
+                f"window of their own, they run {own_command(p, 'go')}, which shows the new list and waits for their "
+                "Enter. When it says their go is kept, run: sync")
+            return 2
+        # G3.13 (M61, rule 7): the go is the person's own Enter, in their own terminal, after the same block was
+        # printed there; an agent's relay is never the only road for what they must hear, and a yes in a
+        # conversation is not the go.
+        if (st.get("person_go") or {}).get("list") != names:
+            say("Needs you: the go for the first copy is the person's own, given in a terminal window of their own, "
+                f"and it has not been given for this list. They run {own_command(p, 'go')}: it shows what will be "
+                "copied and waits for their Enter. Nothing was copied.")
             return 2
     forge = Forge(p, st)
     # G6.10 (M48): a forge that does not answer is said by the sync itself, even when nothing changed on GitHub, so
@@ -1570,13 +1703,104 @@ def sync(p, args):
         + (f", {len(lfs_missing)} cop{'y' if len(lfs_missing) == 1 else 'ies'} without its large files"
            if lfs_missing else ""))
     say(NOT_COPIED)
+    if plugin_removed(st):
+        gone = PLUGIN_GONE.format(command=own_command(p, "uninstall"))
+        say(gone)
     return 0 if not problems else 1
+
+
+# ---------------------------------------------------------------- Claude Code's own uninstall (rule 8)
+
+PLUGIN = "windstorm-mirror-for-github"
+PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes on as your own service on this "
+               "computer and keeps every copy current. To take it off: {command}")
+
+
+def own_command(p, *args):
+    """G6.12 (M60): a command for the person to run, with this skill's own copy, as it runs when pasted whole into a
+    shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
+    return " ".join(["python3", "-I", shlex.quote(p["script"]), *args])
+
+
+def plugin_registry_for(here):
+    """Claude Code keeps an installed plugin in <its folder>/plugins/cache/<catalog>/<plugin>/<version>/, and its
+    list of installed plugins in <its folder>/plugins/installed_plugins.json. None when `here` is not in such a
+    folder (a clone, or the copy setup made)."""
+    parts = os.path.abspath(here).split(os.sep)
+    for i in range(len(parts) - 3, 0, -1):
+        if parts[i] == "cache" and parts[i - 1] == "plugins" and parts[i + 2] == PLUGIN:
+            return os.sep.join(parts[:i] + ["installed_plugins.json"])
+    return None
+
+
+def plugin_removed(st):
+    """G9.6: True only when Claude Code's list of installed plugins, the one setup was run from, was READ and names
+    this plugin nowhere. A list that could not be read is never taken for 'removed' (a failed read is not a no)."""
+    reg = st.get("plugin_registry")
+    if not reg:
+        return False
+    try:
+        with open(reg, encoding="utf-8") as f:
+            rows = json.load(f)["plugins"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(rows, dict):
+        return False
+    return not any(k.split("@")[0] == PLUGIN and v for k, v in rows.items())
+
+
+def set_aside_folder(here):
+    """G9.6: the folder Claude Code marked `.orphaned_at` (the plugin was removed, or updated to a newer version)
+    when `here` is inside one; None otherwise. Nothing runs from such a folder."""
+    d = os.path.dirname(os.path.abspath(here))
+    for _ in range(2):
+        if os.path.exists(os.path.join(d, ".orphaned_at")):
+            return d
+        d = os.path.dirname(d)
+    return None
 
 
 # ---------------------------------------------------------------- commands
 
+def folders_setup_makes(p):
+    """G9.9 (M65, the family's rule 23): the folders around the skill's own places that this computer does not have
+    yet (on a stock home: ~/.config, ~/.config/systemd/user, ~/.local/share). Setup names them first, makes them,
+    records them, and uninstall takes each away again once it is empty; one that is not empty is named as left."""
+    own = {os.path.abspath(p["data"]), os.path.abspath(p["conf"])}
+    tops = [p["data"], p["conf"], os.path.dirname(p["plist"] if system()[0] == "darwin" else p["unit"])]
+    made = []
+    for d in tops:
+        d = os.path.abspath(d)
+        while not os.path.lexists(d) and os.path.dirname(d) != d:
+            if d not in own and d not in made:
+                made.append(d)
+            d = os.path.dirname(d)
+    return sorted(made)
+
+
+def record_made_folders(p, st, made):
+    """Kept in the record at once, before anything else is made, so a setup that stops halfway still leaves it."""
+    st["made_folders"] = sorted(set(st.get("made_folders") or []) | set(made))
+    save_state(p, st)
+
+
+def take_made_folders(st, removed):
+    """Uninstall: each folder setup made goes again only when it is empty and a real folder (never a link)."""
+    for d in sorted(st.get("made_folders") or [], key=len, reverse=True):
+        try:
+            if os.path.isdir(d) and not os.path.islink(d) and not os.listdir(d):
+                os.rmdir(d)
+                removed.append(f"{d}: an empty folder setup made")
+        except OSError:
+            pass
+
+
 def setup_plan(p, st):
     plan = []
+    made = folders_setup_makes(p)
+    if made:
+        plan.append("make the folders " + ", ".join(made) + " (not on this computer yet); uninstall takes each "
+                    "away again once it is empty")
     if not (os.path.exists(p["bin"]) and sha256_of(p["bin"]) == pin_for_this_system()[1]):
         plan.append(f"download Gitea {GITEA_VERSION} for {'/'.join(system())} from {GITEA_BASE} and check its "
                     "pinned SHA-256 before running it")
@@ -1591,8 +1815,13 @@ def setup_plan(p, st):
         plan.append(f"make the '{MIRROR_USER}' account that owns the copies, with a key of its own in "
                     f"{p['mirror_key']}, readable by you only")
     plan.append(f"copy this script to {p['script']}")
-    plan.append("install the forge as your own service (" +
-                ("a launch agent" if system()[0] == "darwin" else "a systemd user unit") + ") and start it")
+    if system()[0] == "darwin":
+        plan.append("install the forge as your own service (a launch agent) and start it")
+    else:
+        base = os.path.dirname(p["unit"])
+        plan.append(f"install the forge as your own service (a systemd user unit in {base}, the sync timer beside "
+                    f"it) and start them; systemctl links them in {base}/default.target.wants and "
+                    f"{base}/timers.target.wants, and uninstall takes the units and those links away")
     return plan
 
 
@@ -1621,14 +1850,16 @@ def cmd_setup(args):
         say("setup --dry-run: nothing is changed.")
         tell([f"Setup would {step}." for step in plan]
              + [f"After a restart: {note}" if note else "After a restart it starts by itself.",
-                LFS_MISSING if not has_git_lfs() else ""])
+                lfs_missing() if not has_git_lfs() else ""])
         return 0
     if linger_unchosen(args, st):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
         say(LINGER_CHOICE)
         return 2
+    made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    record_made_folders(p, st, made)
     if fetch_forge(p, os.environ.get("WSM_GITEA_BASE")):
         say(f"Gitea {GITEA_VERSION} downloaded; checksum matches the pin.")
     else:
@@ -1665,6 +1896,15 @@ def cmd_setup(args):
     if os.path.abspath(p["script"]) != here:
         shutil.copyfile(here, p["script"] + ".tmp")
         os.replace(p["script"] + ".tmp", p["script"])
+    if plugin_registry_for(here):
+        st["plugin_registry"] = plugin_registry_for(here)
+    if os.path.abspath(p["script"]) != here:
+        # G9.8 (M63): where the skill was downloaded to, so that uninstall can name it as still here. Setup run again
+        # from its own copy keeps the record.
+        kind, where = downloaded_from(here)
+        st.pop("setup_from", None)
+        st.pop("setup_from_file", None)
+        st["setup_from" if kind == "folder" else "setup_from_file"] = where
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
     ok, why = install_service(p)
@@ -1687,7 +1927,7 @@ def cmd_setup(args):
         save_state(p, st)
     # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
     # person must hear before the go is in the announcement's block, the one they say go to.
-    for line in ("After a restart it starts by itself." if back else "", note, LFS_MISSING if not has_git_lfs() else "",
+    for line in ("After a restart it starts by itself." if back else "", note, lfs_missing() if not has_git_lfs() else "",
                  PRIVATE_AS_THIS_COMPUTER):
         if line:
             say(line)
@@ -1782,7 +2022,12 @@ def gh_public(path, accept="application/vnd.github+json"):
 def release_check(st, force=False):
     """G6.6: once a day, one call with no key for this skill's latest release. Returns lines to show."""
     rc = st.get("release_check") or {}
-    if force or time.time() - epoch_of(rc.get("at")) >= 86400:
+    due = force or time.time() - epoch_of(rc.get("at")) >= 86400
+    if due and not force and epoch_of(st.get("github_wait_until")) > time.time():
+        # G4.8 (M25): while GitHub's allowance waits for its reset, nothing at all is asked of GitHub, not even this
+        # read with no key (a real machine saw status make it during the wait).
+        return ["newer release: not asked while the sync waits for GitHub's reset; it is asked after it"]
+    if due:
         try:
             code, raw = gh_public(f"/repos/{SKILL_REPO}/releases/latest")
             if code != 200:
@@ -1938,12 +2183,15 @@ def cmd_status(args):
     save_state(p, st)
     if epoch_of(st.get("github_wait_until")) > time.time():
         notes.append(f"github: {spent_line(st)}")
+    if plugin_removed(st):
+        notes.append("plugin: " + PLUGIN_GONE.format(command=own_command(p, "uninstall")))
     for x in problems:
         say(f"problem: {x}")
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
         + (f", {no_lfs} without its large files" if no_lfs else ""))
     say(f"first copy: made on {local_time(st['go'])}, on your go" if st.get("go") else
-        "first copy: waiting for your go (sync --announce says what will be copied; a sync on your word starts it)")
+        "first copy: waiting for your go: in a terminal window of your own, run " + own_command(p, "go")
+        + " (it shows what will be copied and waits for your Enter); a sync then starts it")
     for x in notes:
         say(x)
     say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "
@@ -2008,8 +2256,15 @@ def cmd_restore(args):
     if not args.check:
         say("Say what to do: restore --check, or restore --to <url> <owner/name>.")
         return 2
+    # G7.5 (M53): a forge that does not answer is said as that, with its next step; it is not a finding about any
+    # copy (a real machine was told "1 difference(s)" and a raw connection error, with no step).
+    if forge.call("GET", "/version")[0] != 200:
+        say(f"problem: the forge does not answer on 127.0.0.1:{st['port']}, so no copy could be checked; this says "
+            "nothing about the copies themselves. It is your own service on this computer: run status; if it still "
+            "does not answer, run setup, which starts it again and keeps every copy, then run restore --check again.")
+        return 1
     work = scratch(p, "restore-check")
-    diffs, whole, total = [], 0, 0
+    diffs, unread, whole, total = [], [], 0, 0
     try:
         for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
             if not rec.get("forge_id"):
@@ -2019,7 +2274,7 @@ def cmd_restore(args):
             try:
                 cur = forge.by_id(rec["forge_id"])
             except CouldNotRead as e:
-                diffs.append(f"{name}: its copy could not be read: {e}")
+                unread.append(f"{name}: its copy could not be read: {e}")   # rule 6: not a difference
                 continue
             if not cur:
                 diffs.append(f"{name}: its copy is not in the forge")
@@ -2048,11 +2303,11 @@ def cmd_restore(args):
                 whole += 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    for d in diffs:
+    for d in diffs + unread:
         say(d)
-    say(f"restore check: {total} copies, {whole} whole, {len(diffs)} difference(s); "
-        "nothing outside this computer was asked")
-    return 0 if not diffs and total else 1
+    say(f"restore check: {total} copies, {whole} whole, {len(diffs)} difference(s), {len(unread)} could not be read; "
+        "nothing outside this computer was asked" + ("; run restore --check again when the forge answers" if unread else ""))
+    return 0 if not diffs and not unread and total else 1
 
 
 def github_hosts():
@@ -2247,8 +2502,10 @@ def setup_from(p, args):
         say(LINGER_CHOICE)
         return 2
     src = os.path.abspath(os.path.expanduser(args.from_file))
+    made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+    record_made_folders(p, {}, made)
     fetch_forge(p, os.environ.get("WSM_GITEA_BASE"))
     work = scratch(p, "setup-from")
     try:
@@ -2299,7 +2556,7 @@ def setup_from(p, args):
                          "is in place, and the sync cannot reach it: open an issue with this line.")
     write_private(p["mirror_key"], secret(out.stdout.strip()) + "\n")
     st = dict(old_st, port=port, version=VERSION, gitea=GITEA_VERSION, restored_from=os.path.basename(src),
-              restored_at=now_utc())
+              restored_at=now_utc(), made_folders=made)
     st.pop("keys", None)
     save_state(p, st)
     here = os.path.abspath(__file__)
@@ -2516,10 +2773,15 @@ def cmd_uninstall(args):
     at a terminal (it cannot be undone, so nothing piped in counts)."""
     p = paths()
     if args.delete_copies and not sys.stdin.isatty():
-        say("Needs you: deleting the copies cannot be undone, so the person runs this themselves, in a terminal "
-            f"window of their own: python3 -I {p['script']} uninstall --delete-copies. Nothing was changed.")
+        line = own_command(p, "uninstall", "--delete-copies")
+        say("Needs you: deleting the copies cannot be undone, so the person does it themselves: in a terminal "
+            f"window of their own, they run {line} and type the number of copies. Nothing was changed.")
         return 2
-    st = load_json(p["state"], {})
+    # Rule 6 (M65): a record that could not be read is never "setup made nothing": then no folder setup made is
+    # taken away, it is said, and the record is never written over.
+    raw = load_json(p["state"], None) if os.path.exists(p["state"]) else None
+    record = "read" if isinstance(raw, dict) else ("unreadable" if os.path.exists(p["state"]) else "none")
+    st = raw if record == "read" else {}
     # Rule 8: a sync that is running is a wait, said with what holds it, never a refusal of a person who wants to
     # leave. With no folder of the skill's left, nothing can be running, and no folder is made again.
     if os.path.exists(p["data"]):
@@ -2563,7 +2825,7 @@ def cmd_uninstall(args):
             elif st.get("linger_by_setup") is False:
                 linger_said = "Lingering was already on before setup, so it is left on."
             st.pop("linger_by_setup", None)
-            if os.path.exists(p["state"]):
+            if record == "read" and os.path.exists(p["state"]):
                 save_state(p, st)
         for d in (os.path.dirname(p["bin"]), p["cache"], p["conf"]):
             if os.path.exists(d):
@@ -2588,12 +2850,68 @@ def cmd_uninstall(args):
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
             rc = 1
-    uninstall_census(p, removed, linger_said, n)
+    if record == "read":
+        take_made_folders(st, removed)
+    uninstall_census(p, removed, linger_said, n, st, record)
     return rc
 
 
-def uninstall_census(p, removed, linger_said, n):
-    """Rule 8: the last thing uninstall prints says what is gone now and what is kept. Run twice, it says so."""
+def downloaded_from(here):
+    """G9.8 (M63): ("folder", the skill's own folder) when `here` is <folder>/scripts/mirror.py in a copy of the skill's
+    repository or Claude Code's plugin folder (it holds skills/mirror/SKILL.md); otherwise ("file", `here`): a script
+    run on its own is named as the one file it is, never the folder around it (a home, a downloads folder)."""
+    root = os.path.dirname(os.path.dirname(here))
+    if (os.path.basename(os.path.dirname(here)) == "scripts"
+            and os.path.isfile(os.path.join(root, "skills", "mirror", "SKILL.md"))):
+        return "folder", root
+    return "file", here
+
+
+def still_here(p, st, record="read"):
+    """G9.8 (M63, the family's rule 8, 2026-11-23: an agent invents where the tool is silent): everything still on
+    this computer because of the skill that uninstall does not take, with where it is and whose it is to delete."""
+    lines = []
+    root = st.get("setup_from")
+    if root and os.path.isdir(root):
+        if plugin_registry_for(os.path.join(root, "scripts", "mirror.py")):
+            how = (f"with its own plugin uninstall: claude plugin uninstall {PLUGIN}@{PLUGIN}" if system()[0] != "darwin"
+                   else "with its own plugin uninstall")
+            lines.append(f"{root}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
+                         f"are Claude Code's; it removes both {how}. Nothing runs from them now.")
+        else:
+            lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
+                         "delete it like any folder when you want. Nothing runs from it now.")
+    elif st.get("setup_from_file") and os.path.isfile(st["setup_from_file"]):
+        lines.append(f"{st['setup_from_file']}: the copy of the script setup was run from. It is yours; delete it "
+                     "when you want. Nothing runs from it now.")
+    elif not root and not os.path.exists(p["state"]):
+        lines.append("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
+                     "Claude Code's plugin folder): no record of where it is is left on this computer. It is yours, "
+                     "or Claude Code's for a plugin; nothing runs from it now.")
+    made = [d for d in (st.get("made_folders") or []) if os.path.isdir(d)]
+    holds = [d for d in made if os.path.exists(p["data"]) and (p["data"] + os.sep).startswith(d + os.sep)]
+    if holds:
+        lines.append(", ".join(holds) + ": folders setup made to hold the folder of copies. They stay while it "
+                     "stays, and go with it once they are empty.")
+    for d in made:
+        if d not in holds:
+            lines.append(f"{d}: a folder setup made, left because other files are in it now. It is yours.")
+    if record == "unreadable":
+        lines.append(f"Folders setup made around its own (on a fresh computer, such as {os.path.dirname(p['unit'] if system()[0] != 'darwin' else p['plist'])}): "
+                     f"the record of them, {p['state']}, could not be read, so none was removed. Any of them that "
+                     "is empty is yours to delete or keep.")
+    elif record == "none":
+        lines.append("Folders setup made around its own, if any are still here: no record of them is left on this "
+                     "computer, so none was removed.")
+    if system()[0] != "darwin":
+        lines.append("Any lines of the service in this computer's journal (journalctl --user): the system ages them "
+                     "out by itself.")
+    return lines
+
+
+def uninstall_census(p, removed, linger_said, n, st=None, record="read"):
+    """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
+    computer because of the skill that uninstall does not take. Run twice, it says so."""
     say("uninstall: what is gone, and what is kept.")
     if removed:
         say("Gone now:")
@@ -2610,7 +2928,12 @@ def uninstall_census(p, removed, linger_said, n):
     elif os.path.exists(p["data"]):
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
     else:
-        say("Kept: nothing. Nothing of the skill's is left on this computer.")
+        say("Kept: nothing; there is no folder of copies and no record of the skill's on this computer now.")
+    left = still_here(p, st or {}, record)
+    if left:
+        say("Still on this computer, and not uninstall's to take:")
+        for x in left:
+            say(f"  {x}")
 
 
 def cmd_run_forge(args):
@@ -2655,6 +2978,9 @@ def main(argv=None):
     y = sub.add_parser("sync", help="copy every chosen repository from GitHub into the forge")
     y.add_argument("--announce", action="store_true", help="before the first copy: say what will be copied")
     y.add_argument("--from-timer", action="store_true", help=argparse.SUPPRESS)
+    g = sub.add_parser("go", help="shows you what will be copied and takes your go for the first copy (run it yourself, in a "
+                       "terminal window of your own)")
+    g.set_defaults(fn=cmd_go)
     lo = sub.add_parser("left-out", help="the names of the projects your include list and exclude patterns leave out")
     lo.set_defaults(fn=cmd_left_out)
     st_ = sub.add_parser("status", help="what is copied, what is behind, and when the next sync runs")
@@ -2681,6 +3007,15 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
+    aside = set_aside_folder(__file__)
+    if aside:
+        own, line = paths()["script"], own_command(paths(), a.cmd)
+        say(f"Stopped: this copy of the skill is in a folder Claude Code set aside when its plugin was removed or "
+            f"updated ({aside}), and nothing runs from there. Nothing was done. "
+            + (f"The skill set up on this computer is {own}; run it there: {line}" if os.path.exists(own) else
+               "Nothing of the skill's is set up on this computer; to use it, install the plugin again and run "
+               "setup."))
+        return 3
     return a.fn(a)
 
 

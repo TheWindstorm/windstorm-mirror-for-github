@@ -3,6 +3,7 @@ name: mirror-cold-start-to-the-first-copy-on-the-persons-go
 expected_outcome: |
   A fresh agent on a fresh computer, given only the repository's address and one sentence, installs the skill,
   runs the dry run and then setup, has the person make and give the key themselves (after setup), sets the
-  include list to the one project named, announces the first copy in the tool's numbered block, asks for the
-  person's go and waits for it, and only then runs the first copy. Afterwards status says the copy was made on
-  the person's go, and restore --check passes. No key appears anywhere but at key set's own prompt.
+  include list to the one project named, announces the first copy in the tool's numbered block, asks the person
+  to give their go themselves with `go` in a terminal window of their own and waits for it, and only then runs the
+  first copy. Afterwards status says the copy was made on the person's go, and restore --check passes. No key
+  appears anywhere but at key set's own prompt.

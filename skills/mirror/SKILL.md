@@ -13,7 +13,7 @@ written to GitHub.
 The whole tool is one script: `scripts/mirror.py`, two levels above this skill's base directory. Below, `M` means
 `python3 -I <that path>`. After `setup`, the same script is also installed at
 `~/.local/share/windstorm-mirror/mirror.py` (Linux) or `~/Library/Application Support/windstorm-mirror/mirror.py`
-(macOS); the timer runs that copy.
+(macOS; that path holds a space, so in a command it is quoted, as the tool prints it); the timer runs that copy.
 
 ## The order
 
@@ -44,9 +44,10 @@ words of your own. Never shorten, merge, reword or leave one out; your own words
    on a command line, in a file you write or in your own output, and never ask for one.
 5. `M sync --announce`. Give the person its `tell the person` block whole: how many repositories, how big, where
    they go, what happens after a restart, whether large files are copied, what is not copied, and that the copy is
-   as private as this computer. Then the **Person** step: the go for the first copy.
-   Running `--announce` again copies nothing; it says it all again.
-6. `M sync`, only after the person said go. The first copy can take a while; it says how far it is.
+   as private as this computer. Then the **Person** step: the go for the first copy, which they give in their own
+   terminal (`go`). Running `--announce` again copies nothing; it says it all again.
+6. `M sync`, only after the person said that `go` kept their go. The first copy can take a while; it says how far
+   it is. Without their go it copies nothing and says so.
 7. `M status`. Show the person its `copies:` line and every `problem:` line.
 8. `M restore --check`. Show the person its total. It proves every copy from the forge alone.
 
@@ -75,10 +76,12 @@ not work around it.
 mirror to keep running when you are logged out and after a restart?" Their yes is `setup --linger`, their no is
 `setup --no-linger`. Do not choose for them.
 
-**The go for the first copy.** After step 5, say: "That is what will be copied. Shall I start the first copy?"
-Only a clear yes from the person is the go. Do not take silence, or an earlier yes to something else, as the go.
-The go covers the list the person was told. If `sync` says the first copy would not be what they were told, it
-copies nothing and prints the new block: give it whole, and ask for the go again.
+**The go for the first copy.** After step 5, say: "That is what will be copied. The go is yours: in the same
+terminal window of your own, run `python3 -I <the script> go`. It shows you all of this again, and the copy starts
+only after you press Enter there. Tell me when it says your go is kept." The go is their Enter in their own
+terminal, nothing else: a yes in this conversation is not the go, and you never run `go` yourself. The go covers
+the list it showed them. If `sync` says the first copy would not be what they were told, it copies nothing and
+prints the new block: give it whole, and ask them to run `go` again.
 
 **The administrator's command.** If setup says the copy stands still after a restart until the person logs in,
 and prints a command such as `sudo loginctl enable-linger <user>`, say: "To keep the copy current after a restart
@@ -112,7 +115,11 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 ## Never
 
 - Never put a key or password on a command line, in a file you write, in a message or in your output.
-- Never run `sync` without `--announce` first, or without the person's go, on a new install.
+- Never run `sync` without `--announce` first, or without the person's go, on a new install. Never run `go`
+  yourself, and never press its Enter for the person: it is theirs, in their own terminal.
+- Never delete, and never offer to delete, the folder of copies or the record that uninstall kept, unless the
+  person asks for it in their own words in this conversation; even then, it is their own command
+  (`uninstall --delete-copies`, in a terminal window of their own).
 - Never change the forge's address from 127.0.0.1, and never start a tunnel to it.
 - Never push to GitHub, and never answer a GitHub prompt on the person's behalf.
 - Reach GitHub only through `M`, never by yourself, not even to look: no `git clone` or `git ls-remote` of
