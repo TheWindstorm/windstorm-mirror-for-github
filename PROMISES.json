@@ -1577,6 +1577,22 @@
    "moved_why": "",
    "seen": "2026-11-24, on a stock Ubuntu 24.04 virtual machine (no key), before the 0.1.0 tag: uninstall run from a shell with no user bus (XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset; and `su - <the person>` from root), where `systemctl --user` answered \"Failed to connect to bus: No medium found\", removed the unit files, the forge's program and the keys, said \"Gone now\" and ended 0, while systemd still ran the forge's service (active, running) from its removed program. Read as the person before and after: before, one forge process and the unit loaded, active and running; after, the same one forge process under the same main process id, the unit still loaded, active and running, and in ~/.config/systemd/user only the two folders of systemd's links. Run the ordinary way, from the person's own ssh login, it stopped the forge: after it, no forge process, and the unit not found, inactive and dead.",
    "promise": "Before uninstall removes anything on Linux, it tells systemd to stop each of the skill's units and reads each one stopped (ActiveState inactive or failed); a unit still running at 30 s, or a read that does not answer, is said as that, nothing at all is removed, and it ends 3 with the whole command line to run again, and with no user bus where to run it."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#140",
+   "id": "M114",
+   "codon": "G6.12",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G6_12_no_printed_line_carries_a_backtick_or_a_dollar_parenthesis",
+   "stand_in": "none",
+   "moved_why": "",
+   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: 11 printed lines (13 string constants) carried a backtick: two whole git config commands, Claude Code's plugin uninstall with the plugin's key, and the names of the tool's own commands inside sentences (status, self-update, upgrade-forge, key set). A line that is reported inside a shell's double quotes runs what stands between backticks, and the answer lands in the text that is sent on; one of the two git config commands answers with the person's git settings. On the change that took the backticks out, status still added \"; not refreshed since <time>\" after a copy's stored reason, so the command that reason names no longer ended its line: found on reading the change, before the tag.",
+   "promise": "No line the tool prints carries a backtick or a dollar-parenthesis. A whole command the person is asked to run stands alone on a line of its own and ends that line, on every road that prints it (sync, status, uninstall). The name of one of the tool's own commands inside a sentence is a plain word. A value in such a command that the tool did not write is quoted for the shell. A test reads every string the script can print for the two forms; test_G6_2_a_reason_that_ends_in_a_command_ends_its_status_line_with_it runs status with an earlier good refresh for both git-setting reasons and reads that the command ends its line; the uninstall census test names a catalog that needs quoting."
   }
  ],
  "declined": []
