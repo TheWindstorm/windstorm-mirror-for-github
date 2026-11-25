@@ -4287,11 +4287,11 @@ class G6(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             said += out
             day = time.strftime("%Y-%m-%d", time.gmtime())
-            for was, what in (("d?x?", "deleted"), ("d$?x)", "deleted"), ("tags/t$?y)", "moved"),
+            for was, what in (("d?x?", "deleted"), ("d??x)", "deleted"), ("tags/t??y)", "moved"),
                               ("tags/t?z?", "deleted")):
                 self.assertIn(f"{full}: {was} was {what} on GitHub; its old commit is kept as kept/{day}/{was}{note}",
                               out)
-            self.assertIn(mirror.TAG_NOT_KEPT.format(full=full, short="tags/f$?b)", what="deleted", at="a file")
+            self.assertIn(mirror.TAG_NOT_KEPT.format(full=full, short="tags/f??b)", what="deleted", at="a file")
                           + note, out)
             # Only the printed form changed: the forge holds every name as it is, each kept ref by its own name.
             held = w.forge_refs("someone--alpha")
@@ -4313,18 +4313,21 @@ class G6(unittest.TestCase):
             rc, out = quiet(mirror.main, ["restore", "--check"])
             self.assertEqual(rc, 1, out)
             said += out
-            self.assertRegex(out, re.escape(f"{full}: refs/heads/c$?q) is missing in the copy, ") + r"[0-9a-f]{12}"
+            self.assertRegex(out, re.escape(f"{full}: refs/heads/c??q) is missing in the copy, ") + r"[0-9a-f]{12}"
                              + re.escape(" when GitHub was last seen" + note))
             # Two lines that need a world the guard alone makes (NOT_AS_LISTED, FORGE_NOT_AS_LISTED), read by their
             # one builder; two names that show alike stay two.
             for words in (mirror.NOT_AS_LISTED, mirror.FORGE_NOT_AS_LISTED):
                 line = mirror.not_as_listed_line([("refs/heads/a`b", "missing"), ("refs/heads/a$(b", "missing"),
                                                   ("refs/tags/v`1", "at another commit")], words)
-                self.assertEqual(line, words.format(n=3, names="a?b: missing, a$?b: missing, tag v?1: at another "
+                self.assertEqual(line, words.format(n=3, names="a?b: missing, a??b: missing, tag v?1: at another "
                                                     "commit; " + mirror.SHOWN_CHANGED))
                 said += line + "\n"
             self.assertEqual(mirror.shown_names(["x`1", "x\udcff1"]), "x?1, x?1; " + mirror.SHOWN_CHANGED)
             self.assertEqual(forms(said), [], said)
+            # Inside double quotes a shell reads a dollar and a question mark as the last exit code: a shown name
+            # never holds that pair, so it never shows a digit that was never in it.
+            self.assertNotIn("$" + "?", said)
             self.assertNotIn(mirror.SHOWN_CHANGED, mirror.shown_names(["plain", "x;y"]))
         # git's and the forge's own words (M134's second part, the maintainer's word 11-25): they quote a name that
         # somebody else chose. Each is read on the printed line (what the sync's service writes to its log) and in
@@ -4353,7 +4356,7 @@ class G6(unittest.TestCase):
                                            check=True)
                         return saved(forge, cache, *args, **kw)
                     mirror.forge_call = gone
-                    words = "error: src refspec refs/heads/e?x?$?y) does not match any; " + mirror.SHOWN_CHANGED
+                    words = "error: src refspec refs/heads/e?x???y) does not match any; " + mirror.SHOWN_CHANGED
                 else:
                     # The forge refuses the push and names the ref in its own words: a hook in the copy's own folder,
                     # run by Gitea's pre-receive and relayed by git as "remote: error: ...".
@@ -4364,7 +4367,7 @@ class G6(unittest.TestCase):
                         f.write("#!/bin/sh\nwhile read o n r; do case \"$r\" in *e?x?*) echo \"error: refusing $r\" >&2"
                                 ";; esac; done\nexit 1\n")
                     os.chmod(hook, 0o755)
-                    words = ("refusing refs/heads/e?x?$?y); " + mirror.SHOWN_CHANGED + "; pre-receive hook declined")
+                    words = ("refusing refs/heads/e?x???y); " + mirror.SHOWN_CHANGED + "; pre-receive hook declined")
                 try:
                     rc, out = w.sync()
                 finally:
@@ -4549,7 +4552,7 @@ class G7(unittest.TestCase):
         with World(self) as w:
             plain = [f"kept/{x}" for x in ("a", "b", "c", "d", "e", "f")] + ["kept/2020-01-01/old"]
             semi = "kept/x;id>m3"                                                 # runs a command if typed raw
-            hidden = {"kept/$(id>m1)": "kept/$?id>m1)", "kept/`id>m2`": "kept/?id>m2?",   # rule 31(B): never printed
+            hidden = {"kept/$(id>m1)": "kept/??id>m1)", "kept/`id>m2`": "kept/?id>m2?",   # rule 31(B): never printed
                       "kept/zero\u200bwidth": "kept/zero?width"}                  # a character no one can see
             names = plain + [semi] + sorted(hidden)
             for n in ("alpha", "beta"):

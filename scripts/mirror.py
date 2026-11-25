@@ -575,10 +575,10 @@ def shown_lines(text):
 
 
 def shown_line(line):
-    """One line of a program's words for a person: a backtick and the ( of a dollar-parenthesis are each put as a ?,
-    every other character stays as it came (so the words can be searched for), and a line where one was put says
-    so. No line is dropped for it."""
-    out = line.replace(BACKTICK, "?").replace(DOLLAR_PAREN, "$?")
+    """One line of a program's words for a person: a backtick and each of the two characters of a dollar-parenthesis
+    are put as a ?, every other character stays as it came (so the words can be searched for), and a line where one
+    was put says so. No line is dropped for it."""
+    out = line.replace(BACKTICK, "?").replace(DOLLAR_PAREN, "??")
     return line if out == line else out.rstrip() + "; " + SHOWN_CHANGED
 
 
@@ -2269,11 +2269,11 @@ def shows_as_is(name):
 
 
 def shown_as_is(name):
-    """The name as this tool prints it: each character that cannot be shown as it is, each backtick, and the
-    parenthesis of each dollar-parenthesis put as a ?. Only the printed form; the name itself is stored, copied and
+    """The name as this tool prints it: each character that cannot be shown as it is, each backtick, and both
+    characters of each dollar-parenthesis put as a ?. Only the printed form; the name itself is stored, copied and
     pushed as it is."""
     out = "".join(c if c.isprintable() and not "\udc80" <= c <= "\udcff" and c != BACKTICK else "?" for c in name)
-    return out.replace(DOLLAR_PAREN, "$?")
+    return out.replace(DOLLAR_PAREN, "??")
 
 
 SHOWN_CHANGED = "a ? stands for each character this tool does not print as it is"
