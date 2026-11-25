@@ -2231,8 +2231,8 @@ class G3(unittest.TestCase):
 
         def raw_refs(cmd):
             out = subprocess.run(cmd, capture_output=True, check=True).stdout
-            return {r: s for s, r in (line.split(b"\t" if b"\t" in line else b" ", 1) for line in out.splitlines())
-                    if not r.endswith(b"^{}") and r != b"HEAD"}
+            return {r: s for s, r in (line.split(b"\t" if b"\t" in line else b" ", 1) for line in out.split(b"\n")
+                                      if line) if not r.endswith(b"^{}") and r != b"HEAD"}
 
         def gh_raw(w, name):
             return raw_refs(["git", "--git-dir", os.path.join(w.gh.root, "someone", name + ".git"), "for-each-ref",
@@ -2259,12 +2259,52 @@ class G3(unittest.TestCase):
             w.gh.commit("someone/aa", {".gitattributes": b"# M\xf6\xdfe\r*.bin filter=lfs diff=lfs merge=lfs -text\r\n",
                                        "a": b"1"})
 
-        def names(w):
+        # Every character Python's split() and strip() with no argument take for a blank, that git takes in a ref's
+        # name (rule 31 (vi)): each in the middle of a branch's name and at the end of a tag's. The same world is also
+        # run with "_" in the same places (git takes no control character there), so a name cut or trimmed shows as
+        # a difference in the count.
+        blanks = [chr(i) for i in range(0x110000) if len(("a" + chr(i) + "b").split()) > 1
+                  and subprocess.run(["git", "check-ref-format", "refs/heads/a" + chr(i) + "b"]).returncode == 0]
+        self.assertEqual(len(blanks), 19, [hex(ord(c)) for c in blanks])
+
+        def names(w, twin=None):
             w.gh.commit("someone/aa", {"a": b"1"})
             w.gh.commit("someone/aa", {"b": b"2"}, branch="side")
             w.gh.git("someone/aa", "update-ref", "refs/heads/a\udcffb", "side")
             w.gh.git("someone/aa", "tag", "t\udcc3x", "main")
-            w.gh.git("someone/aa", "update-ref", "refs/heads/c\u0085d\u2028e", "main")      # UTF-8 that splitlines breaks
+            w.gh.git("someone/aa", "update-ref", "refs/heads/c" + (twin or "\u0085") + "d" + (twin or "\u2028") + "e",
+                     "main")                                                    # UTF-8 that splitlines breaks
+            w.gh.commit("someone/bb", {"z": b"0"})       # bb: the same names, in a project nothing else is wrong in
+            for c in blanks:
+                for n, at in (("aa", "side"), ("bb", "main")):
+                    w.gh.git(f"someone/{n}", "update-ref", f"refs/heads/w{ord(c):04x}-a{twin or c}b", at)
+                    w.gh.git(f"someone/{n}", "tag", f"v{ord(c):04x}{twin or c}", "main")
+
+        def counted(w, lang, twin=None):
+            """Part 2's world: N branches and tags on GitHub end as N - 2 on the forge, the 2 named; never one more,
+            never one fewer unnamed."""
+            three(w, lambda w: names(w, twin))
+            rc, out = sync_in(w, lang, "lfs")
+            self.assertEqual(rc, 1, out)
+            self.assertIn("someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
+            gh = gh_raw(w, "aa")
+            self.assertEqual(len(gh), 5 + 2 * len(blanks))
+            want = {r: s for r, s in gh.items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
+            got = forge_raw(w, "aa")
+            self.assertEqual(len(got), len(gh) - 2,
+                             f"{lang} {'twin' if twin else 'blanks'}: {sorted(set(got) ^ set(want))}")
+            self.assertEqual(got, want, lang)
+            self.assertEqual(len(gh_raw(w, "bb")), 1 + 2 * len(blanks))
+            self.assertEqual(forge_raw(w, "bb"), gh_raw(w, "bb"), lang)
+            # what the tool wrote down as GitHub's (status's "current" and the left-out names are read from it)
+            recs = {r["full_name"]: r for r in mirror.load_json(w.p["state"], {})["repos"].values()}
+            for n, key in (("aa", "seen_refs"), ("bb", "refs")):
+                wrote = {r.encode("utf-8", "surrogateescape"): v.encode() for r, v in recs[f"someone/{n}"][key].items()}
+                self.assertEqual(wrote, gh_raw(w, n), f"{n}'s {key} ({lang})")
+            rc, said = sync_in(w, lang, "lfs", "status")
+            self.assertEqual(rc, 1, said)
+            self.assertIn("\ncopies: 3 on GitHub, 3 copied, 1 behind, 0 unreadable\n", said)
+            return said
 
         for lang in ("en_US.UTF-8", None):
             # 1. A .gitattributes whose bytes are not UTF-8, on a computer without git lfs: decided on its bytes.
@@ -2280,19 +2320,14 @@ class G3(unittest.TestCase):
             # and tag is copied, the two are named in the sync's words and in status, and the projects after it
             # are copied whole.
             with World(self) as w:
-                three(w, names)
-                rc, out = sync_in(w, lang, "lfs")
-                self.assertEqual(rc, 1, out)
-                named = "someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x")
-                self.assertIn(named, out)
-                want = {r: s for r, s in gh_raw(w, "aa").items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
-                self.assertEqual(sorted(want), [b"refs/heads/c\xc2\x85d\xe2\x80\xa8e", b"refs/heads/main", b"refs/heads/side"])
-                self.assertEqual(forge_raw(w, "aa"), want, lang)
+                out = counted(w, lang)
+                self.assertIn(b"refs/heads/c\xc2\x85d\xe2\x80\xa8e", forge_raw(w, "aa"))
+                self.assertIn(b"refs/tags/v3000\xe3\x80\x80", forge_raw(w, "aa"))     # a tag ending in a blank
                 for n in ("bb", "cc"):
                     self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
-                rc, out = sync_in(w, lang, "lfs", "status")
-                self.assertEqual(rc, 1, out)
-                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
+                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)   # status
+        with World(self) as w:                                  # 2, the twin: "_" in every place a blank was
+            counted(w, "en_US.UTF-8", twin="_")
         # 3. A .gitattributes that cannot be read is never taken as no LFS: the project is named, the rest copied.
         with World(self) as w:
             three(w, attrs)
@@ -6837,7 +6872,7 @@ class G6Words(unittest.TestCase):
             if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
-        data = {"SKILL_REPO", "GITEA_VERSION", "last_line",          # facts inside a line, not its words
+        data = {"SKILL_REPO", "GITEA_VERSION", "last_line", "lines_of",  # facts inside a line, not its words (git's)
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
                 "own_command"}                                                   # (the command to run, as it runs)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
