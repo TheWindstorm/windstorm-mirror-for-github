@@ -3559,6 +3559,45 @@ class G5(unittest.TestCase):
             st = mirror.load_json(w.p["state"], {})
             self.assertEqual([r["full_name"] for r in st["repos"].values() if r.get("gone_since")], [])
 
+    def test_G5_6_a_tag_deleted_on_github_leaves_the_copy_its_commit_kept(self):
+        """M125 (seen 2026-11-25 in a reviewer's world): a tag deleted on GitHub stayed in the copy for ever, because
+        the fetch from the forge followed tags and wrote the forge's tag back into the cache."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "tag", "t1", one)
+            w.gh.git("someone/alpha", "tag", "t2")
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            self.assertEqual(w.forge_refs("someone--alpha")["refs/tags/t1"], one)       # the premise: it was copied
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            w.gh.git("someone/alpha", "tag", "-d", "t1")
+            tags = lambda refs: {r: v for r, v in refs.items() if r.startswith("refs/tags/")}
+            want = tags(w.gh_refs("someone/alpha"))           # read once: a read of the stand-in moves its pushed_at
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2002-01-01T00:00:00Z"   # GitHub's time moved (not to the second)
+            fetched = lambda: len(git_calls(w.gh, "someone/alpha"))     # its git calls to GitHub (a skip makes none)
+            # The sync after the delete, then one with nothing changed on GitHub but its time (so the project is
+            # fetched and pushed again, not skipped as unchanged), then one skipped as unchanged.
+            for step in ("after the delete", "nothing changed", "unchanged"):
+                if step == "nothing changed":
+                    w.gh.repos["someone/alpha"]["pushed_at"] = "2001-01-01T00:00:00Z"
+                was = fetched()
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, f"{step}: {out}")
+                self.assertEqual(fetched() == was, step == "unchanged", f"{step}: fetched again or not")
+                refs = w.forge_refs("someone--alpha")
+                self.assertEqual(tags(refs), want, step)
+                self.assertEqual(sorted(r for r in refs if "/kept/" in r), [f"refs/heads/kept/{day}/tags/t1"], step)
+                self.assertEqual(refs[f"refs/heads/kept/{day}/tags/t1"], one, step)
+                said = f"someone/alpha: tags/t1 was deleted on GitHub; its old commit is kept as kept/{day}/tags/t1"
+                (self.assertIn if step == "after the delete" else self.assertNotIn)(said, out)
+            rc, out = status()
+            self.assertIn("\ncopies: 1 on GitHub, 1 copied, 0 behind", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
+
 
 def status():
     return quiet(mirror.main, ["status"])

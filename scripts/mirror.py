@@ -2344,7 +2344,9 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     git(cache, "config", "remote.forge.url", url)
     for i, spec in enumerate(FORGE_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.forge.fetch", spec)
-    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "forge", timeout=limit))
+    # M125: --no-tags, so git does not follow tags and write the forge's tags back into the cache's refs/tags, where
+    # the fetch from GitHub has just taken away every tag GitHub deleted. This fetch writes refs/forge/ and refs/kept/ only.
+    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "--no-tags", "forge", timeout=limit))
     if out is None or out.returncode != 0:
         return "what the copy holds now could not be read from the forge" + (
             "" if out is None else ": " + last_line(out.stderr))
