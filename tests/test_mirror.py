@@ -11,6 +11,7 @@ import inspect
 import io
 import json
 import os
+import plistlib
 import random
 import re
 import shutil
@@ -188,6 +189,68 @@ def real_gitea():
         return None
 
 
+BOOT_ID = "89c29fe6010d48b2886cf8dc3e19d3ca"     # what %b gave on the probe's guest
+
+
+def sd_standin_words(value, home):
+    """THE SUITE'S STAND-IN for systemd 255 reading one ExecStart= or Environment= value into words, as seen
+    2026-11-25 on two stock Ubuntu 24.04 guests (row M148; the planted-home walk proves it on a real machine): words
+    part at blanks outside quotes; inside double or single quotes a blank is kept; a backslash takes the character
+    after it; %% is %, %h the home, %b the boot id, any other specifier refuses the line (None); a $ is kept as written
+    (the bus holds the line before $ is expanded at start). None also for a quote left open."""
+    words, cur, quote, inword, i = [], "", None, False, 0
+    while i < len(value):
+        c = value[i]
+        if c == "\\" and i + 1 < len(value):
+            cur, inword, i = cur + value[i + 1], True, i + 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+            else:
+                cur += c
+        elif c in "\"'":
+            quote, inword = c, True
+        elif c in " \t":
+            if inword:
+                words.append(cur)
+            cur, inword = "", False
+        else:
+            cur, inword = cur + c, True
+        i += 1
+    if quote:
+        return None
+    if inword:
+        words.append(cur)
+    out = []
+    for w in words:
+        r, j = "", 0
+        while j < len(w):
+            if w[j] != "%":
+                r, j = r + w[j], j + 1
+                continue
+            spec = {"%": "%", "h": home, "b": BOOT_ID}.get(w[j + 1:j + 2])
+            if spec is None:
+                return None
+            r, j = r + spec, j + 2
+        out.append(r)
+    return out
+
+
+def sd_standin_unit(text, home):
+    """(ExecStart's data, Environment's data) as busctl --json=short gives them for a unit with this text: a start
+    line systemd refuses (a program path holding a double quote, an apostrophe or a backslash, seen: the unit reads bad-setting) gives no
+    start line at all, as seen."""
+    starts, env = [], []
+    for line in text.split("\n"):
+        if line.startswith("ExecStart="):
+            w = sd_standin_words(line[len("ExecStart="):], home)
+            starts = [] if not w or any(c in "\"'\\" for c in w[0]) else [[w[0], w, False, 0, 0, 0, 0, 0, 0, 0]]
+        elif line.startswith("Environment="):
+            env += sd_standin_words(line[len("Environment="):], home) or []
+    return starts, env
+
+
 class Home:
     """A person's home of their own for one test: WSM_HOME, HOME and XDG_CONFIG_HOME all inside a temp folder, and
     the service managers (systemctl, loginctl, launchctl) stood in for, so a test never touches the real ones."""
@@ -217,6 +280,13 @@ class Home:
         # bus: No medium found" and changes nothing; stop_reads: how many reads a stopped unit still reads deactivating.
         self.units_up, self.user_bus, self.stop_reads, self.stopping = set(), True, 0, {}
         self.show_answer = None      # (code, stdout) every `show <unit> -p ActiveState` answers instead, when set
+        # G1.24: the user manager's bus (busctl), answering from the unit files on disk as sd_standin_unit reads them.
+        # bus_answer: (code, stdout) every busctl call answers instead, when set; bus_starts: the start lines every
+        # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
+        self.bus_answer, self.bus_starts, self.bus_objs = None, None, {}
+        self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set
+        self.bus_env_extra = []      # Environment entries a person's own drop-in adds to every unit (rule 31 (v.5) (3))
+        self.launchd_env_extra = {}  # variables a loaded job's print shows besides its file's own
         self.no_bus_words = "Failed to connect to bus: No medium found"     # systemd 255's; 262 says it otherwise
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
                     "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
@@ -277,7 +347,60 @@ class Home:
                                      f"{os.getuid()}\n")
         return None
 
+    def launchd_job(self, label):
+        """THE SUITE'S STAND-IN for the blocks `launchctl print` gives for a loaded job, built from its file with
+        plistlib in the form seen 2026-11-25 on a Mac, macOS 27.2.1, a test account (row M148): one argument to a
+        line after two tabs; the inherited and default environment blocks; then the job's own environment block,
+        launchd's OSLogRateLimit first and its XPC_SERVICE_NAME last around the file's variables."""
+        if self.launchd_args is not None:
+            args, env = self.launchd_args
+        else:
+            base = os.path.dirname(mirror.paths()["plist"])
+            f = os.path.join(base, label + ".plist")
+            if not os.path.exists(f):
+                return ""
+            with open(f, "rb") as fh:
+                pl = plistlib.load(fh)
+            if not isinstance(pl, dict):                # a file with no job in it (a bare <plist/>): no block
+                return ""
+            args, env = pl.get("ProgramArguments") or [], pl.get("EnvironmentVariables") or {}
+        own = {"OSLogRateLimit": "64", **env, **self.launchd_env_extra}
+        own["XPC_SERVICE_NAME"] = label
+        return (f"gui/{os.getuid()}/{label} = {{\n\tactive count = 1\n\ttype = LaunchAgent\n\tstate = running\n\n"
+                f"\tprogram = {args[0] if args else ''}\n\targuments = {{\n" + "".join(f"\t\t{a}\n" for a in args)
+                + "\t}\n\n\tinherited environment = {\n\t\tSSH_AUTH_SOCK => /var/run/com.apple.launchd.x/Listeners\n\t}\n\n"
+                "\tdefault environment = {\n\t\tPATH => /usr/bin:/bin:/usr/sbin:/sbin\n\t}\n\n\tenvironment = {\n"
+                + "".join(f"\t\t{k} => {v}\n" for k, v in own.items())
+                + "\t}\n\n\tresource coalition = {\n\t\tID = 1\n\t\ttype = resource\n\t}\n}\n")
+
+    def bus(self, cmd):
+        """busctl --user --json=short, as systemd 255 answered it on a stock guest (2026-11-25)."""
+        done = lambda rc, out="", err="": subprocess.CompletedProcess(cmd, rc, out, err)
+        if not self.user_bus:
+            return done(1, "", self.no_bus_words + "\n")
+        if self.bus_answer is not None:
+            return done(*self.bus_answer)
+        if cmd[3] == "call" and cmd[-3:-1] == ["LoadUnit", "s"]:
+            if not re.search(r"\.(service|timer)$", cmd[-1]):      # the bus takes a whole unit name only
+                return done(1, "", f"Call failed: Unit name {cmd[-1]} is not valid.\n")
+            obj = "/org/freedesktop/systemd1/unit/" + "".join(c if c.isalnum() else "_%02x" % ord(c) for c in cmd[-1])
+            self.bus_objs[obj] = cmd[-1]
+            return done(0, json.dumps({"type": "o", "data": [obj]}) + "\n")
+        if cmd[3] == "get-property" and cmd[5] in self.bus_objs:
+            f = os.path.join(os.path.dirname(mirror.paths()["unit"]), self.bus_objs[cmd[5]])
+            text = fread(f) if os.path.exists(f) else ""
+            starts, env = sd_standin_unit(text, self.env["HOME"])
+            if cmd[7] == "ExecStart":
+                return done(0, json.dumps({"type": "a(sasbttttuii)",
+                                           "data": starts if self.bus_starts is None else self.bus_starts}) + "\n")
+            if cmd[7] == "Environment":
+                return done(0, json.dumps({"type": "as", "data": env + self.bus_env_extra}) + "\n")
+        return done(1, "", "Unknown object or property\n")
+
     def fake_run(self, cmd, **kw):
+        if cmd[0] == "busctl":
+            self.calls.append(cmd)
+            return self.bus(cmd)
         if cmd[0] == "pkcheck":
             self.calls.append(cmd)
             self.kws.append(kw)
@@ -349,9 +472,11 @@ class Home:
                 return subprocess.CompletedProcess(cmd, 0 if self.mac_session else 113, "", "" if self.mac_session
                                                    else "Could not find domain for user gui: " + str(os.getuid()))
             if cmd[:2] == ["launchctl", "print"]:
-                if self.timer_next is None:
+                label = cmd[2].rsplit("/", 1)[-1]
+                if self.timer_next is None and label == mirror.SYNC_LABEL:
                     return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
-                return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n", "")
+                return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n"
+                                                   + self.launchd_job(label), "")
             if cmd[:2] == ["loginctl", "disable-linger"]:
                 self.linger = "no"
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -597,7 +722,7 @@ class G1(unittest.TestCase):
                 txt = fread(p["unit"])
                 self.assertTrue(p["unit"].startswith(os.environ["XDG_CONFIG_HOME"]), "the unit is not the person's own")
                 self.assertNotIn("User=", txt)                       # a user unit: it runs as the person
-                self.assertIn(f"-I {p['script']} run-forge", txt)
+                self.assertIn(" ".join(mirror.sd_word(w) for w in ("-I", p["script"], "run-forge")), txt)   # G1.24's quoted words
                 self.assertIn("WantedBy=default.target", txt)
                 self.assertIn(f'Environment="WSM_HOME={os.environ["WSM_HOME"]}"', txt)
                 self.assertIn(["systemctl", "--user", "enable", "--now", mirror.SERVICE], h.calls)
@@ -1567,6 +1692,237 @@ class G1(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ G2 the GitHub keys
+    # G1.24 (M148): every value in a service file is one whole value, and what the manager parsed is read back.
+    PLANTED = ["a b", "a  b", " a", "a%b", "a%hb", "a$b", "a${X}b", 'a"b', "a\\b", "ab\\", "a'b", "a;b", "a&b<c>d",
+               "é", 'a b%c$d"e\\f']
+
+    @staticmethod
+    def held_by_systemd(argv):
+        """What systemd's bus holds for a start line meant as argv: the program, then argv, an argument's $ as $$
+        (it is expanded at start; seen 2026-11-25 on systemd 255, where the started program got each word whole)."""
+        return [argv[0], argv[0]] + [w.replace("$", "$$") for w in argv[1:]]
+
+    def test_G1_24_each_value_in_a_service_file_is_one_whole_value(self):
+        """M148 (seen 2026-11-25 on two stock Ubuntu 24.04 guests, systemd 255, and the issue's own case): with the
+        folder the skill keeps its things in holding a space, %, $, ", \\ or another planted character, alone and all
+        at once, every service file setup writes is read as the words meant: a systemd unit, read by the suite's
+        stand-in for systemd's grammar as seen, gives the program and then each argument, and each Environment entry
+        whole; a launchd file, read as a property list, gives each argument, WSM_HOME and its log paths whole. The
+        0.1.0 head's form of the same start line is not read as meant for a space."""
+        for v in self.PLANTED:
+            with Home() as h, self.subTest(value=v):
+                home = os.path.join(h.tmp, v, "wsm")
+                os.environ["WSM_HOME"] = home
+                p = mirror.paths()
+                argv = [sys.executable, "-I", p["script"], "run-forge"]
+                sync = [sys.executable, "-I", p["script"], "sync", "--from-timer"]
+                for text, want in ((mirror.unit_text(p), argv), (mirror.sync_unit_text(p), sync)):
+                    starts, env = sd_standin_unit(text, h.env["HOME"])
+                    self.assertEqual(len(starts), 1, text)
+                    self.assertEqual([starts[0][0]] + starts[0][1], self.held_by_systemd(want), text)
+                    self.assertEqual(env, [f"WSM_HOME={home}"], text)
+                for text, want, log in ((mirror.plist_text(p), argv, "launchd.log"),
+                                        (mirror.sync_plist_text(p, 15), sync, "sync.log")):
+                    pl = plistlib.loads(text.encode("utf-8"))
+                    self.assertEqual(pl["ProgramArguments"], want, text)
+                    self.assertEqual(pl["EnvironmentVariables"], {"WSM_HOME": home}, text)
+                    self.assertEqual(pl["StandardOutPath"], os.path.join(p["forge"], "log", log), text)
+                    self.assertEqual(pl["StandardErrorPath"], os.path.join(p["forge"], "log", log), text)
+        meant = [sys.executable, "-I", "/srv/a b/data/mirror.py", "run-forge"]
+        starts, _ = sd_standin_unit(f"ExecStart={sys.executable} -I /srv/a b/data/mirror.py run-forge\n", "/home/you")
+        self.assertNotEqual([starts[0][0]] + starts[0][1], self.held_by_systemd(meant))
+
+    def test_G1_24_setup_stops_before_its_first_write_on_a_value_no_manager_takes_whole(self):
+        """M148: a character that cannot be seen (a control character, a format character, a line or paragraph
+        separator) or bytes that are not text in WSM_HOME, and on Linux a dollar sign, a double quote, an apostrophe or a backslash in the
+        path of the Python setup runs with (seen 2026-11-25 on systemd 255: there is no spelling of those that a
+        program's path takes whole): setup and its dry run end 2 before anything is written or any service manager
+        is asked, never print the value, and name the one next step. On a Mac the same Python path is written whole
+        into its file, so setup goes on there."""
+        saved_sys, saved_exe = mirror.system, sys.executable
+        try:
+            mirror.system = lambda: ("linux", "x86_64")
+            for bad in ("a\nb", "a\x7fb", "a b", "a​b", "a\udcffb"):
+                with Home() as h, self.subTest(home=repr(bad)):
+                    os.environ["WSM_HOME"] = os.path.join(h.tmp, bad)
+                    before = tree(h.tmp)
+                    for args in (("--dry-run",), ("--linger",)):
+                        rc, out = h.setup(*args)
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn("Stopped: the folder this skill keeps its things in holds a character that "
+                                      "cannot be seen, or bytes that are not text, so it cannot be written into the "
+                                      "service file as one whole value. Nothing was changed. The one next step: set "
+                                      "WSM_HOME to a folder of your own whose path has none, and run setup again.", out)
+                        self.assertNotIn(bad, out)
+                        self.assertIn(mirror.SHOWN_CHANGED, out)
+                    self.assertEqual(tree(h.tmp), before)
+                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")], h.calls)
+            for exe, named in (("/opt/a$b/python3", "a dollar sign"), ('/opt/a"b/python3', "a double quote"),
+                               ("/opt/a'b/python3", "an apostrophe"), ("/opt/a\\b/python3", "a backslash"),
+                               ("/opt/a$\\b/python3", "a dollar sign and a backslash")):
+                with Home() as h, self.subTest(exe=exe):
+                    before = tree(h.tmp)
+                    sys.executable = exe
+                    try:
+                        rc, out = h.setup("--linger")
+                    finally:
+                        sys.executable = saved_exe
+                    self.assertEqual(rc, 2, out)
+                    it = "them" if " and " in named else "it"
+                    self.assertIn(f"Stopped: the path of the Python this runs with holds {named}, and systemd does "
+                                  f"not take a program's path holding {it} as one whole value. Nothing was changed. The one next step: run setup with a Python whose "
+                                  "path has none (for example /usr/bin/python3).", out)
+                    self.assertEqual(tree(h.tmp), before)
+                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")], h.calls)
+            mirror.system = lambda: ("darwin", "arm64")
+            with Home():
+                sys.executable = "/opt/a$b\"c'd\\e&f<g/python3"
+                self.assertIsNone(mirror.service_value_stop(mirror.paths()))
+        finally:
+            mirror.system, sys.executable = saved_sys, saved_exe
+
+    def test_G1_24_set_up_is_said_only_when_the_manager_holds_each_word_as_written(self):
+        """M148: on Linux setup reads back what systemd parsed for each service, over its bus one word at a time
+        (never the line `systemctl show` prints, which joins the words), after daemon-reload and before anything is
+        switched on, and switches it on only when every word and every Environment entry is what it wrote. A parse
+        that differs and one that could not be read are each said as that, with nothing switched on; the go block's
+        restart line and status say the same, each with a step that works where it is said. On a Mac, launchd's
+        loaded job is read back the same way and taken off again at once when it is not what setup wrote."""
+        saved = mirror.system
+        other = [sys.executable, "-I", "/elsewhere/mirror.py", "run-forge"]
+        try:
+            mirror.system = lambda: ("linux", "x86_64")
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["unit"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                reads = [i for i, c in enumerate(h.calls) if c[0] == "busctl"]
+                on = h.calls.index(["systemctl", "--user", "enable", "--now", mirror.SERVICE])
+                self.assertTrue(reads and max(reads) < on, h.calls)
+                self.assertFalse([c for c in h.calls if c[:3] == ["systemctl", "--user", "show"]])
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                self.assertEqual([mirror.service_read_back(p, w) for w in ("forge", "sync")], ["equal", "equal"])
+                self.assertFalse(mirror.restart_line(p, {}).startswith("After a restart: systemd"))
+                for name, value, answer in (("bus_starts", [[other[0], other, False, 0, 0, 0, 0, 0, 0, 0]], "differs"),
+                                            ("bus_starts", [], "differs"),
+                                            ("bus_answer", (1, "", "Failed to connect to bus: No medium found\n"),
+                                             "unread")):
+                    setattr(h, name, value)
+                    n = len(h.calls)
+                    for got in (mirror.install_service(p), mirror.install_timer(p, 15)):
+                        self.assertFalse(got[0])
+                        self.assertIn("its start line is not read as setup wrote it" if answer == "differs" else
+                                      "as setup wrote it could not be read", got[1])
+                        self.assertTrue(got[1].endswith(mirror.SETUP_READ_BACK_STEP), got[1])
+                    self.assertFalse([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
+                    self.assertEqual(mirror.service_read_back(p, "forge"), answer)
+                    line = mirror.restart_line(p, {})
+                    self.assertTrue(line.startswith("After a restart: systemd does not hold the forge's service"
+                                                    if answer == "differs" else
+                                                    "After a restart: whether systemd holds the forge's service"), line)
+                    self.assertTrue(line.endswith(mirror.STATUS_READ_BACK_STEP[answer]), line)
+                    self.assertNotIn("starts by itself", line)
+                    setattr(h, name, None)
+            src = inspect.getsource(mirror.cmd_status)
+            self.assertIn('problems.append(read_back_words(which, held, "it is not set up", STATUS_READ_BACK_STEP[held], parts))', src)
+            mirror.system = lambda: ("darwin", "arm64")
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.service_read_back(p, "forge"), "equal")
+                h.launchd_args = (other, {"WSM_HOME": os.environ["WSM_HOME"]})
+                n = len(h.calls)
+                ok, why = mirror.install_service(p)
+                self.assertFalse(ok)
+                self.assertIn("launchd does not hold the forge's service as setup wrote it: its arguments are not read "
+                              "as setup wrote it, so it was taken off again.", why)
+                boot = [i for i, c in enumerate(h.calls[n:]) if c[:2] == ["launchctl", "bootstrap"]]
+                out = [i for i, c in enumerate(h.calls[n:]) if c == ["launchctl", "bootout", f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"]]
+                self.assertTrue(boot and out and max(out) > max(boot), h.calls[n:])
+                h.launchd_args = None
+                h.print_code = 1
+                self.assertEqual(mirror.service_read_back(p, "forge"), "unread")
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_a_persons_own_entry_is_theirs_and_no_line_holds_a_value_the_tool_did_not_write(self):
+        """M148, the family's rule 31 (v.5) (3): an environment entry the person set in the skill's service
+        themselves (a drop-in of theirs on Linux; a variable in the loaded job on a Mac), holding a made-up secret,
+        is named as theirs by its name alone, a warning: setup goes on, the read-back is equal, and no line of status,
+        of the restart line or of the warning holds its value. A second entry for WSM_HOME (systemd) or WSM_HOME
+        changed (launchd) is a stop, named by the part, and no line holds the planted value. The read-back's meant
+        side is what setup wrote: a terminal with another WSM_HOME reads the same answer."""
+        import socket
+        secret = "madeup-secret-7f3a9c"
+        planted = f"http://me:{secret}@proxy.example:8080"
+        saved, door, rel = mirror.system, mirror.read_door, mirror.release_check
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")
+        mirror.release_check = lambda st, force=False: []
+        try:
+            for name in ("linux", "darwin"):
+                mirror.system = lambda name=name: (name, "arm64" if name == "darwin" else "x86_64")
+                with Home() as h, self.subTest(system=name):
+                    p = mirror.paths()
+                    s = socket.socket()
+                    s.bind(("127.0.0.1", 0))
+                    port = s.getsockname()[1]
+                    s.close()
+                    for d in (p["data"], p["conf"], os.path.dirname(p["plist"] if name == "darwin" else p["unit"])):
+                        os.makedirs(d, mode=0o700, exist_ok=True)
+                        os.chmod(d, 0o700)
+                    mirror.save_state(p, {"port": port})
+                    with open(p["mirror_key"], "w") as f:
+                        f.write("a stand-in key\n")
+                    shutil.copyfile(SCRIPT, p["script"])
+                    self.assertEqual(mirror.install_service(p), (True, ""))
+                    self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                    if name == "darwin":
+                        h.launchd_env_extra = {"HTTPS_PROXY": planted}
+                    else:
+                        h.bus_env_extra = [f"HTTPS_PROXY={planted}"]
+                    for which in ("forge", "sync"):
+                        self.assertEqual(mirror.service_read(p, which), ("equal", ["HTTPS_PROXY"], []))
+                    warn = mirror.theirs_line(p)
+                    self.assertEqual(warn, "Your own setting is in the skill's service too, set by you, not by this "
+                                           "tool: HTTPS_PROXY. It is left as it is; this tool reads only the values it "
+                                           "set itself.")
+                    mirror.DOOR_SEEN.clear()
+                    rc, out = status()
+                    self.assertIn("note: " + warn, out)
+                    self.assertNotIn("as setup wrote it", out)
+                    self.assertNotIn(secret, out)
+                    self.assertNotIn(secret, mirror.restart_line(p, {}))
+                    home = os.environ["WSM_HOME"]
+                    os.environ["WSM_HOME"] = home + "-another-terminal"
+                    try:
+                        self.assertEqual(mirror.service_read(p, "forge")[0], "equal")
+                    finally:
+                        os.environ["WSM_HOME"] = home
+                    if name == "darwin":
+                        h.launchd_env_extra = {"HTTPS_PROXY": planted, "WSM_HOME": planted}
+                    else:
+                        h.bus_env_extra = [f"HTTPS_PROXY={planted}", f"WSM_HOME={planted}"]
+                    entry = "its WSM_HOME entry" if name == "darwin" else "its WSM_HOME entry (2 found where setup wrote one)"
+                    self.assertEqual(mirror.service_read(p, "forge"), ("differs", ["HTTPS_PROXY"], [entry]))
+                    mgr = "launchd" if name == "darwin" else "systemd"
+                    line = mirror.restart_line(p, {})
+                    self.assertTrue(line.startswith(f"After a restart: {mgr} does not hold the forge's service as "
+                                                    f"setup wrote it: {entry} is not read as setup wrote it, so it is "
+                                                    "not set up."), line)
+                    mirror.DOOR_SEEN.clear()
+                    rc, out = status()
+                    self.assertIn(f"{entry} is not read as setup wrote it", out)
+                    self.assertNotIn(secret, out + line)
+                    if name == "linux":
+                        n = len(h.calls)
+                        ok, why = mirror.install_service(p)
+                        self.assertFalse(ok)
+                        self.assertNotIn(secret, why)
+                        self.assertFalse([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
+        finally:
+            mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
+
 
 def files_holding(root, needle):
     hits, read = [], 0
@@ -3150,7 +3506,7 @@ class G4(unittest.TestCase):
                 self.assertIn("OnUnitActiveSec=15min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))
                 self.assertIn("OnStartupSec=2min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))   # G4.7
                 unit = fread(os.path.join(base, mirror.SYNC_UNIT + ".service"))
-                self.assertIn(f"{p['script']} sync --from-timer", unit)
+                self.assertIn(" ".join(mirror.sd_word(w) for w in (p["script"], "sync", "--from-timer")), unit)   # G1.24
                 self.assertIn("WSM_HOME=", unit)
                 self.assertIn(["systemctl", "--user", "enable", "--now", mirror.SYNC_UNIT + ".timer"], h.calls)
             w.gh.add_repo("someone", "alpha")
@@ -8093,7 +8449,7 @@ class Invariants(unittest.TestCase):
             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "run" and n.args and isinstance(n.args[0], ast.List):
                 first = n.args[0].elts[0] if n.args[0].elts else None
                 progs.add(first.value if isinstance(first, ast.Constant) else ast.unparse(first))
-        self.assertEqual(progs - {"git", "systemctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
+        self.assertEqual(progs - {"git", "systemctl", "busctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
                                   "running_bin(p)", "binary", "defaults", "fdesetup", "pkcheck"}, set(), progs)
 
 

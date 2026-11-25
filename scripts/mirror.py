@@ -18,7 +18,9 @@ import argparse
 import base64
 import calendar
 import fnmatch
+import plistlib
 import shlex
+import unicodedata
 import getpass
 import urllib.parse
 import hashlib
@@ -495,8 +497,40 @@ def open_folders(p, close=False):
     return lines
 
 
+UNSEEN = ("Cc", "Cf", "Cs", "Zl", "Zp")       # the family's rule 31 (vi): cannot be seen, or not text
+
+
+def service_value_stop(p):
+    """G1.24 (M148): a value the service files carry that no service manager can be handed as one whole value (a
+    character that cannot be seen, a line or paragraph separator, or bytes that are not text): setup stops before
+    its first write. None, or the sentence that stops it. The value itself is not printed: it holds such a character."""
+    for what, value, step in (
+            ("the path of the Python this runs with", sys.executable,
+             "run setup with a Python whose path has none (for example /usr/bin/python3)"),
+            ("the folder this skill keeps its things in", p["data"],
+             "set WSM_HOME to a folder of your own whose path has none, and run setup again"),
+            ("WSM_HOME", os.environ.get("WSM_HOME") or "",
+             "set WSM_HOME to a folder of your own whose path has none, and run setup again")):
+        if what.startswith("the path of the Python") and not value:
+            return ("Stopped: this Python does not say where its own program is, so the service could not be told "
+                    "what to run. Nothing was changed. The one next step: run setup with /usr/bin/python3.")
+        if any(unicodedata.category(c) in UNSEEN for c in value):
+            return (f"Stopped: {what} holds a character that cannot be seen, or bytes that are not text, so it "
+                    "cannot be written into the service file as one whole value. Nothing was changed. The one next "
+                    f"step: {step}.")
+        if what.startswith("the path of the Python") and system()[0] != "darwin" and any(c in SD_PATH_REFUSED for c in value):
+            found = [SD_PATH_NAMES[c] for c in SD_PATH_REFUSED if c in value]     # each by its name (rule 31 v.5)
+            return (f"Stopped: the path of the Python this runs with holds {' and '.join(found)}, and systemd does "
+                    f"not take a program's path holding {'it' if len(found) == 1 else 'them'} as one whole value. "
+                    f"Nothing was changed. The one next step: {step}.")
+    return None
+
+
 def home_is_not_ours(p):
     """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it."""
+    stop = service_value_stop(p)
+    if stop:
+        return stop
     h = os.environ.get("WSM_HOME")
     if h and os.path.realpath(h) == os.path.realpath(os.path.expanduser("~")):
         return (f"Stopped: WSM_HOME is your home folder ({h}). The skill makes its folders only in a folder of its "
@@ -800,7 +834,7 @@ Description=Windstorm Mirror for GitHub: the forge (stock Gitea {GITEA_VERSION},
 
 [Service]
 Type=simple
-{env_line()}ExecStart={sys.executable} -I {p['script']} run-forge
+{env_line()}ExecStart={sd_line(forge_argv(p))}
 Restart=on-failure
 RestartSec=10
 
@@ -809,31 +843,116 @@ WantedBy=default.target
 """
 
 
-def env_line():
-    """The service runs with the same home setup used (WSM_HOME, when setup ran with one)."""
+# G1.24 (M148): every value in a service file is written as that manager's grammar takes one whole value, and what
+# the manager parsed is read back word for word before anything is started (service_read_back).
+
+def forge_argv(p):
+    return [sys.executable, "-I", p["script"], "run-forge"]
+
+
+def sync_argv(p):
+    return [sys.executable, "-I", p["script"], "sync", "--from-timer"]
+
+
+def service_env():
+    """What the services carry in their environment: WSM_HOME, when setup ran with one."""
     h = os.environ.get("WSM_HOME")
-    return f'Environment="WSM_HOME={h}"\n' if h else ""
+    return [f"WSM_HOME={h}"] if h else []
+
+
+SERVICE_MEANT = "service-meant.json"
+# set by launchd itself in a loaded job's environment block, never by the person (seen 2026-11-25 on a Mac, macOS
+# 27.2.1, a test account: `launchctl print` showed these two beside the job file's own variables)
+LAUNCHD_OWN_ENV = ("OSLogRateLimit", "XPC_SERVICE_NAME")   # G1.24: what setup wrote into each service file, the read-back's "meant" side
+
+
+def record_meant(p, which, argv):
+    """Before setup writes a service file: what it writes there, kept in the skill's own folder, so the read-back
+    compares with what setup wrote and never with what a later terminal's environment says (the family's rule 31
+    (v.5) (3))."""
+    path = os.path.join(p["data"], SERVICE_MEANT)
+    held = load_json(path, {})
+    held = held if isinstance(held, dict) else {}
+    held[which] = {"argv": list(argv), "env": dict(e.split("=", 1) for e in service_env())}
+    write_file(path, json.dumps(held, indent=1, ensure_ascii=False) + "\n", 0o600)
+
+
+def read_meant(p, which):
+    """(argv, {name: value}) setup wrote for the forge's ('forge') or the sync's ('sync') service, or None."""
+    got = load_json(os.path.join(p["data"], SERVICE_MEANT), {})
+    m = got.get(which) if isinstance(got, dict) else None
+    try:
+        argv, env = list(m["argv"]), dict(m["env"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    if not all(isinstance(w, str) for w in argv) or not all(isinstance(k, str) and isinstance(v, str)
+                                                            for k, v in env.items()):
+        return None
+    return argv, env
+
+
+# Seen 2026-11-25 on two stock Ubuntu 24.04 guests (systemd 255): an argument written as sd_word reached the started
+# program whole for a space, two spaces, a leading space, %, %h, $, ${X}, ", \, a trailing \, ', ;, & < > and a
+# non-ASCII letter, each alone and all at once, and the bus held each $ as $$ (expanded at start, not at parse). The
+# program's own path takes no ", ' or \ (the unit is refused), and no spelling of $ works there; SD_PATH_REFUSED is
+# refused by setup before its first write, so the path's word needs only the percent sign doubled.
+SD_PATH_REFUSED = "$\"'\\"
+SD_PATH_NAMES = {"$": "a dollar sign", '"': "a double quote", "'": "an apostrophe", "\\": "a backslash"}
+
+
+def sd_word(s):
+    """One argument of a systemd start line: in double quotes, with the backslash, the double quote, the percent
+    sign and the dollar sign each in systemd's own form for them."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+
+
+def sd_line(argv):
+    """The start line: the program's path (it holds none of SD_PATH_REFUSED), then each argument as sd_word."""
+    return " ".join(['"' + argv[0].replace("%", "%%") + '"'] + [sd_word(w) for w in argv[1:]])
+
+
+def sd_parsed_form(argv):
+    """What systemd's bus holds for argv written by sd_line: the program, then argv, each argument's $ as $$."""
+    return [argv[0], argv[0]] + [w.replace("$", "$$") for w in argv[1:]]
+
+
+def env_line():
+    """The service runs with the same home setup used. One Environment= word, quoted: systemd takes the backslash,
+    the double quote and the percent sign there in its own forms, and no dollar sign."""
+    return "".join('Environment="' + e.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"\n'
+                   for e in service_env())
+
+
+def xml_text(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def plist_strings(words):
+    return "".join(f"<string>{xml_text(w)}</string>" for w in words)
 
 
 def env_plist():
-    h = os.environ.get("WSM_HOME")
-    if not h:
+    env = service_env()
+    if not env:
         return ""
-    return f"  <key>EnvironmentVariables</key><dict><key>WSM_HOME</key><string>{h}</string></dict>\n"
+    return ("  <key>EnvironmentVariables</key><dict>"
+            + "".join(f"<key>{xml_text(k)}</key><string>{xml_text(v)}</string>" for k, v in (e.split("=", 1) for e in env))
+            + "</dict>\n")
 
 
 def plist_text(p):
+    log = xml_text(os.path.join(p["forge"], "log", "launchd.log"))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{sys.executable}</string><string>-I</string><string>{p['script']}</string><string>run-forge</string></array>
+  <array>{plist_strings(forge_argv(p))}</array>
 {env_plist()}  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>{p['forge']}/log/launchd.log</string>
-  <key>StandardErrorPath</key><string>{p['forge']}/log/launchd.log</string>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
 </dict>
 </plist>
 """
@@ -849,7 +968,7 @@ Description=Windstorm Mirror for GitHub: one sync of the copies
 
 [Service]
 Type=oneshot
-{env_line()}ExecStart={sys.executable} -I {p['script']} sync --from-timer
+{env_line()}ExecStart={sd_line(sync_argv(p))}
 Nice=10
 """
 
@@ -868,35 +987,194 @@ WantedBy=timers.target
 
 
 def sync_plist_text(p, minutes):
+    log = xml_text(os.path.join(p["forge"], "log", "sync.log"))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{SYNC_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{sys.executable}</string><string>-I</string><string>{p['script']}</string><string>sync</string><string>--from-timer</string></array>
+  <array>{plist_strings(sync_argv(p))}</array>
 {env_plist()}  <key>StartInterval</key><integer>{minutes * 60}</integer>
-  <key>StandardOutPath</key><string>{p['forge']}/log/sync.log</string>
-  <key>StandardErrorPath</key><string>{p['forge']}/log/sync.log</string>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
 </dict>
 </plist>
 """
 
 
+SD_DEST = "org.freedesktop.systemd1"
+
+
+def bus_json(*args):
+    """One answer of the user manager over its bus (busctl's JSON form), its data, or None when it could not be read
+    (an error is never an absence)."""
+    out = run(["busctl", "--user", "--json=short", *args])
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout)["data"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def systemd_parsed(unit):
+    """G1.24: ([each start line's words], [each Environment entry]) as the user manager holds them for unit, read
+    over its bus one word at a time, never from the line `systemctl show` prints (it joins the words with spaces, so
+    one word and two read the same); None when that could not be read."""
+    obj = bus_json("call", SD_DEST, "/org/freedesktop/systemd1", SD_DEST + ".Manager", "LoadUnit", "s", unit)
+    if not (isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], str)):
+        return None
+    ex = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Service", "ExecStart")
+    env = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Service", "Environment")
+    try:
+        starts = [[e[0]] + list(e[1]) for e in ex]          # the program, then its argument list
+        if not all(isinstance(w, str) for s in starts for w in s) or not all(isinstance(e, str) for e in env):
+            return None
+    except (TypeError, IndexError):
+        return None
+    return starts, list(env)
+
+
+def launchd_parsed(label):
+    """G1.24: (the loaded job's arguments, one by one, {each environment name: its value}) as launchd holds them, read from
+    `launchctl print` (seen 2026-11-25 on a Mac, macOS 27.2.1: one argument to a line after two tabs inside
+    "arguments = {", as written, spaces, &, <, a quote and a backslash alike; each variable as "NAME => value" inside
+    "environment = {", beside the "inherited environment" and "default environment" blocks, which are not the
+    job's); None when that could not be read, and "absent" when launchd has no such job."""
+    out = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+    if out.returncode == 113:                      # the family's rule 24: no such job
+        return "absent"
+    if out.returncode != 0:
+        return None
+    lines, args, env, block = out.stdout.split("\n"), None, {}, None
+    for line in lines:
+        if line in ("\targuments = {", "\tenvironment = {"):
+            block = line[1:].split(" ")[0]
+            if block == "arguments":
+                args = []
+            continue
+        if block and line == "\t}":
+            block = None
+            continue
+        if block == "arguments" and line.startswith("\t\t"):
+            args.append(line[2:])
+        elif block == "environment" and line.startswith("\t\t") and " => " in line:
+            k, v = line[2:].split(" => ", 1)
+            env[k] = v
+    if args is None:
+        return None
+    return args, env
+
+
+def service_read(p, which):
+    """G1.24: (answer, the names of the person's own environment entries, the parts that differ by name: "its start
+    line" or "its arguments", "its WSM_HOME entry") for the forge's ('forge') or the sync's
+    ('sync') job. answer: 'equal' when what the service manager parsed is, word for word, what setup wrote (its
+    record, never this terminal's environment): the start line, and for each variable setup set exactly one entry
+    with its value; 'differs'; 'unread' when it, or what setup wrote, could not be read; 'absent' (a Mac) when
+    launchd holds no such job. An entry for a variable setup did not set is the person's own (a drop-in of theirs):
+    never a fault of ours, and only its name is kept (rule 31 (v.5) (3): it may hold a password)."""
+    meant = read_meant(p, which)
+    if system()[0] == "darwin":
+        got = launchd_parsed(LAUNCHD_LABEL if which == "forge" else SYNC_LABEL)
+        if got in (None, "absent"):
+            return ("unread" if got is None else "absent"), [], []
+        if meant is None:
+            return "unread", [], []
+        args, env = got
+        theirs = sorted(k for k in env if k not in meant[1] and k not in LAUNCHD_OWN_ENV)
+        parts = (["its arguments"] if args != meant[0] else []) + [
+            f"its {k} entry" for k, v in meant[1].items() if env.get(k) != v]
+        return ("differs" if parts else "equal"), theirs, parts
+    got = systemd_parsed((SERVICE if which == "forge" else SYNC_UNIT) + ".service")
+    if got is None or meant is None:
+        return "unread", [], []
+    starts, entries = got
+    pairs = [e.split("=", 1) if "=" in e else [e, None] for e in entries]
+    theirs = sorted({k for k, _ in pairs if k not in meant[1]})
+    parts = ["its start line"] if starts != [sd_parsed_form(meant[0])] else []
+    for name, want in meant[1].items():
+        held = [v for k, v in pairs if k == name]
+        if held != [want]:          # the count where setup wrote one entry, and no more (never which one wins)
+            parts.append(f"its {name} entry" if len(held) == 1 else f"its {name} entry ({len(held)} found where "
+                         "setup wrote one)")
+    return ("differs" if parts else "equal"), theirs, parts
+
+
+def service_read_back(p, which):
+    """G1.24: service_read's answer alone."""
+    return service_read(p, which)[0]
+
+
+def theirs_line(p):
+    """The family's rule 31 (v.5) (3): environment entries the person set in the skill's services themselves, named
+    (never their values) as theirs, a warning: '' when there are none or nothing could be read."""
+    names = []
+    for which in ("forge", "sync"):
+        for n in service_read(p, which)[1]:
+            if n not in names:
+                names.append(n)
+    if not names:
+        return ""
+    return (f"Your own setting is in the skill's service too, set by you, not by this tool: {shown_names(names)}. "
+            "It is left as it is; this tool reads only the values it set itself.")
+
+
+SETUP_READ_BACK_STEP = "Run uninstall, which takes its files away, and open an issue with this line"
+STATUS_READ_BACK_STEP = {
+    "differs": "run setup again, which writes it again and reads it back; if this line comes back, run uninstall and "
+               "open an issue with this line",
+    "unread": "run status from a terminal window of your own; if this line comes back there, open an issue with this "
+              "line"}
+
+
+def read_back_words(which, answer, then, step=SETUP_READ_BACK_STEP, parts=()):
+    """What setup and status say when the read-back is not 'equal' (the family's rule 31 (v.5): THAT a value is not
+    read as setup wrote it, never what it is read as instead, and no value the tool did not write: the parts are
+    named, never their values). then: what was done about it ("it was not started"); step: the one next step, for
+    where it is said."""
+    job = "the forge's service" if which == "forge" else "the sync's service"
+    mgr = "launchd" if system()[0] == "darwin" else "systemd"
+    if answer == "differs":
+        named = " and ".join(parts) if parts else "a value in it"
+        verb = "are" if len(parts) > 1 or list(parts) == ["its arguments"] else "is"
+        return (f"{mgr} does not hold {job} as setup wrote it: {named} {verb} not read as setup wrote it, so "
+                f"{then}. {step}")
+    return f"whether {mgr} holds {job} as setup wrote it could not be read, so {then}. {step}"
+
+
+def launchd_checked(p, which, label, out):
+    """G1.24 on a Mac: a job launchd loaded is read back; one that is not what setup wrote is taken off again at
+    once. (True, '') or (False, the words)."""
+    back, _, parts = service_read(p, which)
+    if back == "equal":
+        return True, ""
+    run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"])
+    return False, read_back_words(which, "differs" if back == "differs" else "unread", "it was taken off again",
+                                  parts=parts)
+
+
 def install_timer(p, minutes):
     if system()[0] == "darwin":
         path = os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+        record_meant(p, "sync", sync_argv(p))
         write_file(path, sync_plist_text(p, minutes))
         out, words = launchd_load(p, SYNC_LABEL, path)
         if out is None:
             return False, words
-        return out.returncode == 0, ("" if out.returncode == 0 else
-                                     f"this Mac did not load the sync's launch agent (code {out.returncode}); run "
-                                     "setup again, and if it stops here again, run status")
+        if out.returncode != 0:
+            return False, (f"this Mac did not load the sync's launch agent (code {out.returncode}); run setup again, "
+                           "and if it stops here again, run status")
+        return launchd_checked(p, "sync", SYNC_LABEL, out)
     base = os.path.dirname(p["unit"])
+    record_meant(p, "sync", sync_argv(p))
     write_file(os.path.join(base, SYNC_UNIT + ".service"), sync_unit_text(p))
     write_file(os.path.join(base, SYNC_UNIT + ".timer"), sync_timer_text(minutes))
     run(["systemctl", "--user", "daemon-reload"])
+    back, _, parts = service_read(p, "sync")           # G1.24: read back before anything is switched on
+    if back != "equal":
+        return False, read_back_words("sync", back, "its timer was not switched on", parts=parts)
     if run(["systemctl", "--user", "enable", "--now", SYNC_UNIT + ".timer"]).returncode == 0:
         return True, ""
     return False, "systemd did not switch the sync's timer on; run setup again, and if it stops here again, run status"
@@ -1001,7 +1279,7 @@ def linger_step(st, dry=False, allow=True):
     the state (st["linger_by_setup"]) so that uninstall switches off only what setup switched on."""
     user = getpass.getuser()
     admin = (f"On this computer {NO_LOGIN_NOTE}. To have it start at boot, the computer's administrator runs one "
-             f"command: {LINGER_COMMAND.format(user=user)} ({LINGER_MEANS}).")
+             f"command: {LINGER_COMMAND.format(user=shlex.quote(user))} ({LINGER_MEANS}).")
     state = linger_state()
     if state == "yes":
         if st is not None and "linger_by_setup" not in st:
@@ -1020,7 +1298,7 @@ def linger_step(st, dry=False, allow=True):
         if may == "unknown":
             return False, (f"Lingering means {LINGER_MEANS}. This computer did not say whether you may switch it on "
                            f"yourself, so setup --linger tries without asking for a password; if the computer "
-                           f"refuses, its administrator runs one command: {LINGER_COMMAND.format(user=user)}. "
+                           f"refuses, its administrator runs one command: {LINGER_COMMAND.format(user=shlex.quote(user))}. "
                            f"{say_no}")
         return False, f"{admin} {say_no}"
     # Never a password prompt the person did not expect: refused means the administrator's one command.
@@ -1283,6 +1561,7 @@ def systemd_off(p):
 
 
 def install_service(p):
+    record_meant(p, "forge", forge_argv(p))
     if system()[0] == "darwin":
         write_file(p["plist"], plist_text(p))
         uid = str(os.getuid())
@@ -1293,11 +1572,15 @@ def install_service(p):
         out, words = launchd_load(p, LAUNCHD_LABEL, p["plist"])         # G1.17: setup again, while the forge runs
         if out is None:
             return False, words
-        return out.returncode == 0, ("" if out.returncode == 0 else
-                                     f"this Mac did not load the forge's launch agent (code {out.returncode}); run "
-                                     "setup again, and if it stops here again, run status")
+        if out.returncode != 0:
+            return False, (f"this Mac did not load the forge's launch agent (code {out.returncode}); run setup "
+                           "again, and if it stops here again, run status")
+        return launchd_checked(p, "forge", LAUNCHD_LABEL, out)
     write_file(p["unit"], unit_text(p))
     run(["systemctl", "--user", "daemon-reload"])
+    back, _, parts = service_read(p, "forge")          # G1.24: read back before anything is started
+    if back != "equal":
+        return False, read_back_words("forge", back, "it was not started", parts=parts)
     out = run(["systemctl", "--user", "enable", "--now", SERVICE])
     return out.returncode == 0, last_line(out.stderr)
 
@@ -1353,14 +1636,16 @@ def settings_lines():
     lines, stop = [], False
     h = os.environ.get("WSM_HOME")
     if h:
-        lines.append(f"WSM_HOME is set: this skill's folders are under {h}.")
+        shown, note = shown_one(h)
+        lines.append(f"WSM_HOME is set: this skill's folders are under {shown}{note}.")
     elif system()[0] == "linux":
         home = os.path.expanduser("~")
         for name, usual, what in (("XDG_DATA_HOME", os.path.join(home, ".local", "share"), "data"),
                                   ("XDG_CONFIG_HOME", os.path.join(home, ".config"), "settings and service")):
             v = os.environ.get(name)
             if v and os.path.abspath(v) != usual:
-                lines.append(f"{name} is set: this skill's {what} folders are under {v}, not {usual}.")
+                shown, note = shown_one(v)
+                lines.append(f"{name} is set: this skill's {what} folders are under {shown}{note}, not {usual}.")
     for name in TEST_SETTINGS:
         v = os.environ.get(name)
         if not v:
@@ -2658,8 +2943,13 @@ def key_end_line(owner, exp):
             f"its end date is on GitHub's key page, {KEY_PAGE}.")
 
 
-def restart_line(st):
-    """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to."""
+def restart_line(p, st):
+    """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to.
+    G1.24: "starts by itself" only when the service manager holds the forge's service word for word as written."""
+    held, _, parts = service_read(p, "forge")
+    if held in ("differs", "unread"):
+        return "After a restart: " + read_back_words("forge", held, "it is not set up", STATUS_READ_BACK_STEP[held],
+                                                     parts)
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
         return "After a restart it starts by itself." if back else f"After a restart: {note}"
@@ -2669,7 +2959,7 @@ def restart_line(st):
         return ("After a restart it waits until you log in: lingering is off, as you chose, so the mirror syncs only "
                 "while you are logged in. To change that, run setup --linger.")
     return (f"After a restart: lingering is off, so {NO_LOGIN_NOTE}. The computer's administrator can switch it on "
-            f"with one command: {LINGER_COMMAND.format(user=getpass.getuser())} ({LINGER_MEANS}).")
+            f"with one command: {LINGER_COMMAND.format(user=shlex.quote(getpass.getuser()))} ({LINGER_MEANS}).")
 
 
 def announce_first_copy(p, st, picked, complete, to_the_person=False):
@@ -2687,7 +2977,7 @@ def announce_first_copy(p, st, picked, complete, to_the_person=False):
           else "There are none to copy yet.",
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
-          restart_line(st), lfs_missing() if not has_git_lfs() else "",
+          restart_line(p, st), lfs_missing() if not has_git_lfs() else "",
           *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
           *open_folders(p), NOT_COPIED, PRIVATE_AS_THIS_COMPUTER], to_the_person)
     st["announced"] = st.get("announced") or now_utc()
@@ -3008,20 +3298,35 @@ PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes
 
 def other_install(p):
     """G9.12: the service file this computer has for the skill, when it runs another home's copy than p's.
-    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file)."""
+    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file).
+    G1.24: what it runs is read as the service manager parsed it (systemd over its bus; launchd's loaded job, or,
+    when launchd has not loaded it, the file's own strings as the property-list format gives them), never by a
+    pattern over the file's text."""
     f = p["plist"] if system()[0] == "darwin" else p["unit"]
     if not os.path.exists(f):
         return None
-    try:
-        with open(f, encoding="utf-8") as fh:
-            txt = fh.read()
-    except (OSError, ValueError):
-        return "", f
-    m = (re.search(r"<string>-I</string><string>([^<]+)</string><string>run-forge</string>", txt)
-         or re.search(r"^ExecStart=\S+ -I (.+) run-forge$", txt, re.M))
-    if m and m.group(1) == p["script"]:
+    if service_file_ours(p, read_made(p)[0], f):     # this home wrote these very bytes: its own, whatever is parsed
         return None
-    return (m.group(1) if m else ""), f
+    argv = None
+    if system()[0] == "darwin":
+        got = launchd_parsed(LAUNCHD_LABEL)
+        if got == "absent":
+            try:
+                with open(f, "rb") as fh:
+                    got = (plistlib.load(fh)["ProgramArguments"], None)
+            except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
+                got = None
+        if isinstance(got, tuple) and isinstance(got[0], list) and all(isinstance(w, str) for w in got[0]):
+            argv = got[0]
+    else:
+        got = systemd_parsed(SERVICE + ".service")
+        if got and len(got[0]) == 1:
+            argv = got[0][0][1:]
+    if argv is None:
+        return "", f
+    if argv[1:] == ["-I", p["script"], "run-forge"]:
+        return None
+    return (argv[2] if len(argv) == 4 and argv[1] == "-I" and argv[3] == "run-forge" else ""), f
 
 
 def other_install_stop(p, cmd):
@@ -3418,6 +3723,8 @@ def cmd_setup(args):
     if timer_why:                                   # G1.17: the forge's own line stands; the sync's is its own
         ok = False
         say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
+    elif ok and theirs_line(p):                     # G1.24: a person's own entry is theirs, a warning
+        say(theirs_line(p))
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -3696,6 +4003,13 @@ def cmd_status(args):
                         "this computer says" if shut_kind == "other" else
                         f"a program answers on port {st['port']} at {a}; whether it is this mirror's forge could not "
                         "be read")
+    if not no_screen:                               # G1.24: what the manager parsed, read now
+        for which in ("forge", "sync"):
+            held, _, parts = service_read(p, which)
+            if held in ("differs", "unread"):
+                problems.append(read_back_words(which, held, "it is not set up", STATUS_READ_BACK_STEP[held], parts))
+        if theirs_line(p):
+            notes.append("note: " + theirs_line(p))
     when, tproblem = next_sync()
     if tproblem:
         problems.append(tproblem + (": this account is not logged in at this Mac's screen" if no_screen else ""))
