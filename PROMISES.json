@@ -2090,6 +2090,22 @@
    "moved_why": "",
    "seen": "2026-11-25, in a reviewer's read of 0.1.0's head before the tag: the plan, the rows and scripts/mirror.py named rows M124 and M127, and neither was a row in this tree's PROMISES.json; both stood only on the branch that holds the rows due later.",
    "promise": "Every row number this tree's README, plan, rows, scripts or tests name is a row in this same tree's PROMISES.json (the family's rule 34). Proven by one test that reads every text file of the tree and fails on a row number the file does not hold; each run it first proves its reader catches a planted number. Red on the head before the rows commit (M124 and M127)."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#159",
+   "id": "M131",
+   "codon": "T9",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_T9_the_rule_3_gate_is_a_job_of_its_own_and_hides_nothing_else",
+   "stand_in": "none",
+   "moved_why": "",
+   "seen": "2026-11-25, in a reviewer's read of the CI run on 0.1.0's head before the tag (run 45577888463): every test leg was red by design on the rule 3 gate, and on the Python 3.9 leg a second red (G9.8: OSError 'Directory not empty: data') stood behind it, unseen in the leg's colour. That red was the test's own: it removed the data folder under a forge still running, because the stand-in service manager does not stop the forge on uninstall's disable --now as systemd does; the test now stops the forge first.",
+   "promise": "The test legs run the whole suite apart from the rule 3 gate test, and a job of its own runs that one test: each leg's colour says the suite, that job's colour says the proofs on real machines. Only that one test can be set apart, only by its own flag, and the flag takes nothing else; the join leaves it out only when every leg's report says it was set apart. Proven by one test: the suite read with and without the flag (exactly that one test fewer), the flag run with anything beside it (refused), the join with and without it set apart, and the workflow read (each leg sets it apart, one job runs it alone). Red on the head before this row."
   }
  ],
  "declined": []

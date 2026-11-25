@@ -7911,6 +7911,46 @@ class Strand(unittest.TestCase):
         self.assertIn(os.path.join("scripts", "mirror.py"), texts)
         self.assertEqual(rows_not_here(texts, ids), [], "a text names a row this tree's PROMISES.json does not hold")
 
+    def test_T9_the_rule_3_gate_is_a_job_of_its_own_and_hides_nothing_else(self):
+        """M131 (a reviewer's read of CI, 2026-11-25): with the rule 3 gate red by design in every leg, a second red
+        in a leg (G9.8, once) stood behind it. The legs run the whole suite but that one test, and a job of its own
+        runs it; the flag sets apart that test only, and takes nothing else."""
+        me = sys.modules[__name__]
+        ids = lambda suite: {t.id().rsplit(".", 1)[-1] for t in iter_tests(suite)}
+        whole = ids(unittest.defaultTestLoader.loadTestsFromModule(me))
+        apart = ids(without(unittest.defaultTestLoader.loadTestsFromModule(me), RULE3_GATE))
+        self.assertIn(RULE3_GATE, whole)
+        self.assertEqual(whole - apart, {RULE3_GATE}, "the flag sets apart another test, or none")
+        self.assertIn(RULE3_GATE, plan_proofs() | row_tests())
+        # The flag takes nothing else: no name, no --gate-only beside it.
+        for extra in (["G1"], ["--gate-only", "test_T3_a_commits_checks_run_once"]):
+            r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), APART_FLAG, *extra],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120,
+                               env={k: v for k, v in os.environ.items() if k != "WSM_TEST_REPORT"})
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr[-800:])
+        # The join leaves it out only when every report says it was set apart.
+        with tempfile.TemporaryDirectory(prefix="wsm-join-") as d:
+            proofs = sorted((plan_proofs() | row_tests()) - {RULE3_GATE})
+            def report(n, apart_):
+                path = os.path.join(d, f"r{n}.json")
+                with open(path, "w") as f:
+                    json.dump({"passed": proofs, "refused": [], "apart": apart_}, f)
+                return path
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(join_reports([report(1, [RULE3_GATE]), report(2, [RULE3_GATE])], 2), 0)
+                self.assertEqual(join_reports([report(3, [RULE3_GATE]), report(4, [])], 2), 1)
+            self.assertIn(f"GATE: {RULE3_GATE} passed on none", out.getvalue())
+        # The workflow: every leg sets it apart, one job of its own runs it, the join waits on the legs.
+        wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
+        jobs = re.split(r"^  (?=[a-z0-9-]+:\n)", wf.split("\njobs:\n", 1)[1], flags=re.M)
+        job = {j.split(":", 1)[0]: j for j in jobs if j.strip()}
+        for leg in ("test", "test-mac"):
+            self.assertIn(f"run: python -I tests/test_mirror.py -v {APART_FLAG}\n", job[leg])
+        self.assertIn(f"run: python -I tests/test_mirror.py -v --gate-only {RULE3_GATE}\n", job["rule-3-gate"])
+        self.assertNotIn("needs:", job["rule-3-gate"])
+        self.assertEqual(wf.count(APART_FLAG), 2)
+
     def test_T3_a_commits_checks_run_once(self):
         """M43 (the family's rule 17, 2026-11-23): one stack of pull requests queued 17 runs, each commit twice,
         because the workflow ran on every push and every pull request. It runs on pull requests, and on pushes
@@ -8145,9 +8185,17 @@ def row_tests():
     return {r["test"] for r in rows if r.get("test")}
 
 
+# T9 (M131): the family's rule 3 gate runs in a job of its own, so the legs' colour says the suite and that job's
+# colour says the proofs on real machines. Only this one test can be set apart, and only with this flag.
+RULE3_GATE = "test_PROMISES_a_row_with_a_stand_in_is_proven_before_its_tag"
+APART_FLAG = "--without-rule3-gate"
+
+
 def join_reports(paths, expect):
     reports = [jload(p) for p in paths]
     proofs = plan_proofs() | row_tests()
+    if reports and all(r.get("apart") == [RULE3_GATE] for r in reports):
+        proofs -= {RULE3_GATE}                        # judged in its own job, never by the legs
     passed = set().union(*(set(r["passed"]) for r in reports)) if reports else set()
     refused = [x for r in reports for x in r["refused"]]
     if len(reports) != expect:
@@ -8159,6 +8207,25 @@ def join_reports(paths, expect):
     return 1 if refused else 0
 
 
+def iter_tests(suite):
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            yield from iter_tests(t)
+        else:
+            yield t
+
+
+def without(suite, name):
+    """The suite with every test of that one name taken out (none when name is None)."""
+    out = unittest.TestSuite()
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            out.addTest(without(t, name))
+        elif name is None or t.id().rsplit(".", 1)[-1] != name:
+            out.addTest(t)
+    return out
+
+
 def main(argv):
     verbosity = 2 if "-v" in argv else 1
     args = [a for a in argv if a != "-v"]
@@ -8167,6 +8234,11 @@ def main(argv):
         files = [a for i, a in enumerate(args[1:], 1) if a != "--expect" and args[i - 1] != "--expect"]
         return join_reports(files, expect)
     me = sys.modules[__name__]
+    apart = APART_FLAG in args
+    if apart and args != [APART_FLAG]:
+        print(f"{APART_FLAG} runs the whole suite but one test, and takes nothing else.", file=sys.stderr)
+        return 2
+    args = [] if apart else args
     gate_only = args[1] if args[:1] == ["--gate-only"] and len(args) > 1 else None
     tests = collected_tests()
     if gate_only:
@@ -8174,13 +8246,14 @@ def main(argv):
     elif args:
         suite = unittest.defaultTestLoader.loadTestsFromNames(args, me)
     else:
-        suite = unittest.defaultTestLoader.loadTestsFromModule(me)
+        suite = without(unittest.defaultTestLoader.loadTestsFromModule(me), RULE3_GATE if apart else None)
     result = unittest.TextTestRunner(verbosity=verbosity, resultclass=Recorder, stream=sys.stderr).run(suite)
     if args and not gate_only:
         print("A part of the suite was run, so the gate was not applied.", file=sys.stderr)
         return 0 if result.wasSuccessful() else 1
     problems = shape_problems(os.path.abspath(__file__))
-    refused, not_here = gate(result.outcome, {gate_only} if gate_only else plan_proofs() | row_tests())
+    refused, not_here = gate(result.outcome, {gate_only} if gate_only else
+                             (plan_proofs() | row_tests()) - ({RULE3_GATE} if apart else set()))
     refused = problems + refused
     for x in refused:
         print("GATE:", x)
@@ -8191,7 +8264,8 @@ def main(argv):
         with open(report, "w", encoding="utf-8") as f:
             json.dump({"system": "/".join(mirror.system()), "python": sys.version.split()[0],
                        "passed": sorted(n for n, o in result.outcome.items() if o == "passed"),
-                       "not_run_here": not_here, "refused": refused}, f, indent=1)
+                       "not_run_here": not_here, "refused": refused, "apart": [RULE3_GATE] if apart else []},
+                      f, indent=1)
     return 0 if result.wasSuccessful() and not refused else 1
 
 
