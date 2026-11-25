@@ -536,8 +536,8 @@ def home_is_not_ours(p):
 def run(cmd, **kw):
     """Every outside command goes through here, so tests can stand in for the ones a CI machine lacks. A program
     that is not installed answers 127 with a plain sentence, never a traceback (seen: a computer with no git).
-    M120: its words are read as bytes and decoded as UTF-8 with each byte that is not UTF-8 kept as a stand-in
-    character (surrogateescape), under any language: a name handed back to git as an argument is the same bytes."""
+    M120: its words are read as bytes and decoded by text_of with the codec Python itself encodes every argument and
+    environment value with, so a name read from git and handed back to git is the same bytes under any language."""
     try:
         out = subprocess.run(cmd, capture_output=True, **kw)
     except FileNotFoundError:
@@ -553,10 +553,18 @@ def lines_of(text):
 
 def text_of(data):
     """A program's bytes as text, never raising (M120), and with every byte kept: a carriage return stays one, so
-    a line ends only where the program wrote a line feed (family rule 31 (vi))."""
+    a line ends only where the program wrote a line feed (family rule 31 (vi)). Decoded as os.fsdecode does, which is
+    the codec subprocess encodes each argument with (UTF-8 with stand-in characters on a UTF-8 language and on a Mac;
+    the language's own on another, seen: ISO-8859-1), so what is read goes back as the same bytes by construction."""
     if data is None:
         return None
-    return data.decode("utf-8", "surrogateescape")
+    return os.fsdecode(data)
+
+
+def shown_lines(text):
+    """A program's words as lines for a PERSON (M120, the owner's ruling 11-24): cut at a carriage return too, so
+    words after one never reach the screen over the words before it. Records are read with lines_of."""
+    return [x for x in re.split(r"\r\n|\r|\n", text or "") if x.strip()]
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -761,7 +769,7 @@ def create_user(p, name, admin):
 
 
 def last_line(text):
-    lines = lines_of(text)
+    lines = shown_lines(text)
     return redact(lines[-1].rstrip()) if lines else ""
 
 
@@ -1199,7 +1207,7 @@ def systemd_off(p):
             out = run(["systemctl", "--user", "show", unit, "-p", "ActiveState"])
             state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
             if out.returncode != 0 or not state:
-                said = [x.strip() for x in lines_of(out.stderr or out.stdout)]
+                said = [x.strip() for x in shown_lines(out.stderr or out.stdout)]
                 seen.append((words, "unread", time.monotonic() - start,
                              f"code {out.returncode}" + (f": {said[0]}" if said else "")))
                 break
@@ -2006,7 +2014,7 @@ def where_to(url):
 def forge_refusal(text):
     """M120: why the forge refused a push, in its own words: its error lines and the first refused ref's reason
     (seen from Gitea 28.4.0: "Internal Server Error (no message for end users)", "pre-receive hook declined")."""
-    ls = [x.strip() for x in lines_of(text)]
+    ls = [x.strip() for x in shown_lines(text)]
     said = [re.sub(r"^remote:\s*(error:|fatal:)\s*", "", x) for x in ls if re.match(r"^remote:\s*(error:|fatal:)", x)]
     said = [x.strip() for x in said if x.strip()]
     refused = next((x for x in ls if x.startswith("! [remote rejected]")), "")
@@ -2018,7 +2026,7 @@ def forge_refusal(text):
 def git_reason(text):
     """Why git failed, in its own words: its first fatal or error line (its last line can be the tail of a
     sentence), with anything that looks like a credential hidden."""
-    lines = [x.strip() for x in lines_of(text)]
+    lines = [x.strip() for x in shown_lines(text)]
     first = next((x for x in lines if x.startswith(("fatal:", "error:"))), lines[-1] if lines else "")
     return redact(first)
 
@@ -2048,10 +2056,19 @@ def has_git_lfs():
 def uses_lfs(cache):
     """Does any branch or tag tip say, in its top .gitattributes, that files are kept with Git LFS? Decided on the
     file's bytes; a read that fails answers None, never no (M120: an error is never an absence)."""
-    refs = git(cache, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags")
+    refs = git(cache, "for-each-ref", "--format=%(objecttype) %(*objecttype) %(refname)", "refs/heads", "refs/tags")
     if refs.returncode != 0:
         return None
-    for ref in lines_of(refs.stdout):
+    for line in lines_of(refs.stdout):
+        kind, peeled, ref = line.split(" ", 2)
+        kind = peeled or kind
+        if kind == "tag":                              # a tag of a tag: what it comes to at the end
+            out = git(cache, "cat-file", "-t", ref + "^{}")
+            if out.returncode != 0:
+                return None
+            kind = out.stdout.strip()
+        if kind not in ("commit", "tree"):
+            continue                                   # a tag at a file (a blob): by its kind, no top .gitattributes
         there = git(cache, "ls-tree", "--name-only", ref, ".gitattributes")
         if there.returncode != 0:
             return None
@@ -2066,8 +2083,9 @@ def uses_lfs(cache):
 
 
 def refs_of(cache):
+    """The branches and tags as written down in the state (written(): one form under any language)."""
     out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags")
-    return dict(reversed(line.split(" ", 1)) for line in lines_of(out.stdout))
+    return {written(r): s for s, r in (line.split(" ", 1) for line in lines_of(out.stdout))}
 
 
 def place_copy(forge, rec, full, gid, report):
@@ -2171,10 +2189,30 @@ def drop_old_kept(cache, days):
     return dropped
 
 
+def written(name):
+    """M120: a name as run() read it, in the one form the state holds under any language: its bytes decoded as UTF-8
+    with each byte that is not UTF-8 kept as a stand-in character. The same as the name on a UTF-8 language; so a
+    status in the person's language reads what a sync in the service's language wrote down as the same names."""
+    return os.fsencode(name).decode("utf-8", "surrogateescape")
+
+
 def not_text(name):
-    """M120: a name whose bytes are not UTF-8 (run() keeps each such byte as a stand-in character). The forge
-    cannot hold one (seen: Gitea 28.4.0's pre-receive hook declined the whole atomic push), so it is left out."""
+    """M120: a name (as run() read it) whose bytes are not UTF-8. The forge cannot hold one (seen: Gitea 28.4.0's
+    pre-receive hook declined the whole atomic push), so it is left out."""
+    return written_not_text(written(name))
+
+
+def written_not_text(name):
+    """The same for a name in the state's form."""
     return any("\udc80" <= c <= "\udcff" for c in name)
+
+
+def not_text_line(refs):
+    """The words for a copy without the names the forge cannot hold (refs as git gave them)."""
+    shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
+             for r in sorted(refs)]
+    return NOT_TEXT.format(n=len(shown), names=", ".join(shown[:5]) + (
+        f" and {len(shown) - 5} more" if len(shown) > 5 else ""))
 
 
 def push_specs(cache):
@@ -2271,14 +2309,11 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
                 forge_refusal(out.stderr))
     if dropped:
         report.append(f"{full}: {len(dropped)} kept ref(s) older than the kept period were dropped")
+    # M120: a name the forge cannot hold is a known limit of this copy, not a failed refresh (the owner's ruling,
+    # 11-24): it goes the road lfs_missing goes, a flag said at every sync and in status.
     rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
                last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
-               lfs_missing=(lfs is False))
-    left = sorted(r for r in rec.get("seen_refs") or {} if not_text(r))
-    if left:
-        shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):] for r in left]
-        return NOT_TEXT.format(n=len(left), names=", ".join(shown[:5]) + (
-            f" and {len(left) - 5} more" if len(left) > 5 else ""))
+               lfs_missing=(lfs is False), left_out=sorted(r for r in rec.get("seen_refs") or {} if written_not_text(r)))
     return ""
 
 
@@ -2754,10 +2789,16 @@ def sync(p, args):
     lfs_missing = sorted(rec["full_name"] for rec in state.values() if rec.get("lfs_missing") and not rec.get("gone_since"))
     for name in lfs_missing:
         say(f"problem: {name}: {LFS_NOT_IN_COPY}")
+    left_out = sorted(((rec["full_name"], rec["left_out"]) for rec in state.values()
+                       if rec.get("left_out") and not rec.get("gone_since")), key=lambda x: x[0].lower())
+    for name, refs in left_out:
+        say(f"problem: {name}: {not_text_line(refs)}")
     say(f"sync: {len(found)} on GitHub, {done} copied now, {unchanged} unchanged, {len(problems)} problem(s), "
         f"{calls} GitHub API call(s)" + (", a full pass" if full_due else "")
         + (f", {len(lfs_missing)} cop{'y' if len(lfs_missing) == 1 else 'ies'} without its large files"
-           if lfs_missing else ""))
+           if lfs_missing else "")
+        + (f", {len(left_out)} cop{'y' if len(left_out) == 1 else 'ies'} without branch or tag names the forge "
+           "cannot hold" if left_out else ""))
     say(NOT_COPIED)
     if plugin_removed(st):
         gone = PLUGIN_GONE.format(command=own_command(p, "uninstall"))
@@ -3192,7 +3233,9 @@ def copy_state(rec, forge_refs, max_age):
         return False, "never copied yet"
     if time.time() - epoch_of(rec["last_good"]) > max_age:
         return False, f"last good refresh {rec['last_good']}, older than twice the sync interval"
-    held = {r: s for r, s in (forge_refs or {}).items() if not r.startswith("refs/heads/kept/")}
+    held = {written(r): s for r, s in (forge_refs or {}).items() if not r.startswith("refs/heads/kept/")}
+    if rec.get("left_out") and held == {r: s for r, s in (rec.get("refs") or {}).items() if not written_not_text(r)}:
+        return False, not_text_line(rec["left_out"])        # M120: true, and said once; behind, never "not refreshed"
     if held != (rec.get("refs") or {}):
         return False, "the copy's branches and tags differ from what GitHub last showed"
     return True, ""
@@ -3568,8 +3611,9 @@ def cmd_restore(args):
                 diffs.append(f"{name}: {why}")
                 continue
             mine = 0
-            have = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
-            seen = rec.get("seen_refs") or rec.get("refs") or {}
+            have = {written(r): s for r, s in refs_under(into, "refs/heads", "refs/tags").items()
+                    if not r.startswith("refs/heads/kept/")}
+            seen = rec.get("seen_refs") or rec.get("refs") or {}            # written(): the state's one form
             for ref in sorted(set(have) | set(seen)):
                 if have.get(ref) != seen.get(ref):
                     mine += 1
@@ -3651,14 +3695,14 @@ def restore_to(p, st, forge, url, repository):
             out = run(["git", "--git-dir", into, "lfs", "push", "--all", "home"], env=mine, timeout=3600)
             if out.returncode != 0:
                 say("The large files could not be put in the new home, so nothing else was pushed: "
-                    + " / ".join(x.strip() for x in lines_of(out.stderr)[-3:])
+                    + " / ".join(x.strip() for x in shown_lines(out.stderr)[-3:])
                     + ". Check that the new home takes large files, then run restore --to again.")
                 return 1
         specs = ["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*", "^refs/heads/kept/*"]
         out = run(["git", "--git-dir", into, "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--atomic", "home",
                    *specs], env=mine, timeout=3600)
         if out.returncode != 0:
-            say("The push to the new home failed: " + " / ".join(x.strip() for x in lines_of(out.stderr)[-4:])
+            say("The push to the new home failed: " + " / ".join(x.strip() for x in shown_lines(out.stderr)[-4:])
                 + ". Run restore --to again into a new, empty repository; if it fails the same way, git's words are "
                   "the reason.")
             return 1

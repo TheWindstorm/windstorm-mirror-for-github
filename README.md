@@ -155,8 +155,8 @@ pre-push hook of yours does not check that push.
 Every branch and every tag of every repository that you own, or that the organisations you name own. To copy only
 some of them, name them with `config include`. Large files are copied too, when git lfs is installed. When GitHub
 rewrites or deletes a branch, the old commit is kept in the copy as `kept/<date>/<name>`, for 90 days.
-A branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one: the sync names the
-project as a problem with those names, and copies every other branch and tag of that project.
+A branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one. Every other branch and
+tag of that project is copied, and each sync and `status` name the copy with the names it lacks, as with large files.
 
 ## Two rules
 

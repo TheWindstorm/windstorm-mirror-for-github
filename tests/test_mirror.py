@@ -2216,10 +2216,12 @@ class G3(unittest.TestCase):
                  "    m.has_git_lfs = lambda: False\n"
                  "sys.exit(m.main(sys.argv[3:]))\n")
 
-        def sync_in(w, lang, lfs, *cmd):
-            env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE")}
+        def sync_in(w, lang, lfs, *cmd, locpath=None):
+            env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE", "LOCPATH")}
             if lang:
                 env["LANG"] = lang
+            if locpath:
+                env["LOCPATH"] = locpath
             r = subprocess.run([sys.executable, "-I", "-c", drive, w.p["script"], lfs, *(cmd or ["sync"])], env=env,
                                capture_output=True, timeout=300)
             out, err = r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
@@ -2285,8 +2287,8 @@ class G3(unittest.TestCase):
             never one fewer unnamed."""
             three(w, lambda w: names(w, twin))
             rc, out = sync_in(w, lang, "lfs")
-            self.assertEqual(rc, 1, out)
-            self.assertIn("someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("problem: someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
             gh = gh_raw(w, "aa")
             self.assertEqual(len(gh), 5 + 2 * len(blanks))
             want = {r: s for r, s in gh.items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
@@ -2413,6 +2415,123 @@ class G3(unittest.TestCase):
             self.assertIn("Whether someone/bb keeps files with Git LFS could not be read from its .gitattributes, so "
                           "nothing was pushed.", out)
             self.assertEqual(lsremote(home), {})
+        # 7. A tag at a file (a blob), an annotated one, a tag at a tree and a tag of a tag (git's own project has a
+        # tag at a file): by its kind it has no top .gitattributes, which is a no, never "could not be read"; with
+        # git lfs and without, the project is copied whole and restore --to brings it all back.
+        def odd_tags(w):
+            w.gh.commit("someone/aa", {"a": b"1"})
+            blob = w.gh.git("someone/aa", "rev-parse", "main:a").strip()
+            tree = w.gh.git("someone/aa", "rev-parse", "main^{tree}").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            w.gh.git("someone/aa", "tag", "a-key-file", blob)
+            w.gh.git("someone/aa", *me, "tag", "-a", "-m", "a file", "an-annotated-file", blob)
+            w.gh.git("someone/aa", "tag", "a-tree", tree)
+            w.gh.git("someone/aa", *me, "tag", "-a", "-m", "of a tag", "a-tag-of-a-tag", "an-annotated-file")
+
+        for lfs in ("no-lfs", "lfs"):
+            with World(self) as w:
+                three(w, odd_tags)
+                rc, out = sync_in(w, "en_US.UTF-8", lfs)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                self.assertEqual(len(gh_raw(w, "aa")), 5)
+                for n in ("aa", "bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lfs})")
+                root = tempfile.mkdtemp(prefix="wsm-home-")
+                TEMPS.append(root)
+                home = bare_home(root, "aa")
+                rc, out = sync_in(w, "en_US.UTF-8", lfs, "restore", "--to", home, "someone/aa")
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                self.assertEqual(raw_refs(["git", "ls-remote", home]), gh_raw(w, "aa"), lfs)
+        # 8. What a left-out name costs, against a control with a plain name in the same place, three syncs: the copy
+        # is refreshed and said with its limit at every sync and in status; the sync is good, its full pass is one,
+        # the others are unchanged the next time, and no line says "not refreshed" or "cannot refresh" of it.
+        for label, name in (("planted", "refs/heads/a\udcffb"), ("control", "refs/heads/a_b")):
+            with World(self) as w:
+                three(w, lambda w: (w.gh.commit("someone/aa", {"a": b"1"}), w.gh.git("someone/aa", "update-ref", name, "main")))
+                self.assertIn(name.encode("utf-8", "surrogateescape"), gh_raw(w, "aa"))        # the premise
+                time.sleep(1.1)                        # pushed_at has whole seconds: a push in a fetch's own second is fetched again
+                limit = "problem: someone/aa: " + mirror.NOT_TEXT.format(n=1, names="a\\udcffb")
+                for i in (1, 2, 3):
+                    rc, out = sync_in(w, "en_US.UTF-8", "lfs")
+                    self.assertEqual(rc, 0, f"{label} {i}: {out}")
+                    line = next(x for x in out.split("\n") if x.startswith("sync: "))
+                    self.assertIn("3 copied now, 0 unchanged" if i == 1 else "0 copied now, 3 unchanged", line, label)
+                    self.assertEqual(", a full pass" in line, i == 1, line)
+                    self.assertEqual(limit in out, label == "planted", out)
+                    self.assertEqual("1 copy without branch or tag names the forge cannot hold" in line,
+                                     label == "planted", line)
+                    self.assertNotRegex(out, r"not refreshed|cannot refresh", out)
+                    st = mirror.load_json(w.p["state"], {})
+                    for k in ("first_copy_done", "last_good_sync", "last_full_pass"):
+                        self.assertTrue(st.get(k), f"{label} {i}: {k}")
+                rc, out = sync_in(w, "en_US.UTF-8", "lfs", "status")
+                self.assertNotRegex(out, r"not refreshed|cannot refresh|last good sync: none yet", out)
+                self.assertIn(f"\ncopies: 3 on GitHub, 3 copied, {1 if label == 'planted' else 0} behind, 0 unreadable", out)
+                self.assertEqual(f"problem: someone/aa: {mirror.NOT_TEXT.format(n=1, names='a' + chr(92) + 'udcffb')}"
+                                 in out, label == "planted", out)
+                for n in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({label})")
+                if label == "planted":
+                    time.sleep(1.1)                    # pushed_at has whole seconds
+                    w.gh.git("someone/aa", "update-ref", "-d", name)
+                    rc, out = sync_in(w, "en_US.UTF-8", "lfs")
+                    self.assertEqual(rc, 0, out)
+                    self.assertNotIn("not UTF-8 text", out)
+                    self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+                    rc, out = sync_in(w, "en_US.UTF-8", "lfs", "status")
+                    self.assertIn("\ncopies: 3 on GitHub, 3 copied, 0 behind, 0 unreadable", out)
+        # 9. A program's words with a carriage return, shown to a person: cut there too, never handed to the screen.
+        out = mirror.run(["sh", "-c", "printf 'fatal: bad\\rsudo id #\\n' >&2; exit 1"])
+        self.assertEqual(out.stderr, "fatal: bad\rsudo id #\n")                       # the premise: the CR was read
+        self.assertEqual(mirror.git_reason(out.stderr), "fatal: bad")
+        self.assertEqual(mirror.last_line(out.stderr), "sudo id #")
+        out = mirror.run(["sh", "-c", "printf 'remote: error: no\\rsudo id #\\n ! [remote rejected] main -> main (x\\ry)\\n' >&2;"
+                                      " exit 1"])
+        self.assertIn("\r", out.stderr)
+        self.assertEqual(mirror.forge_refusal(out.stderr), "no")
+        for f in (mirror.git_reason, mirror.last_line, mirror.forge_refusal):
+            self.assertNotIn("\r", f(out.stderr), f.__name__)
+        self.assertEqual(mirror.lines_of("a\rb\nc"), ["a\rb", "c"])                     # a record keeps its CR
+        # 10. A language that is not UTF-8 (en_US.ISO-8859-1, made into a folder of the test's own): a branch and a
+        # tag named with an e-acute go back to git as the bytes read, and are copied, with git lfs and without; a
+        # status in the other language reads what was written down as the same names.
+        loc = tempfile.mkdtemp(prefix="wsm-loc-")
+        TEMPS.append(loc)
+        made = shutil.which("localedef") and subprocess.run(
+            ["localedef", "-i", "en_US", "-f", "ISO-8859-1", os.path.join(loc, "en_US.ISO-8859-1")],
+            capture_output=True).returncode in (0, 1)
+        probe = subprocess.run([sys.executable, "-I", "-c", "import sys; print(sys.getfilesystemencoding())"],
+                               env=dict({k: v for k, v in os.environ.items() if not k.startswith(("LC_", "LANG"))},
+                                        LANG="en_US.ISO-8859-1", LOCPATH=loc), capture_output=True, text=True).stdout
+        if probe.strip() != "iso8859-1":
+            if sys.platform.startswith("linux") and os.environ.get("WSM_REQUIRE_GITEA"):
+                raise AssertionError(f"a Latin-1 language could not be made here (localedef: {made}): {probe!r}")
+            print(f"\nG3.15: part 10 is not run here (no Latin-1 language for Python: {probe.strip()!r}); a Linux CI "
+                  "job runs it", file=sys.stderr)
+            return
+
+        def latin(w):
+            for n, e in (("aa", "é"), ("bb", "e")):
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.gh.git(f"someone/{n}", "update-ref", f"refs/heads/caf{e}", "main")
+                w.gh.git(f"someone/{n}", "tag", f"v{e}", "main")
+
+        for lfs in ("lfs", "no-lfs"):
+            with World(self) as w:
+                three(w, latin)
+                self.assertIn(b"refs/heads/caf\xc3\xa9", gh_raw(w, "aa"))                 # the premise
+                rc, out = sync_in(w, "en_US.ISO-8859-1", lfs, locpath=loc)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                for n in ("aa", "bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lfs})")
+                    self.assertEqual(len(forge_raw(w, n)), 1 if n == "cc" else 3, n)
+                for lang, lp in (("en_US.UTF-8", None), ("en_US.ISO-8859-1", loc)):
+                    rc, out = sync_in(w, lang, lfs, "status", locpath=lp)
+                    self.assertIn("\ncopies: 3 on GitHub, 3 copied, 0 behind, 0 unreadable", out, f"{lfs} {lang}")
+                rc, out = sync_in(w, "en_US.UTF-8", lfs)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                rc, out = sync_in(w, "en_US.ISO-8859-1", lfs, "restore", "--check", locpath=loc)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
 
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():
@@ -6872,7 +6991,7 @@ class G6Words(unittest.TestCase):
             if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
-        data = {"SKILL_REPO", "GITEA_VERSION", "last_line", "lines_of",  # facts inside a line, not its words (git's)
+        data = {"SKILL_REPO", "GITEA_VERSION", "last_line", "lines_of", "shown_lines",  # facts in a line (git's words)
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
                 "own_command"}                                                   # (the command to run, as it runs)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
