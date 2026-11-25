@@ -2203,6 +2203,135 @@ class G3(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertEqual(sorted(r["name"] for r in w.forge_get("/user/repos")[1]), ["someone--alpha", "someone--beta"])
 
+    def test_G3_15_nothing_one_project_holds_stops_the_sync(self):
+        """M120: bytes that are not UTF-8 in one project (a .gitattributes, a branch's or a tag's name) never end the
+        sync: under LANG=en_US.UTF-8 and with no LANG, in a fresh process writing to a pipe, the project is copied or
+        named and the projects after it are copied; and a fault the tool did not foresee in one project names that
+        project in plain words while the others are copied."""
+        drive = ("import importlib.util, sys\n"
+                 "s = importlib.util.spec_from_file_location('mirror', sys.argv[1]); m = importlib.util.module_from_spec(s)\n"
+                 "s.loader.exec_module(m)\n"
+                 "sys.stderr.write('stdout errors: ' + sys.stdout.errors + '\\n')\n"
+                 "if sys.argv[2] == 'no-lfs':\n"
+                 "    m.has_git_lfs = lambda: False\n"
+                 "sys.exit(m.main(sys.argv[3:]))\n")
+
+        def sync_in(w, lang, lfs, *cmd):
+            env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE")}
+            if lang:
+                env["LANG"] = lang
+            r = subprocess.run([sys.executable, "-I", "-c", drive, w.p["script"], lfs, *(cmd or ["sync"])], env=env,
+                               capture_output=True, timeout=300)
+            out, err = r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+            if lang:                               # the print trap is real only where the language makes it strict
+                self.assertIn("stdout errors: strict", err, f"{lang} is not a language on this computer")
+            self.assertNotIn("Traceback", err + out, err + out)
+            self.assertNotRegex(out, r"\b\w+Error\b", "a Python name in the tool's words")
+            return r.returncode, out
+
+        def raw_refs(cmd):
+            out = subprocess.run(cmd, capture_output=True, check=True).stdout
+            return {r: s for s, r in (line.split(b"\t" if b"\t" in line else b" ", 1) for line in out.splitlines())
+                    if not r.endswith(b"^{}") and r != b"HEAD"}
+
+        def gh_raw(w, name):
+            return raw_refs(["git", "--git-dir", os.path.join(w.gh.root, "someone", name + ".git"), "for-each-ref",
+                             "--format=%(objectname) %(refname)"])
+
+        def forge_raw(w, name):
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            return raw_refs(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "ls-remote",
+                             f"http://127.0.0.1:{w.port}/mirror/someone--{name}.git"])
+
+        def three(w, first):
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+            first(w)
+            w.gh.commit("someone/bb", {".gitattributes": b"\xf6*.dat -text\n", "a": b"1"})     # Latin-1, no LFS
+            w.gh.commit("someone/cc", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+
+        def attrs(w):
+            w.gh.commit("someone/aa", {".gitattributes": b"# M\xf6\xdfe\n*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                                       "a": b"1"})
+
+        def names(w):
+            w.gh.commit("someone/aa", {"a": b"1"})
+            w.gh.commit("someone/aa", {"b": b"2"}, branch="side")
+            w.gh.git("someone/aa", "update-ref", "refs/heads/a\udcffb", "side")
+            w.gh.git("someone/aa", "tag", "t\udcc3x", "main")
+            w.gh.git("someone/aa", "update-ref", "refs/heads/c\u0085d\u2028e", "main")      # UTF-8 that splitlines breaks
+
+        for lang in ("en_US.UTF-8", None):
+            # 1. A .gitattributes whose bytes are not UTF-8, on a computer without git lfs: decided on its bytes.
+            with World(self) as w:
+                three(w, attrs)
+                rc, out = sync_in(w, lang, "no-lfs")
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"problem: someone/aa: {mirror.LFS_NOT_IN_COPY}", out, "an LFS line read as no LFS")
+                self.assertNotIn(f"someone/bb: {mirror.LFS_NOT_IN_COPY}", out)
+                for n in ("aa", "bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
+            # 2. A branch's and a tag's name that are not UTF-8 (the forge cannot hold them): every other branch
+            # and tag is copied, the two are named in the sync's words and in status, and the projects after it
+            # are copied whole.
+            with World(self) as w:
+                three(w, names)
+                rc, out = sync_in(w, lang, "lfs")
+                self.assertEqual(rc, 1, out)
+                named = "someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x")
+                self.assertIn(named, out)
+                want = {r: s for r, s in gh_raw(w, "aa").items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
+                self.assertEqual(sorted(want), [b"refs/heads/c\xc2\x85d\xe2\x80\xa8e", b"refs/heads/main", b"refs/heads/side"])
+                self.assertEqual(forge_raw(w, "aa"), want, lang)
+                for n in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
+                rc, out = sync_in(w, lang, "lfs", "status")
+                self.assertEqual(rc, 1, out)
+                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
+        # 3. A .gitattributes that cannot be read is never taken as no LFS: the project is named, the rest copied.
+        with World(self) as w:
+            three(w, attrs)
+            saved, lfs = mirror.git, mirror.has_git_lfs
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "blob") and args[2].endswith(":.gitattributes"):
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git, mirror.has_git_lfs = unread, lambda: False
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.git, mirror.has_git_lfs = saved, lfs
+            self.assertEqual(rc, 1, out)
+            for n in ("aa", "bb"):
+                self.assertIn(f"someone/{n}: {mirror.LFS_UNREAD}", out)
+            self.assertNotIn(mirror.LFS_NOT_IN_COPY, out)
+            self.assertEqual(forge_raw(w, "cc"), gh_raw(w, "cc"))
+        # 4. A fault the tool did not foresee, in the first project only: named in plain words; the others copied.
+        with World(self) as w:
+            three(w, lambda w: w.gh.commit("someone/aa", {"a": b"1"}))
+            saved = mirror.place_copy
+
+            def fault(forge, rec, full, gid, report):
+                if full == "someone/aa":
+                    raise KeyError("id")
+                return saved(forge, rec, full, gid, report)
+            mirror.place_copy = fault
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.place_copy = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"someone/aa: {mirror.UNFORESEEN}", out)
+            self.assertNotIn("KeyError", out)
+            for n in ("bb", "cc"):
+                self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():
             if os.environ.get("WSM_REQUIRE_GITEA"):

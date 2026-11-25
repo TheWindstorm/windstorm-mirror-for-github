@@ -112,6 +112,10 @@ def say(msg=""):
     msg = str(msg)
     for s in SECRETS:
         msg = msg.replace(s, "<a key>")
+    # M120: a character this terminal's language cannot write (the bytes of a name that are not UTF-8, as run()
+    # reads them) is written as a backslash form; the print never raises, whatever the language.
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    msg = msg.encode(enc, "backslashreplace").decode(enc)
     try:
         print(msg, flush=True)
     except BrokenPipeError:
@@ -531,11 +535,27 @@ def home_is_not_ours(p):
 
 def run(cmd, **kw):
     """Every outside command goes through here, so tests can stand in for the ones a CI machine lacks. A program
-    that is not installed answers 127 with a plain sentence, never a traceback (seen: a computer with no git)."""
+    that is not installed answers 127 with a plain sentence, never a traceback (seen: a computer with no git).
+    M120: its words are read as bytes and decoded as UTF-8 with each byte that is not UTF-8 kept as a stand-in
+    character (surrogateescape), under any language: a name handed back to git as an argument is the same bytes."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+        out = subprocess.run(cmd, capture_output=True, **kw)
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]} is not installed on this computer")
+    return subprocess.CompletedProcess(out.args, out.returncode, text_of(out.stdout), text_of(out.stderr))
+
+
+def lines_of(text):
+    """A program's lines, split at the line feed only (M120): a ref's name may hold U+0085, U+2028 or U+2029, where
+    Python's splitlines also breaks."""
+    return [x for x in (text or "").split("\n") if x.strip()]
+
+
+def text_of(data):
+    """A program's bytes as text: as text=True read them (line ends made \n), but never raising (M120)."""
+    if data is None:
+        return None
+    return data.decode("utf-8", "surrogateescape").replace("\r\n", "\n").replace("\r", "\n")
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -1076,6 +1096,14 @@ def git_missing_sentence():
 
 LFS_NOT_IN_COPY = ("its large files are NOT in the copy, because git lfs was not installed when it was copied; "
                    "install git lfs, and the next sync copies them")
+LFS_UNREAD = ("whether it keeps files with Git LFS could not be read from its .gitattributes, so its copy was not "
+              "refreshed; the next sync tries again")
+NOT_TEXT = ("{n} branch or tag name(s) on GitHub are not UTF-8 text, which the forge cannot hold, so they are not in "
+            "the copy ({names}); every other branch and tag is copied")
+UNFORESEEN = ("the tool met something in this project it was not built for, so its copy was not refreshed; every other "
+              "project went on, and the next sync tries again")
+
+
 def lfs_missing():
     return ("git lfs is not installed here, so projects with large files are copied without them until it is "
             f"({install_words('git-lfs')}; setup and sync find it by themselves once it is installed).")
@@ -1688,7 +1716,7 @@ def read_door(p, port):
     me = os.getuid()
     if system()[0] == "darwin":
         try:
-            out = subprocess.run(NETSTAT, capture_output=True, text=True, timeout=20)
+            out = subprocess.run(NETSTAT, capture_output=True, text=True, errors="replace", timeout=20)
         except FileNotFoundError:
             raise DoorUnread(True, "netstat is not there")
         except (OSError, subprocess.SubprocessError):
@@ -1771,7 +1799,7 @@ def door_floor():
         me = os.getuid()
         try:
             if system()[0] == "darwin":
-                out = subprocess.run(NETSTAT, capture_output=True, text=True, timeout=20)
+                out = subprocess.run(NETSTAT, capture_output=True, text=True, errors="replace", timeout=20)
                 if out.returncode != 0:
                     raise DoorUnread(False, "netstat did not answer")
                 pids = mac_listeners(port, out.stdout)
@@ -1801,7 +1829,7 @@ def short_lived_start():
     outgoing connections (Linux: ip_local_port_range, 32768 by default; macOS: net.inet.ip.portrange.first, 49152)."""
     try:
         if system()[0] == "darwin":
-            out = subprocess.run(["sysctl", "-n", "net.inet.ip.portrange.first"], capture_output=True, text=True,
+            out = subprocess.run(["sysctl", "-n", "net.inet.ip.portrange.first"], capture_output=True, text=True, errors="replace",
                                  timeout=10)
             return int(out.stdout.strip())
         with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as fh:
@@ -2005,16 +2033,28 @@ def has_git_lfs():
 
 
 def uses_lfs(cache):
-    """Does any branch or tag tip say, in its top .gitattributes, that files are kept with Git LFS?"""
-    for ref in git(cache, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags").stdout.split():
-        if "filter=lfs" in git(cache, "show", f"{ref}:.gitattributes").stdout:
+    """Does any branch or tag tip say, in its top .gitattributes, that files are kept with Git LFS? Decided on the
+    file's bytes; a read that fails answers None, never no (M120: an error is never an absence)."""
+    refs = git(cache, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags")
+    if refs.returncode != 0:
+        return None
+    for ref in lines_of(refs.stdout):
+        there = git(cache, "ls-tree", "--name-only", ref, ".gitattributes")
+        if there.returncode != 0:
+            return None
+        if not there.stdout.strip():
+            continue                                   # this tip has no top .gitattributes
+        out = git(cache, "cat-file", "blob", f"{ref}:.gitattributes")
+        if out.returncode != 0:
+            return None
+        if "filter=lfs" in out.stdout:
             return True
     return False
 
 
 def refs_of(cache):
     out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags")
-    return dict(reversed(line.split(" ", 1)) for line in out.stdout.splitlines() if line.strip())
+    return dict(reversed(line.split(" ", 1)) for line in lines_of(out.stdout))
 
 
 def place_copy(forge, rec, full, gid, report):
@@ -2062,7 +2102,7 @@ def twice(step):
 
 def refs_under(cache, *prefixes):
     out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", *prefixes)
-    return {r: s for s, r in (line.split(" ", 1) for line in out.stdout.splitlines() if line.strip())}
+    return {r: s for s, r in (line.split(" ", 1) for line in lines_of(out.stdout))}
 
 
 def keep_before_moving(cache, report, full):
@@ -2109,7 +2149,8 @@ def drop_old_kept(cache, days):
             continue
         if not chosen:
             others = git(cache, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads", "refs/tags",
-                         "refs/kept").stdout.split()
+                         "refs/kept").stdout
+            others = lines_of(others)
             if not [r for r in others if r != ref]:
                 continue                                       # the only way to its commit: it stays
         if git(cache, "update-ref", "-d", ref, sha).returncode == 0:
@@ -2117,10 +2158,16 @@ def drop_old_kept(cache, days):
     return dropped
 
 
+def not_text(name):
+    """M120: a name whose bytes are not UTF-8 (run() keeps each such byte as a stand-in character). The forge
+    cannot hold one (seen: Gitea 28.4.0's pre-receive hook declined the whole atomic push), so it is left out."""
+    return any("\udc80" <= c <= "\udcff" for c in name)
+
+
 def push_specs(cache):
     """What one atomic push sends: every branch and tag as GitHub has it, every kept ref, and a delete for each
     branch, tag or kept ref the copy holds that is gone here (each one already kept, or dropped by G5.2)."""
-    now = refs_under(cache, "refs/heads", "refs/tags")
+    now = {r: s for r, s in refs_under(cache, "refs/heads", "refs/tags").items() if not not_text(r)}   # M120
     kept = refs_under(cache, "refs/kept")
     held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
     specs = [f"+{r}:{r}" for r in sorted(now)] + [f"+{r}:refs/heads/kept/{r[len('refs/kept/'):]}" for r in sorted(kept)]
@@ -2171,8 +2218,12 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         if out.returncode != 0:
             return "the large files could not be fetched: " + git_reason(out.stderr).replace(key, "<the key>")
         lfs = True
-    elif uses_lfs(cache):
-        lfs = False
+    else:
+        said = uses_lfs(cache)
+        if said is None:
+            return LFS_UNREAD
+        if said:
+            lfs = False
     cur = place_copy(forge, rec, full, gid, report)
     # Read the copy's name by its id again just before the push, and never follow a redirect (contract C7).
     check = forge.by_id(rec["forge_id"])
@@ -2209,6 +2260,11 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
                last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
                lfs_missing=(lfs is False))
+    left = sorted(r for r in rec.get("seen_refs") or {} if not_text(r))
+    if left:
+        shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):] for r in left]
+        return NOT_TEXT.format(n=len(left), names=", ".join(shown[:5]) + (
+            f" and {len(left) - 5} more" if len(left) > 5 else ""))
     return ""
 
 
@@ -2656,6 +2712,8 @@ def sync(p, args):
             return 1
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             why = str(e)
+        except Exception:                    # M120: nothing one project holds ends the sync for every other project
+            why = UNFORESEEN
         rec.pop("copying_since", None)
         if why:
             rec["problem"] = "cannot refresh: " + why
@@ -3130,7 +3188,7 @@ def forge_refs_of(forge, name):
     out = forge_call(forge, None, "ls-remote", f"{forge.base}/{forge.user}/{name}.git", timeout=60)
     if out.returncode != 0:
         return None
-    return {r: s for s, r in (line.split("\t", 1) for line in out.stdout.splitlines() if "\t" in line)
+    return {r: s for s, r in (line.split("\t", 1) for line in lines_of(out.stdout) if "\t" in line)
             if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
 
 
@@ -3587,7 +3645,7 @@ def restore_to(p, st, forge, url, repository):
             return 1
         sent = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
         back = run(["git", "ls-remote", url], env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=120)
-        there = {r: s for s, r in (l.split("\t", 1) for l in back.stdout.splitlines() if "\t" in l)
+        there = {r: s for s, r in (l.split("\t", 1) for l in lines_of(back.stdout) if "\t" in l)
                  if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
         if there != sent:
             say("The new home does not hold what was sent; do not rely on it. Run restore --to again into a new, "
