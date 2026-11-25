@@ -1113,6 +1113,9 @@ NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub
                  "moved; it stays as it was until a sync shows every name at GitHub's commit")
 FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
                        "({names}), so it is not called whole; the next sync tries again")
+RESTORE_HIDDEN = ("{n} of those name(s) hold a character that cannot be shown as it is (each such character is put as "
+                  "a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
+                  "holds it:")
 RESTORE_LEFT_OUT = ("but {n} branch or tag name(s) GitHub held, which the copy in your forge holds, are not in the new "
                     "home ({names}): a GitHub branch named kept/... shares its name with the copy's own kept refs, so "
                     "restore --to does not bring it back yet. To bring them over yourself:")
@@ -2230,6 +2233,24 @@ def not_text(name):
 def written_not_text(name):
     """The same for a name in the state's form."""
     return any("\udc80" <= c <= "\udcff" for c in name)
+
+
+def shows_as_is(name):
+    """A name (the state's form) a person can read as it is: every character printable, no stand-in for a byte."""
+    return all(c.isprintable() for c in name) and not written_not_text(name)
+
+
+def shown_as_is(name):
+    """The name with each character that cannot be shown as it is put as a ?."""
+    return "".join(c if c.isprintable() and not "\udc80" <= c <= "\udcff" else "?" for c in name)
+
+
+def forge_folder(p, forge, name):
+    """The folder in which the forge keeps one copy (stock Gitea: data/gitea-repositories/<owner>/<name>.git, each
+    in lower case), read from the disk; "" when it is not there."""
+    root = os.path.join(p["forge"], "data", "gitea-repositories", forge.user.lower())
+    path = os.path.join(root, name.lower() + ".git")
+    return path if os.path.isfile(os.path.join(path, "HEAD")) else ""
 
 
 def not_text_line(refs):
@@ -3813,13 +3834,25 @@ def restore_to(p, st, forge, url, repository):
         home = {written(r) for r in there}
         left = sorted(r for r in (rec.get("refs") or {}) if r in held and r not in home)
         if left:
-            shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
-                     for r in left]
+            # Each name stands for itself only where it can be read as it is (rule 31: a name we did not write is
+            # never handed to a shell raw): one whole line per name, every name, each part through shlex.quote.
+            hidden = [r for r in left if not shows_as_is(r)]
+            shown = [("" if r.startswith("refs/heads/") else "tag ") + shown_as_is(r.split("/", 2)[2]) for r in left]
             say(RESTORE_LEFT_OUT.format(n=len(left), names=", ".join(shown[:5]) + (
                 f" and {len(shown) - 5} more" if len(shown) > 5 else "")))
-            say(f"  git clone --mirror http://127.0.0.1:{st['port']}/{forge.user}/{copy_name(repository)}.git")
-            say("  cd <that folder> and run, for each name above: git push <the new home> refs/heads/<name> "
-                "(refs/tags/<name> for a tag)")
+            folder = forge_folder(p, forge, cur["name"])
+            if not folder:
+                say("The copy's own folder in the forge could not be found, so no line is given to bring them over. "
+                    "Run restore --check, and open an issue with these lines if it says the copy is whole.")
+                return 1
+            for r in left:
+                if r not in hidden:
+                    say(f"  git --git-dir {shlex.quote(folder)} push {shlex.quote(url)} {shlex.quote(r)}")
+            if hidden:
+                say(RESTORE_HIDDEN.format(n=len(hidden)))
+                say(f"  git --git-dir {shlex.quote(folder)} for-each-ref refs/heads/kept/")
+            say("Run each git line above as it stands, in a terminal: each sends one name from the copy's own folder "
+                "in your forge to the new home, with your own login there, and changes nothing in the copy.")
             return 1
         return 0
     finally:

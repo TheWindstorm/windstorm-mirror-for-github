@@ -4366,9 +4366,14 @@ class G7(unittest.TestCase):
 
     def test_G7_7_a_restore_never_leaves_a_name_out_unsaid(self):
         """M128 (seen 2026-11-25 on 0.1.0's head with the guard and the tag cures): restore --to of a project whose
-        GitHub branches include kept/... exited 0 and left them out of the new home, without a word."""
+        GitHub branches include kept/... exited 0 and left them out of the new home, without a word. Now each is
+        named, and each gets one whole line a person runs as it is printed (rule 31: a name we did not write never
+        reaches a shell raw); a name that cannot be shown as it is gets no line, and the text says so."""
         with World(self) as w:
-            names = [f"kept/{x}" for x in ("a", "b", "c", "d", "e", "f")] + ["kept/2020-01-01/old"]
+            plain = [f"kept/{x}" for x in ("a", "b", "c", "d", "e", "f")] + ["kept/2020-01-01/old"]
+            shell = ["kept/$(id>m1)", "kept/`id>m2`", "kept/x;id>m3"]          # each runs a command if typed raw
+            hidden = "kept/zero\u200bwidth"                                       # a character no one can see
+            names = plain + shell + [hidden]
             for n in ("alpha", "beta"):
                 w.gh.add_repo("someone", n)
                 one = w.gh.commit(f"someone/{n}", {"a": b"1"})
@@ -4386,27 +4391,42 @@ class G7(unittest.TestCase):
             rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
             self.assertEqual(rc, 1, out)
             self.assertIn(f"restored someone/alpha: 1 branch(es) and 1 tag(s) to {home}", out)
-            shown = sorted(names)
-            self.assertIn(mirror.RESTORE_LEFT_OUT.format(n=7, names=", ".join(shown[:5]) + " and 2 more"), out)
+            shown = [b.replace("\u200b", "?") for b in sorted("refs/heads/" + b for b in names)]
+            shown = [b[len("refs/heads/"):] for b in shown]
+            self.assertIn(mirror.RESTORE_LEFT_OUT.format(n=11, names=", ".join(shown[:5]) + " and 6 more"), out)
             self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
                                               if not r.startswith("refs/heads/kept/")})
-            # The next step it names, run as written, brings them over: the new home then equals GitHub.
-            clone = f"http://127.0.0.1:{w.port}/mirror/someone--alpha.git"
-            self.assertIn(f"  git clone --mirror {clone}\n", out)
-            self.assertIn("cd <that folder> and run, for each name above: git push <the new home> refs/heads/<name>", out)
-            key = fread(w.p["mirror_key"]).strip()
-            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
-            mine = os.path.join(root, "mine.git")
-            subprocess.run(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "clone", "-q",
-                            "--mirror", clone, mine], check=True)
-            for b in names:
-                subprocess.run(["git", "-C", mine, "push", "-q", home, "refs/heads/" + b], check=True)
-            self.assertEqual(lsremote(home), w.gh_refs("someone/alpha"))
+            # One line per name that can be shown, every one of them (not only the first five), none for the other.
+            lines = [l for l in out.splitlines() if l.startswith("  git ") and " push " in l]
+            self.assertEqual(len(lines), 10, out)
+            self.assertFalse([l for l in lines if "\u200b" in l], "a line for a name no one can read")
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            self.assertTrue(os.path.isdir(folder), "stock Gitea keeps the copy elsewhere")
+            self.assertIn(mirror.RESTORE_HIDDEN.format(n=1) + f"\n  git --git-dir {shlex.quote(folder)} for-each-ref "
+                          "refs/heads/kept/\n", out)
+            listing = [l for l in out.splitlines() if l.startswith("  git ") and " for-each-ref " in l]
+            self.assertEqual(len(listing), 1, out)
+            listed = subprocess.run(["bash", "-c", listing[0].strip()],
+                                    capture_output=True, text=True, cwd=root, stdin=subprocess.DEVNULL)
+            self.assertIn("refs/heads/" + hidden, listed.stdout)                 # that line lists the hidden name
+            self.assertIn("Run each git line above as it stands, in a terminal", out)
+            # Every line run through a real shell exactly as printed, in a folder of its own, with nothing added
+            # (the text gives the person nothing to supply): no command inside a name runs, and the names arrive.
+            here = tempfile.mkdtemp(prefix="wsm-shell-")
+            TEMPS.append(here)
+            for l in lines:
+                r = subprocess.run(["bash", "-c", l.strip()], cwd=here, capture_output=True, text=True,
+                                   env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), stdin=subprocess.DEVNULL)
+                self.assertEqual(r.returncode, 0, (l, r.stderr))
+            self.assertEqual(os.listdir(here), [], "a command inside a name ran")
+            self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
+                                              if r != "refs/heads/" + hidden})
             # The control, a project without such a name: exit 0 and no such line.
             home = bare_home(root, "beta")
             rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/beta"])
             self.assertEqual(rc, 0, out)
             self.assertNotIn("not in the new home", out)
+            self.assertNotIn("  git ", out)
             self.assertEqual(lsremote(home), w.gh_refs("someone/beta"))
 
     def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):

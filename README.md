@@ -241,8 +241,9 @@ with no key; a sync and a restore on a Mac are not seen yet.
   - a project whose branches on GitHub include one named `kept/...` is copied once. From the next sync on, git
     refuses the push (two sources for one name), so every sync of that project stops with exit 1, names it as a
     problem, and leaves its copy as it was. `restore --check` calls such names missing though the copy holds them.
-    `restore --to` brings the project back without them, names them, gives the two git commands that bring them
-    over from the copy in your forge, and exits 1. Seen with a stand-in for GitHub;
+    `restore --to` brings the project back without them, names them, gives one git line for each that brings it
+    over from the copy's own folder in your forge (run each as it is printed), and exits 1. Seen with a stand-in
+    for GitHub;
   - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
     the copy could not be read;
   - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were
