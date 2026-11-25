@@ -1116,12 +1116,12 @@ FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in
 KEPT_CLASH = ("GitHub holds {n} branch(es) named kept/... ({names}), the name this version gives the copy's own kept "
               "refs, so it copies such a project once and cannot refresh it; nothing in its copy was changed. To have "
               "it refreshed again, give that branch another name on GitHub; the copy as it was stays in your forge")
-RESTORE_HIDDEN = ("{n} of those name(s) hold a character that cannot be shown as it is (each such character is put as "
-                  "a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
+RESTORE_HIDDEN = ("{n} of those name(s) hold a character this tool does not print as it is (each such character is put "
+                  "as a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
                   "holds it:")
-RESTORE_LEFT_OUT = ("but {n} branch or tag name(s) GitHub held, which the copy in your forge holds, are not in the new "
-                    "home ({names}): a GitHub branch named kept/... shares its name with the copy's own kept refs, so "
-                    "restore --to does not bring it back yet. To bring them over yourself:")
+RESTORE_LEFT_OUT = ("but {n} GitHub branch(es) named kept/..., which the copy in your forge holds, are not in the new "
+                    "home ({names}): such a branch shares its name with the copy's own kept refs, so restore --to does "
+                    "not bring it back yet. To bring them over yourself:")
 TAG_NOT_KEPT = ("{full}: {short} was {what} on GitHub; it pointed at {at}, not a commit, so nothing of it could be "
                 "kept (a kept ref is a branch, and a branch holds only a commit)")
 LISTING_UNREAD = ("GitHub's list of its branches and tags could not be read ({why}), so its copy was not refreshed and is "
@@ -2238,14 +2238,22 @@ def written_not_text(name):
     return any("\udc80" <= c <= "\udcff" for c in name)
 
 
+BACKTICK, DOLLAR_PAREN = chr(96), "$" + chr(40)               # spelled so, as no string the tool prints holds them
+
+
 def shows_as_is(name):
-    """A name (the state's form) a person can read as it is: every character printable, no stand-in for a byte."""
-    return all(c.isprintable() for c in name) and not written_not_text(name)
+    """A name (the state's form) this tool prints as it is: every character printable, no stand-in for a byte, and
+    no backtick or dollar-parenthesis (family rule 31(B): a line relayed through a shell runs nothing, and names on
+    GitHub are chosen by whoever can push there)."""
+    return shown_as_is(name) == name
 
 
 def shown_as_is(name):
-    """The name with each character that cannot be shown as it is put as a ?."""
-    return "".join(c if c.isprintable() and not "\udc80" <= c <= "\udcff" else "?" for c in name)
+    """The name as this tool prints it: each character that cannot be shown as it is, each backtick, and the
+    parenthesis of each dollar-parenthesis put as a ?. Only the printed form; the name itself is stored, copied and
+    pushed as it is."""
+    out = "".join(c if c.isprintable() and not "\udc80" <= c <= "\udcff" and c != BACKTICK else "?" for c in name)
+    return out.replace(DOLLAR_PAREN, "$?")
 
 
 def forge_folder(p, forge, name):
@@ -3841,7 +3849,8 @@ def restore_to(p, st, forge, url, repository):
         say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
             "the kept refs stay in your forge")
         # M128: a name GitHub held, in the copy, that the new home did not get is said by name, and the exit is not 0.
-        # Today that is a GitHub branch named kept/..., which shares its name with the copy's own kept refs (M127).
+        # Only a GitHub branch named kept/... can be one (it shares its name with the copy's own kept refs, M127):
+        # every tag and every other branch was sent, and "there != sent" above stops restore before this otherwise.
         held = {written(r) for r in refs_under(into, "refs/heads", "refs/tags")}
         home = {written(r) for r in there}
         left = sorted(r for r in (rec.get("refs") or {}) if r in held and r not in home)
@@ -3849,7 +3858,7 @@ def restore_to(p, st, forge, url, repository):
             # Each name stands for itself only where it can be read as it is (rule 31: a name we did not write is
             # never handed to a shell raw): one whole line per name, every name, each part through shlex.quote.
             hidden = [r for r in left if not shows_as_is(r)]
-            shown = [("" if r.startswith("refs/heads/") else "tag ") + shown_as_is(r.split("/", 2)[2]) for r in left]
+            shown = [shown_as_is(r[len("refs/heads/"):]) for r in left]      # only branches: every tag was sent
             say(RESTORE_LEFT_OUT.format(n=len(left), names=", ".join(shown[:5]) + (
                 f" and {len(shown) - 5} more" if len(shown) > 5 else "")))
             folder = forge_folder(p, forge, cur["name"])

@@ -243,7 +243,9 @@ with no key; a sync and a restore on a Mac are not seen yet.
     was; its line says so in plain words, and that the way to have it refreshed again is to give that branch
     another name on GitHub. `restore --check` calls such names missing though the copy holds them.
     `restore --to` brings the project back without them, names them, gives one git line for each that brings it
-    over from the copy's own folder in your forge (run each as it is printed), and exits 1. Seen with a stand-in
+    over from the copy's own folder in your forge (run each as it is printed), and exits 1. A name holding a
+    backtick, a dollar-parenthesis or a character no one can see gets no such line, only a line that lists them,
+    so that no line this tool prints runs anything when passed on through a shell. Seen with a stand-in
     for GitHub;
   - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
     the copy could not be read;
