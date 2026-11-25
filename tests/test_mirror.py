@@ -4706,6 +4706,54 @@ class G7(unittest.TestCase):
             self.assertEqual(rc, 2, out)
             self.assertIn("does not print as it is", out)
             self.assertNotIn("  git ", out)
+            # The --to value (a reviewer's world 20): typed by a person or their agent, and passed on. Each line is
+            # read both ways: a git line run as printed, and every line relayed inside double quotes, as an agent
+            # passes a tool's line on; a command inside the value never runs, and no line carries either form.
+            def relayed(out):
+                here = tempfile.mkdtemp(prefix="wsm-relay-")
+                TEMPS.append(here)
+                for l in out.splitlines():
+                    if l.startswith("  git "):
+                        subprocess.run(["bash", "-c", l.strip()], cwd=here, capture_output=True,
+                                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), stdin=subprocess.DEVNULL)
+                    subprocess.run(["bash", "-c", 'printf "%s\\n" "' + l.replace('"', '\\"') + '"'], cwd=here,
+                                   capture_output=True, stdin=subprocess.DEVNULL)
+                return os.listdir(here)
+            forms = lambda out: [l for l in out.splitlines() if "`" in l or "$(" in l or "$" + "?" in l]
+            for bad in ("https://github.com/someone/n$(touch m1).git", "https://github.com/someone/n`touch m2`.git",
+                        "git@github.com:someone/n$(touch m3).git"):
+                rc, out = quiet(mirror.main, ["restore", "--to", bad, "someone/alpha"])
+                self.assertEqual(rc, 2, out)
+                self.assertIn("This skill never writes to GitHub", out)
+                self.assertIn("The address given holds a character this tool does not print as it is", out)
+                self.assertIn(mirror.SHOWN_CHANGED, out)
+                self.assertNotIn("  git ", out)
+                self.assertEqual(forms(out), [], out)
+                self.assertEqual(relayed(out), [], (bad, out))
+            # A new home on this computer whose path holds such a character: the restore itself works (a person's
+            # folder name is theirs), and the line that names it shows it changed and says so.
+            w.gh.add_repo("someone", "beta")
+            w.gh.commit("someone/beta", {"a": b"1"})
+            w.gh.git("someone/alpha", "branch", "kept/x", one)            # M128's lines, with such a home
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2003-01-01T00:00:00Z"
+            self.assertEqual(w.sync()[0], 0)
+            odd = os.path.join(root, "h$(touch m4)`touch m5`")
+            os.makedirs(odd)
+            for repo, rc_want in (("someone/beta", 0), ("someone/alpha", 1)):
+                home = bare_home(odd, repo.split("/")[1])
+                rc, out = quiet(mirror.main, ["restore", "--to", home, repo])
+                self.assertEqual(rc, rc_want, out)
+                self.assertIn(f"restored {repo}: ", out)
+                self.assertIn(f" to {mirror.shown_as_is(home)}; the kept refs stay in your forge ({mirror.SHOWN_CHANGED})",
+                              out)
+                self.assertEqual({r: v for r, v in lsremote(home).items() if not r.endswith("^{}")},
+                                 {r: v for r, v in w.gh_refs(repo).items() if not r.startswith("refs/heads/kept/")})
+                self.assertEqual(forms(out), [], out)
+                self.assertEqual(relayed(out), [], (repo, out))
+                if repo == "someone/alpha":
+                    self.assertIn(mirror.RESTORE_TO_HIDDEN + f"\n  git --git-dir {shlex.quote(folder)} for-each-ref "
+                                  "refs/heads/kept/\n", out)
+                    self.assertFalse([l for l in out.splitlines() if l.startswith("  git ") and " push " in l], out)
             self.assertNotIn("$(", out)
 
     def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):
@@ -7785,7 +7833,8 @@ class G6Words(unittest.TestCase):
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
         data = {"SKILL_REPO", "GITEA_VERSION", "last_line", "lines_of", "shown_lines",  # facts in a line (git's words)
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
-                "own_command"}                                                   # (the command to run, as it runs)
+                "own_command",                                                   # (the command to run, as it runs)
+                "SHOWN_CHANGED"}                                                 # (what a ? stands for, M132)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
                                          "<other>", "door_line"},
                          set(),

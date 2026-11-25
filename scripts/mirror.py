@@ -1134,6 +1134,8 @@ KEPT_CLASH = ("GitHub holds {n} branch(es) named kept/... ({names}), the name th
 RESTORE_HIDDEN = ("{n} of those name(s) hold a character this tool does not print as it is (each such character is put "
                   "as a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
                   "holds it:")
+RESTORE_TO_HIDDEN = ("The new home's address holds a character this tool does not print as it is, so no line is given "
+                     "to bring them over here; this line lists every kept/ name the copy holds, as git holds it:")
 RESTORE_LEFT_OUT = ("but {n} GitHub branch(es) named kept/..., which the copy in your forge holds, are not in the new "
                     "home ({names}): such a branch shares its name with the copy's own kept refs, so restore --to does "
                     "not bring it back yet. To bring them over yourself:")
@@ -3812,9 +3814,19 @@ def restore_to(p, st, forge, url, repository):
     if not repository:
         say("Name the repository: restore --to <url> <owner/name>.")
         return 2
+    # M132 (family rule 31(B), a reviewer's world 20, 11-25): the --to value and the project's name are typed by a
+    # person or their agent and passed on; each line shows them through the shown form, and no command carries one
+    # that this tool does not print as it is. The restore itself uses them as they are.
+    to, who = shown_as_is(url), shown_as_is(repository)
+    note = "" if shows_as_is(url) and shows_as_is(repository) else f" ({SHOWN_CHANGED})"
     low = url.lower()
     host = (urllib.parse.urlsplit(url).hostname or re.sub(r"^[^@]*@([^:/]+).*$", r"\1", url)).lower()
     if any(h == host or host.endswith("." + h) for h in github_hosts()) or "github.com" in low:
+        if not shows_as_is(url):
+            say("This skill never writes to GitHub, so it will not restore there. The address given holds a character "
+                f"this tool does not print as it is ({to}; {SHOWN_CHANGED}), so no line is given to put it back there "
+                "yourself. Make the new, empty repository on GitHub, then run restore --to again with its address.")
+            return 2
         # M132: one line a person runs as it is printed: the copy's own folder in the forge is on this computer, so
         # git needs no login to the forge; each part through shlex.quote, and none from a name it does not print.
         folder = forge_folder(p, forge, copy_name(repository)) if "/" in repository else ""
@@ -3838,10 +3850,10 @@ def restore_to(p, st, forge, url, repository):
     try:
         cur = forge.by_id(rec["forge_id"]) if rec and rec.get("forge_id") else None
     except CouldNotRead as e:
-        say(f"The copy of {repository} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
+        say(f"The copy of {who}{note} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
         return 1
     if not cur:
-        say(f"There is no copy of {repository} in the forge. Run status to see the copies it holds, and name one "
+        say(f"There is no copy of {who}{note} in the forge. Run status to see the copies it holds, and name one "
             "of them as owner/name.")
         return 2
     # The person's own git login for the new home; the skill's keys are not used there.
@@ -3858,13 +3870,13 @@ def restore_to(p, st, forge, url, repository):
         into = os.path.join(work, "copy.git")
         why = clone_copy(forge, cur["name"], into)
         if why:
-            say(f"{repository}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
+            say(f"{who}{note}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
             return 1
         mine = dict(os.environ, GIT_TERMINAL_PROMPT="0")
         run(["git", "--git-dir", into, "remote", "add", "home", url], env=mine)
         said = uses_lfs(into)
         if said is None:
-            say(f"Whether {repository} keeps files with Git LFS could not be read from its .gitattributes, so nothing "
+            say(f"Whether {who}{note} keeps files with Git LFS could not be read from its .gitattributes, so nothing "
                 "was pushed. Run restore --check, then restore --to again.")
             return 1
         if said and has_git_lfs():
@@ -3892,8 +3904,8 @@ def restore_to(p, st, forge, url, repository):
                 "empty repository.")
             return 1
         heads = sum(1 for r in sent if r.startswith("refs/heads/"))
-        say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
-            "the kept refs stay in your forge")
+        say(f"restored {who}: {heads} branch(es) and {len(sent) - heads} tag(s) to {to}; "
+            f"the kept refs stay in your forge{note}")
         # M128: a name GitHub held, in the copy, that the new home did not get is said by name, and the exit is not 0.
         # Only a GitHub branch named kept/... can be one (it shares its name with the copy's own kept refs, M127):
         # every tag and every other branch was sent, and "there != sent" above stops restore before this otherwise.
@@ -3910,6 +3922,12 @@ def restore_to(p, st, forge, url, repository):
             if not folder:
                 say("The copy's own folder in the forge could not be found, so no line is given to bring them over. "
                     "Run restore --check, and open an issue with these lines if it says the copy is whole.")
+                return 1
+            if not shows_as_is(url):
+                say(RESTORE_TO_HIDDEN)
+                say(f"  git --git-dir {shlex.quote(folder)} for-each-ref refs/heads/kept/")
+                say("Each can be sent from the copy's own folder in your forge with git push, naming the new home and "
+                    "the name yourself; that changes nothing in the copy.")
                 return 1
             for r in left:
                 if r not in hidden:
