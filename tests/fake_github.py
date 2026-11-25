@@ -115,6 +115,28 @@ class FakeGitHub:
         self.touch(full)
         return out.stdout
 
+    def plant(self, full, ref, at=None):
+        """Put ref (bytes kept as the tool keeps them: str with surrogateescape) at the commit `at` names, or take it
+        away when at is None, in the project's packed-refs only. A name a file system cannot hold as a file (bytes
+        that are not UTF-8 on a Mac; two names one file there) stays one line here on every system, as GitHub
+        holds it."""
+        owner, name = full.split("/")
+        bare = os.path.join(self.root, owner, name + ".git")
+        subprocess.run(["git", "--git-dir", bare, "pack-refs", "--all"], check=True)
+        raw = os.fsencode(ref)
+        path = os.path.join(bare, "packed-refs")
+        with open(path, "rb") as f:
+            lines = [x for x in f.read().split(b"\n") if x and not x.startswith((b"#", b"^"))]
+        lines = [x for x in lines if x.split(b" ", 1)[1] != raw]
+        if at is not None:
+            sha = subprocess.run(["git", "--git-dir", bare, "rev-parse", "--verify", at + "^{}"], check=True,
+                                 capture_output=True).stdout.strip()
+            lines.append(sha + b" " + raw)
+        lines.sort(key=lambda x: x.split(b" ", 1)[1])
+        with open(path, "wb") as f:
+            f.write(b"# pack-refs with: sorted \n" + b"".join(x + b"\n" for x in lines))
+        self.touch(full)
+
     def touch(self, full):
         if full in self.repos:
             self.repos[full]["pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

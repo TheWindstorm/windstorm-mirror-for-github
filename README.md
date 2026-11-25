@@ -155,8 +155,11 @@ pre-push hook of yours does not check that push.
 Every branch and every tag of every repository that you own, or that the organisations you name own. To copy only
 some of them, name them with `config include`. Large files are copied too, when git lfs is installed. When GitHub
 rewrites or deletes a branch, the old commit is kept in the copy as `kept/<date>/<name>`, for 90 days.
-A branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one. Every other branch and
-tag of that project is copied, and each sync and `status` name the copy with the names it lacks, as with large files.
+On Linux, a branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one. Every other
+branch and tag of that project is copied, and each sync and `status` name the copy with the names it lacks, as with
+large files. On a Mac, such a project is not copied yet (see "Known, and not right yet" below). A project is called
+copied only when every branch and tag in GitHub's own list is in the copy at the commit GitHub lists, or is named as
+left out; where one is not, each sync and `status` name the project as a problem and its copy is not moved.
 
 ## Two rules
 
@@ -218,11 +221,20 @@ with no key; a sync and a restore on a Mac are not seen yet.
   - `status` answering 0 on a Mac, and a Mac whose own person put Apple's developer tools there (those folders
     are then theirs, and the skill does not name them);
   - a Mac that logs the person in by itself, and a Mac without Apple's developer tools;
+  - a Mac whose disk keeps upper and lower case apart, and GitHub itself holding two branch or tag names that
+    differ only in case or in how an accented letter is written;
   - Debian, Fedora and other Ubuntu versions;
   - Windows (not supported in 0.1);
   - `self-update` moving to a newer version: none exists before 0.1.0. Its read of the latest release is seen at
     the release. The road that always works: Claude Code's own plugin update, then `setup`;
 - **Known, and not right yet (due 0.1.1):**
+  - on a Mac, a project is not copied or refreshed while GitHub holds in it a branch or tag whose name is not UTF-8
+    text, two branches or two tags whose names differ only in upper and lower case (Feature and feature), or two
+    that differ only in how an accented letter is written. A Mac's disk keeps each such pair as one file, or cannot
+    keep the name at all. Each sync and `status` name that project as a problem, with the names that differ or with
+    git's own words; its copy stays as it was; the other projects are copied. Seen with a stand-in for GitHub on
+    macOS 27.2.1 (before this release's guard, the case pair gave a copy called whole that held Feature at
+    feature's commit and no feature); not seen with GitHub itself;
   - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
     the copy could not be read;
   - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were

@@ -1109,6 +1109,12 @@ LFS_UNREAD = ("whether it keeps files with Git LFS could not be read from its .g
               "refreshed; the next sync tries again")
 NOT_TEXT = ("{n} branch or tag name(s) on GitHub are not UTF-8 text, which the forge cannot hold, so they are not in "
             "the copy ({names}); every other branch and tag is copied")
+NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub lists ({names}), so the copy was not "
+                 "moved; it stays as it was until a sync shows every name at GitHub's commit")
+FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
+                       "({names}), so it is not called whole; the next sync tries again")
+LISTING_UNREAD = ("GitHub's list of its branches and tags could not be read ({why}), so its copy was not refreshed and is "
+                  "not called whole; nothing in it is called wrong, and the next sync tries again")
 UNFORESEEN = ("the tool met something in this project it was not built for, so its copy was not refreshed; every other "
               "project went on, and the next sync tries again")
 
@@ -2215,6 +2221,49 @@ def not_text_line(refs):
         f" and {len(shown) - 5} more" if len(shown) > 5 else ""))
 
 
+def github_listing(cache, url, key, limit):
+    """M123: GitHub's own list of the branches and tags the fetch asks for (FETCH_SPEC takes these two and nothing
+    else), by its bytes in the state's one form; {} for a project with none (read, and none); None when it could
+    not be read, which is never taken as none; and the words for why, when it could not be."""
+    out = twice(lambda: github_call(cache, url, "ls-remote", "--heads", "--tags", "github", key=key, timeout=limit))
+    if out is None:
+        return None, f"it took longer than {limit} s, and so did the retry"
+    if out.returncode != 0:
+        return None, git_reason(out.stderr).replace(key, "<the key>") if key else git_reason(out.stderr)
+    got = {}
+    for line in lines_of(out.stdout):
+        sha, tab, ref = line.partition("\t")
+        if not tab or not sha or ref.endswith("^{}") or not ref.startswith(("refs/heads/", "refs/tags/")):
+            continue
+        got[written(ref)] = sha
+    return got, ""
+
+
+def not_as_listed(held, first, second):
+    """M123: (wrong, seen). wrong: each name whose value in held (the cache, or the forge) is neither the first
+    listing's nor the second's (None: not read), with why; a name that moved or went on GitHub between the two
+    listings matches one of them. seen: what GitHub showed, per name the listing held agrees with."""
+    last = second if second is not None else first
+    wrong, seen = [], {}
+    for ref in sorted(set(held) | set(first) | set(last)):
+        if held.get(ref) in (first.get(ref), last.get(ref)):
+            if ref in held:
+                seen[ref] = held[ref]
+        else:
+            wrong.append((ref, "missing" if ref not in held else "not on GitHub" if ref not in last
+                          else "at another commit"))
+    return wrong, seen
+
+
+def not_as_listed_line(wrong, words=NOT_AS_LISTED):
+    """The words for names the copy would not hold (or, after the push, does not hold) as GitHub lists them, at
+    most five shown."""
+    shown = [(r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]) + ": " + why
+             for r, why in wrong]
+    return words.format(n=len(shown), names=", ".join(shown[:5]) + (
+        f" and {len(shown) - 5} more" if len(shown) > 5 else ""))
+
+
 def push_specs(cache):
     """What one atomic push sends: every branch and tag as GitHub has it, every kept ref, and a delete for each
     branch, tag or kept ref the copy holds that is gone here (each one already kept, or dropped by G5.2)."""
@@ -2253,12 +2302,23 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         return ADDRESS_UNREAD.format(why=said)
     if not same:
         return REWRITTEN.format(where=said)
+    first, why = github_listing(cache, url, key, limit)         # M123: GitHub's own list, read before the fetch
+    if first is None:
+        return LISTING_UNREAD.format(why=why)
     out = twice(lambda: github_call(cache, url, "fetch", "--prune", "--quiet", "github", key=key, timeout=limit))
     if out is None:
         return f"the fetch from GitHub took longer than {limit} s, and so did the retry"
     if out.returncode != 0:
         return "the fetch from GitHub failed: " + git_reason(out.stderr).replace(key, "<the key>")
-    rec.update(seen_refs=refs_of(cache), seen_at=now_utc())      # G7.1: what GitHub showed, written down
+    held = refs_of(cache)
+    second, why = (None, "") if held == first else github_listing(cache, url, key, limit)   # a name may have moved
+    if held != first and second is None:
+        return LISTING_UNREAD.format(why=why)
+    wrong, seen = not_as_listed(held, first, second)
+    # G7.1: what GitHub showed, written down from GitHub's own list, never from the cache (M123)
+    rec.update(seen_refs=seen if not wrong else (second if second is not None else first), seen_at=now_utc())
+    if wrong:                                  # M123: the forge is not given a set GitHub does not list
+        return not_as_listed_line(wrong)
     lfs = None
     if not refs_of(cache):
         pass                                   # an empty repository has no large files to fetch or push
@@ -2309,11 +2369,18 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
                 forge_refusal(out.stderr))
     if dropped:
         report.append(f"{full}: {len(dropped)} kept ref(s) older than the kept period were dropped")
+    back = forge_refs_of(forge, check["name"])                    # M123: the copy is the forge; read it back
+    if back is None:
+        return "what the copy holds after the push could not be read from the forge, so it is not called whole"
+    back = {written(r): s for r, s in back.items() if not r.startswith("refs/heads/kept/")}
+    want = {r: s for r, s in seen.items() if not written_not_text(r)}
+    if back != want:
+        return not_as_listed_line(not_as_listed(back, want, want)[0], FORGE_NOT_AS_LISTED)
     # M120: a name the forge cannot hold is a known limit of this copy, not a failed refresh (the owner's ruling,
     # 11-24): it goes the road lfs_missing goes, a flag said at every sync and in status.
-    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
+    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=seen,
                last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
-               lfs_missing=(lfs is False), left_out=sorted(r for r in rec.get("seen_refs") or {} if written_not_text(r)))
+               lfs_missing=(lfs is False), left_out=sorted(r for r in seen if written_not_text(r)))
     return ""
 
 
