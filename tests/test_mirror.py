@@ -4364,6 +4364,51 @@ class G7(unittest.TestCase):
                 self.assertTrue([f for d, _, fs in os.walk(os.path.join(lhome, "lfs", "objects")) for f in fs],
                                 "the large file did not reach the new home")
 
+    def test_G7_7_a_restore_never_leaves_a_name_out_unsaid(self):
+        """M128 (seen 2026-11-25 on 0.1.0's head with the guard and the tag cures): restore --to of a project whose
+        GitHub branches include kept/... exited 0 and left them out of the new home, without a word."""
+        with World(self) as w:
+            names = [f"kept/{x}" for x in ("a", "b", "c", "d", "e", "f")] + ["kept/2020-01-01/old"]
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                one = w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.gh.git(f"someone/{n}", "tag", "v1", one)
+                for b in names if n == "alpha" else ():
+                    w.gh.git("someone/alpha", "branch", b, one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            held = w.forge_refs("someone--alpha")
+            self.assertEqual(sorted(r for r in held if r.startswith("refs/heads/kept/")),
+                             sorted("refs/heads/" + b for b in names))           # the premise: the copy holds them
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "alpha")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"restored someone/alpha: 1 branch(es) and 1 tag(s) to {home}", out)
+            shown = sorted(names)
+            self.assertIn(mirror.RESTORE_LEFT_OUT.format(n=7, names=", ".join(shown[:5]) + " and 2 more"), out)
+            self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
+                                              if not r.startswith("refs/heads/kept/")})
+            # The next step it names, run as written, brings them over: the new home then equals GitHub.
+            clone = f"http://127.0.0.1:{w.port}/mirror/someone--alpha.git"
+            self.assertIn(f"  git clone --mirror {clone}\n", out)
+            self.assertIn("cd <that folder> and run, for each name above: git push <the new home> refs/heads/<name>", out)
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            mine = os.path.join(root, "mine.git")
+            subprocess.run(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "clone", "-q",
+                            "--mirror", clone, mine], check=True)
+            for b in names:
+                subprocess.run(["git", "-C", mine, "push", "-q", home, "refs/heads/" + b], check=True)
+            self.assertEqual(lsremote(home), w.gh_refs("someone/alpha"))
+            # The control, a project without such a name: exit 0 and no such line.
+            home = bare_home(root, "beta")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/beta"])
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("not in the new home", out)
+            self.assertEqual(lsremote(home), w.gh_refs("someone/beta"))
+
     def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):
         with World(self) as w:
             self.world_with_copies(w, lfs=True)

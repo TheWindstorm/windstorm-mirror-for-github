@@ -239,9 +239,10 @@ with no key; a sync and a restore on a Mac are not seen yet.
     macOS 27.2.1 (before this release's guard, the case pair gave a copy called whole that held Feature at
     feature's commit and no feature); not seen with GitHub itself;
   - a project whose branches on GitHub include one named `kept/...` is copied once. From the next sync on, git
-    refuses the push (two sources for one name), so each sync names that project as a problem and its copy stays as
-    it was. `restore --check` calls such names missing though the copy holds them, and `restore --to` brings the
-    project back without them, and without saying so. Seen with a stand-in for GitHub;
+    refuses the push (two sources for one name), so every sync of that project stops with exit 1, names it as a
+    problem, and leaves its copy as it was. `restore --check` calls such names missing though the copy holds them.
+    `restore --to` brings the project back without them, names them, gives the two git commands that bring them
+    over from the copy in your forge, and exits 1. Seen with a stand-in for GitHub;
   - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
     the copy could not be read;
   - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were

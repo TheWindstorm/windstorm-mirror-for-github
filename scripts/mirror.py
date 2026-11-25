@@ -1113,6 +1113,9 @@ NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub
                  "moved; it stays as it was until a sync shows every name at GitHub's commit")
 FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
                        "({names}), so it is not called whole; the next sync tries again")
+RESTORE_LEFT_OUT = ("but {n} branch or tag name(s) GitHub held, which the copy in your forge holds, are not in the new "
+                    "home ({names}): a GitHub branch named kept/... shares its name with the copy's own kept refs, so "
+                    "restore --to does not bring it back yet. To bring them over yourself:")
 TAG_NOT_KEPT = ("{full}: {short} was {what} on GitHub; it pointed at {at}, not a commit, so nothing of it could be "
                 "kept (a kept ref is a branch, and a branch holds only a commit)")
 LISTING_UNREAD = ("GitHub's list of its branches and tags could not be read ({why}), so its copy was not refreshed and is "
@@ -3804,6 +3807,20 @@ def restore_to(p, st, forge, url, repository):
         heads = sum(1 for r in sent if r.startswith("refs/heads/"))
         say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
             "the kept refs stay in your forge")
+        # M128: a name GitHub held, in the copy, that the new home did not get is said by name, and the exit is not 0.
+        # Today that is a GitHub branch named kept/..., which shares its name with the copy's own kept refs (M127).
+        held = {written(r) for r in refs_under(into, "refs/heads", "refs/tags")}
+        home = {written(r) for r in there}
+        left = sorted(r for r in (rec.get("refs") or {}) if r in held and r not in home)
+        if left:
+            shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
+                     for r in left]
+            say(RESTORE_LEFT_OUT.format(n=len(left), names=", ".join(shown[:5]) + (
+                f" and {len(shown) - 5} more" if len(shown) > 5 else "")))
+            say(f"  git clone --mirror http://127.0.0.1:{st['port']}/{forge.user}/{copy_name(repository)}.git")
+            say("  cd <that folder> and run, for each name above: git push <the new home> refs/heads/<name> "
+                "(refs/tags/<name> for a tag)")
+            return 1
         return 0
     finally:
         shutil.rmtree(work, ignore_errors=True)

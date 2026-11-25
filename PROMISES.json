@@ -1657,6 +1657,22 @@
    "moved_why": "",
    "seen": "2026-11-25, in a reviewer's world on 0.1.0's head be04251, with the stand-in GitHub only: an annotated tag moved on GitHub ended that project's refresh for good. The tool kept the tag's old value, a tag object, and pushed it to a branch under kept/; git refused it ('trying to write non-commit object ... to branch'), the push is all or nothing, so every later sync of that project exited 1 with 'the push into the forge failed' and the copy stood still. With a deleted tag leaving the copy (M125), an annotated tag deleted on GitHub met the same refusal.",
    "promise": "After an annotated tag is moved or deleted on GitHub, the next sync is good and the copy's tags are GitHub's. The commit the old tag pointed at, through any tag objects, is kept as kept/<date>/tags/<name>; the tag's own message is not kept, only its commit. A tag that pointed at no commit (a file or a tree) cannot be kept as a branch: its sync's line says it was not kept, and why. Nothing leaves the copy without a kept ref or such a line. A read that failed while finding a tag's commit is never taken for a no: the copy is not moved on that pass. Proven by one test: an annotated tag deleted, one moved, a tag of a tag deleted and a tag at a file deleted, beside a plain tag that stays, then a sync with nothing changed but GitHub's time and one skipped as unchanged, with status and restore --check; then the tag moved again with the read of its kind failing (exit 1, the copy as it was) and again read (its commit kept under a name of its own); red on 0.1.0's mirror.py before this row (git's refusal of the moved tag), and red on M125's head without this row (git's refusal of the deleted one)."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#156",
+   "id": "M128",
+   "codon": "G7.7",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G7_7_a_restore_never_leaves_a_name_out_unsaid",
+   "stand_in": "GitHub (the stand-in, a project with branches named kept/... in its bare repository)",
+   "moved_why": "",
+   "seen": "2026-11-25, with the stand-in GitHub only, on 0.1.0's head with row M123's guard and rows M125 and M126: restore --to of a project whose GitHub branches include kept/foo and kept/2020-01-01/old exited 0, said 'restored ...: 1 branch(es) and 1 tag(s)', and brought back main and the tag only; the two kept/ branches, which the copy in the forge holds, were left out of the new home without a word.",
+   "promise": "A restore --to that does not bring back a name GitHub held and the copy holds says so by name, after its line of what was restored: a count, and the first five names when there are more, with why and the two git commands that bring them over from the copy in the forge. Its exit code is then 1, never 0. Nothing else in restore changes: what it pushes, and to where, is as before. Today such a name is a GitHub branch named kept/..., which shares its name with the copy's own kept refs; restoring it is row M127, due 0.1.1, and naming what the copy itself never held is row M122, due 0.1.1. Proven by one test: a project with seven such branches beside a control without them, restore --to run on each, its words, its exit and the new home read, then the two commands run as written and the new home read again, equal to GitHub; red on the head before this row."
   }
  ],
  "declined": []
