@@ -1113,6 +1113,8 @@ NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub
                  "moved; it stays as it was until a sync shows every name at GitHub's commit")
 FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
                        "({names}), so it is not called whole; the next sync tries again")
+TAG_NOT_KEPT = ("{full}: {short} was {what} on GitHub; it pointed at {at}, not a commit, so nothing of it could be "
+                "kept (a kept ref is a branch, and a branch holds only a commit)")
 LISTING_UNREAD = ("GitHub's list of its branches and tags could not be read ({why}), so its copy was not refreshed and is "
                   "not called whole; nothing in it is called wrong, and the next sync tries again")
 UNFORESEEN = ("the tool met something in this project it was not built for, so its copy was not refreshed; every other "
@@ -2144,7 +2146,10 @@ def refs_under(cache, *prefixes):
 
 def keep_before_moving(cache, report, full):
     """G5.1: before a branch or tag of the copy moves backwards, is rewritten or is deleted, keep its old commit
-    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). Returns the new kept refs, or None on a failure."""
+    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). For a tag, its old commit is the commit it
+    pointed at, through any tag objects (M126): an annotated tag's own message is not kept. A tag that pointed at no
+    commit (a file or a tree) cannot be kept as a branch, and its line says so. Returns the new kept refs, or None on
+    a failure."""
     now = refs_under(cache, "refs/heads", "refs/tags")
     held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
     day = time.strftime("%Y-%m-%d", time.gmtime())
@@ -2159,16 +2164,27 @@ def keep_before_moving(cache, report, full):
         if new and name.startswith("heads/") and git(cache, "merge-base", "--is-ancestor", old, new).returncode == 0:
             continue                                           # moved forward: nothing is lost
         short = name[len("heads/"):] if name.startswith("heads/") else name
+        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
+        keep = old
+        if name.startswith("tags/"):                           # M126: the commit under any tag objects
+            peeled = git(cache, "rev-parse", "--verify", "-q", old + "^{}")
+            kind = git(cache, "cat-file", "-t", peeled.stdout.strip()) if peeled.returncode == 0 else peeled
+            if kind.returncode != 0:
+                return None                                    # a read that failed is never taken for a no (G5.4)
+            if kind.stdout.strip() != "commit":
+                at = {"blob": "a file", "tree": "a folder (a tree)"}.get(kind.stdout.strip(), kind.stdout.strip())
+                report.append(TAG_NOT_KEPT.format(full=full, short=short, what=what, at=at))
+                continue
+            keep = peeled.stdout.strip()
         dest, n = f"refs/kept/{day}/{short}", 1
         while True:
             have = git(cache, "rev-parse", "--verify", "-q", dest).stdout.strip()
-            if not have or have == old:
+            if not have or have == keep:
                 break
             n += 1
             dest = f"refs/kept/{day}/{short}-{n}"
-        if git(cache, "update-ref", dest, old).returncode != 0:
+        if git(cache, "update-ref", dest, keep).returncode != 0:
             return None
-        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
         report.append(f"{full}: {short} was {what} on GitHub; its old commit is kept as kept/{dest[len('refs/kept/'):]}")
         made.append(dest)
     return made

@@ -3598,6 +3598,79 @@ class G5(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
 
+    def test_G5_7_an_annotated_tag_moved_or_deleted_keeps_its_commit(self):
+        """M126 (seen 2026-11-25 in a reviewer's world): an annotated tag moved on GitHub ended its project's refresh
+        for good, because the tag object, not its commit, was pushed to a kept branch, which git refuses."""
+        with World(self) as w:
+            full = "someone/alpha"
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit(full, {"a": b"1"})
+            two = w.gh.commit(full, {"a": b"2"})
+            blob = w.gh.git(full, "rev-parse", "main:a").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            for name, at in (("ta", one), ("tam", one), ("tfile", blob)):
+                w.gh.git(full, *me, "tag", "-a", "-m", f"the tag {name}", name, at)
+            w.gh.git(full, *me, "tag", "-a", "-m", "a tag of a tag", "ttag", "ta")
+            w.gh.git(full, "tag", "plain", one)                                     # a plain tag that stays
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            tags = lambda refs: {r: v for r, v in refs.items() if r.startswith("refs/tags/")}
+            self.assertEqual(tags(w.forge_refs("someone--alpha")), tags(w.gh_refs(full)))   # the premise
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            # On GitHub: an annotated tag deleted, one moved, a tag of a tag deleted, a tag at a file deleted.
+            w.gh.git(full, "tag", "-d", "ta")
+            w.gh.git(full, *me, "tag", "-a", "-f", "-m", "the tag tam, moved", "tam", two)
+            w.gh.git(full, "tag", "-d", "ttag")
+            w.gh.git(full, "tag", "-d", "tfile")
+            want = tags(w.gh_refs(full))                      # read once: a read of the stand-in moves its pushed_at
+            w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"              # GitHub's time moved (not to the second)
+            fetched = lambda: len(git_calls(w.gh, "someone/alpha"))     # its git calls to GitHub (a skip makes none)
+            for step in ("after the change", "nothing changed", "unchanged"):
+                if step == "nothing changed":
+                    w.gh.repos[full]["pushed_at"] = "2001-01-01T00:00:00Z"
+                was = fetched()
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, f"{step}: {out}")
+                self.assertEqual(fetched() == was, step == "unchanged", f"{step}: fetched again or not")
+                refs = w.forge_refs("someone--alpha")
+                self.assertEqual(tags(refs), want, step)
+                kept = {r: v for r, v in refs.items() if "/kept/" in r}
+                self.assertEqual(kept, {f"refs/heads/kept/{day}/tags/{n}": one for n in ("ta", "tam", "ttag")}, step)
+                lines = [f"someone/alpha: tags/{n} was {what} on GitHub; its old commit is kept as kept/{day}/tags/{n}"
+                         for n, what in (("ta", "deleted"), ("tam", "moved"), ("ttag", "deleted"))]
+                lines.append(mirror.TAG_NOT_KEPT.format(full=full, short="tags/tfile", what="deleted", at="a file"))
+                for line in lines:
+                    (self.assertIn if step == "after the change" else self.assertNotIn)(line, out)
+            rc, out = status()
+            self.assertIn("\ncopies: 1 on GitHub, 1 copied, 0 behind", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
+            # tam moved again: a read of its kind that failed is never taken for a no (G5.4), so the copy is not moved
+            # on that pass; the next pass keeps its commit under a name of its own.
+            w.gh.git(full, *me, "tag", "-a", "-f", "-m", "the tag tam, moved back", "tam", one)
+            w.gh.repos[full]["pushed_at"] = "2003-01-01T00:00:00Z"
+            saved, before = mirror.git, w.forge_refs("someone--alpha")
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "-t") and "^" not in args[2]:      # keep_before_moving's read only
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git = unread
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.git = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/alpha: an old commit could not be kept, so the copy was not moved", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), before, "the copy moved on a read that failed")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"someone/alpha: tags/tam was moved on GitHub; its old commit is kept as kept/{day}/tags/tam-2", out)
+            refs = w.forge_refs("someone--alpha")
+            self.assertEqual(tags(refs), tags(w.gh_refs(full)))
+            self.assertEqual(refs[f"refs/heads/kept/{day}/tags/tam-2"], two)
+
 
 def status():
     return quiet(mirror.main, ["status"])

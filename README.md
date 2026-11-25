@@ -155,6 +155,9 @@ pre-push hook of yours does not check that push.
 Every branch and every tag of every repository that you own, or that the organisations you name own. To copy only
 some of them, name them with `config include`. Large files are copied too, when git lfs is installed. When GitHub
 rewrites or deletes a branch, the old commit is kept in the copy as `kept/<date>/<name>`, for 90 days.
+When GitHub moves or deletes a tag, the copy's tags follow GitHub's at the next sync, and the commit the old tag
+pointed at is kept as `kept/<date>/tags/<name>`. For an annotated tag only that commit is kept, not the tag's own
+message; a tag that pointed at a file or a folder, not a commit, cannot be kept, and the sync says so.
 On Linux, a branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one. Every other
 branch and tag of that project is copied, and each sync and `status` name the copy with the names it lacks, as with
 large files. On a Mac, such a project is not copied yet (see "Known, and not right yet" below). A project is called

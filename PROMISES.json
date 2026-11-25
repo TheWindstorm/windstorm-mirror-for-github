@@ -1641,6 +1641,22 @@
    "moved_why": "",
    "seen": "2026-11-25, in a reviewer's world on 0.1.0's head be04251, with the stand-in GitHub only: a tag deleted on GitHub stayed in the copy in the forge through every later sync; the sync exited 0, status said 0 behind, nothing was kept, and restore --check found 1 difference. On the head with M123's guard, every later sync of that project exited 1. The cause, seen with plain git and no tool of ours: the fetch from the forge followed tags, so git wrote the forge's tag back into the cache after the fetch from GitHub had pruned it, and the push sent it again with no delete.",
    "promise": "After a tag is deleted on GitHub, the next sync is good, the copy's tags are GitHub's, and the commit the tag pointed to is kept as kept/<date>/tags/<name>. A later sync with nothing changed on GitHub, fetched again or skipped as unchanged, keeps nothing more and keeps the copy's tags equal to GitHub's. The sync's fetch from the forge follows no tags, so it writes only the names its own refspec asks for. Proven by one test: a tag deleted beside one that stays, then a sync with nothing changed but GitHub's time, then one skipped as unchanged, with status and restore --check; red on 0.1.0's mirror.py before this row, and red with the fetch's --no-tags taken out."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#153",
+   "id": "M126",
+   "codon": "G5.7",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G5_7_an_annotated_tag_moved_or_deleted_keeps_its_commit",
+   "stand_in": "GitHub (the stand-in, annotated tags, a tag of a tag and a tag at a file moved or deleted in its bare repository)",
+   "moved_why": "",
+   "seen": "2026-11-25, in a reviewer's world on 0.1.0's head be04251, with the stand-in GitHub only: an annotated tag moved on GitHub ended that project's refresh for good. The tool kept the tag's old value, a tag object, and pushed it to a branch under kept/; git refused it ('trying to write non-commit object ... to branch'), the push is all or nothing, so every later sync of that project exited 1 with 'the push into the forge failed' and the copy stood still. With a deleted tag leaving the copy (M125), an annotated tag deleted on GitHub met the same refusal.",
+   "promise": "After an annotated tag is moved or deleted on GitHub, the next sync is good and the copy's tags are GitHub's. The commit the old tag pointed at, through any tag objects, is kept as kept/<date>/tags/<name>; the tag's own message is not kept, only its commit. A tag that pointed at no commit (a file or a tree) cannot be kept as a branch: its sync's line says it was not kept, and why. Nothing leaves the copy without a kept ref or such a line. A read that failed while finding a tag's commit is never taken for a no: the copy is not moved on that pass. Proven by one test: an annotated tag deleted, one moved, a tag of a tag deleted and a tag at a file deleted, beside a plain tag that stays, then a sync with nothing changed but GitHub's time and one skipped as unchanged, with status and restore --check; then the tag moved again with the read of its kind failing (exit 1, the copy as it was) and again read (its commit kept under a name of its own); red on 0.1.0's mirror.py before this row (git's refusal of the moved tag), and red on M125's head without this row (git's refusal of the deleted one)."
   }
  ],
  "declined": []
