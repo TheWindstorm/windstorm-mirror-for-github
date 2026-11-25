@@ -714,7 +714,7 @@ class G1(unittest.TestCase):
             self.assertIn("download Gitea", out)
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
             reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"],
-                     ["pkcheck", "--action-id"])                                                  # read-only checks
+                     ["pkcheck", "--action-id"], ["launchctl", "print"])                         # read-only checks
             changed = [c for c in h.calls if c[:2] not in reads and c[:3] != ["systemctl", "--user", "show-environment"]]
             self.assertFalse(changed, "the dry run ran a command that changes something")
             p = h.place_gitea()
