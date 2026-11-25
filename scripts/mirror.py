@@ -1804,7 +1804,7 @@ OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 # only on this computer's loopback, so no setting ever sends a key to another host.
 # The family's rule 27 keeps three lists of what the tool reads from its environment; a test fails on any other name.
 PERSON_SETTINGS = ("WSM_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME")     # named in the README; said when they move a folder
-HOST_FACTS = ()                                                        # none read
+HOST_FACTS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")            # bus_floor: whether each is set, never its value
 OWN_MARKERS = ()                                                       # none
 TEST_SETTINGS = ("WSM_GITHUB_API", "WSM_GITHUB_GIT", "WSM_PAGE_SIZE", "WSM_GITEA_BASE")
 TEST_SETTING_DEFAULT = {"WSM_GITHUB_API": "GitHub itself", "WSM_GITHUB_GIT": "GitHub itself",
