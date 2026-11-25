@@ -2182,7 +2182,8 @@ def keep_before_moving(cache, report, full):
                 return None                                    # a read that failed is never taken for a no (G5.4)
             if kind.stdout.strip() != "commit":
                 at = {"blob": "a file", "tree": "a folder (a tree)"}.get(kind.stdout.strip(), kind.stdout.strip())
-                report.append(TAG_NOT_KEPT.format(full=full, short=short, what=what, at=at))
+                said, note = shown_one(short)
+                report.append(TAG_NOT_KEPT.format(full=full, short=said, what=what, at=at) + note)
                 continue
             keep = peeled.stdout.strip()
         dest, n = f"refs/kept/{day}/{short}", 1
@@ -2194,7 +2195,9 @@ def keep_before_moving(cache, report, full):
             dest = f"refs/kept/{day}/{short}-{n}"
         if git(cache, "update-ref", dest, keep).returncode != 0:
             return None
-        report.append(f"{full}: {short} was {what} on GitHub; its old commit is kept as kept/{dest[len('refs/kept/'):]}")
+        said, note = shown_one(short)
+        kept, more = shown_one(dest[len("refs/kept/"):])
+        report.append(f"{full}: {said} was {what} on GitHub; its old commit is kept as kept/{kept}" + (note or more))
         made.append(dest)
     return made
 
@@ -2256,6 +2259,23 @@ def shown_as_is(name):
     return out.replace(DOLLAR_PAREN, "$?")
 
 
+SHOWN_CHANGED = "a ? stands for each character this tool does not print as it is"
+
+
+def shown_names(names, first=5):
+    """Names for a line a person reads (family rule 31(B)): the first few through shown_as_is, the rest counted, and
+    the line says when a shown name is not the name itself. Only for the eyes: nothing that decides reads it, and two
+    names that show the same stay two."""
+    shown = [shown_as_is(n) for n in names]
+    out = ", ".join(shown[:first]) + (f" and {len(shown) - first} more" if len(shown) > first else "")
+    return out + ("; " + SHOWN_CHANGED if shown[:first] != list(names[:first]) else "")
+
+
+def shown_one(name):
+    """One name for a line a person reads, with the same words when what is shown is not the name itself."""
+    return shown_as_is(name), ("" if shows_as_is(name) else f" ({SHOWN_CHANGED})")
+
+
 def forge_folder(p, forge, name):
     """The folder in which the forge keeps one copy (stock Gitea: data/gitea-repositories/<owner>/<name>.git, each
     in lower case), read from the disk; "" when it is not there."""
@@ -2268,8 +2288,7 @@ def not_text_line(refs):
     """The words for a copy without the names the forge cannot hold (refs as git gave them)."""
     shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
              for r in sorted(refs)]
-    return NOT_TEXT.format(n=len(shown), names=", ".join(shown[:5]) + (
-        f" and {len(shown) - 5} more" if len(shown) > 5 else ""))
+    return NOT_TEXT.format(n=len(shown), names=shown_names(shown))
 
 
 def github_listing(cache, url, key, limit):
@@ -2311,8 +2330,7 @@ def not_as_listed_line(wrong, words=NOT_AS_LISTED):
     most five shown."""
     shown = [(r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]) + ": " + why
              for r, why in wrong]
-    return words.format(n=len(shown), names=", ".join(shown[:5]) + (
-        f" and {len(shown) - 5} more" if len(shown) > 5 else ""))
+    return words.format(n=len(shown), names=shown_names(shown))
 
 
 def push_specs(cache):
@@ -2407,9 +2425,7 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     clash = sorted(r for r in refs_under(cache, "refs/heads")
                    if r.startswith("refs/heads/kept/") and "refs/forge/heads/" + r[len("refs/heads/"):] in there)
     if clash:
-        return KEPT_CLASH.format(n=len(clash), names=", ".join(shown_as_is(written(r)[len("refs/heads/"):])
-                                                                for r in clash[:5])
-                                 + (f" and {len(clash) - 5} more" if len(clash) > 5 else ""))
+        return KEPT_CLASH.format(n=len(clash), names=shown_names([written(r)[len("refs/heads/"):] for r in clash]))
     kept = keep_before_moving(cache, report, full)
     if kept is None:
         return "an old commit could not be kept, so the copy was not moved"
@@ -3748,8 +3764,9 @@ def cmd_restore(args):
             for ref in sorted(set(have) | set(seen)):
                 if have.get(ref) != seen.get(ref):
                     mine += 1
-                    diffs.append(f"{name}: {ref} is {(have.get(ref) or 'missing')[:12]} in the copy, "
-                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen")
+                    said, note = shown_one(ref)
+                    diffs.append(f"{name}: {said} is {(have.get(ref) or 'missing')[:12]} in the copy, "
+                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen{note}")
             out = git(into, "fsck", "--no-progress", "--no-dangling")
             if out.returncode != 0:
                 mine += 1
@@ -3858,9 +3875,8 @@ def restore_to(p, st, forge, url, repository):
             # Each name stands for itself only where it can be read as it is (rule 31: a name we did not write is
             # never handed to a shell raw): one whole line per name, every name, each part through shlex.quote.
             hidden = [r for r in left if not shows_as_is(r)]
-            shown = [shown_as_is(r[len("refs/heads/"):]) for r in left]      # only branches: every tag was sent
-            say(RESTORE_LEFT_OUT.format(n=len(left), names=", ".join(shown[:5]) + (
-                f" and {len(shown) - 5} more" if len(shown) > 5 else "")))
+            shown = [r[len("refs/heads/"):] for r in left]                  # only branches: every tag was sent
+            say(RESTORE_LEFT_OUT.format(n=len(left), names=shown_names(shown)))
             folder = forge_folder(p, forge, cur["name"])
             if not folder:
                 say("The copy's own folder in the forge could not be found, so no line is given to bring them over. "

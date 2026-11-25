@@ -2324,7 +2324,7 @@ class G3(unittest.TestCase):
                 self.assertIn("\ncopies: 3 on GitHub, 2 copied, 1 behind, 0 unreadable\n", said)
                 return None
             self.assertEqual(rc, 0, out)
-            self.assertIn("problem: someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
+            self.assertIn("problem: someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a?b, tag t?x; " + mirror.SHOWN_CHANGED), out)
             gh = gh_raw(w, "aa")
             self.assertEqual(len(gh), 5 + 2 * len(blanks))
             want = {r: s for r, s in gh.items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
@@ -2365,7 +2365,7 @@ class G3(unittest.TestCase):
                 self.assertIn(b"refs/tags/v3000\xe3\x80\x80", forge_raw(w, "aa"))     # a tag ending in a blank
                 for n in ("bb", "cc"):
                     self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
-                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)   # status
+                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a?b, tag t?x; " + mirror.SHOWN_CHANGED), out)   # status
         with World(self) as w:                                  # 2, the twin: "_" in every place a blank was
             counted(w, "en_US.UTF-8", twin="_")
         # 3. A .gitattributes that cannot be read is never taken as no LFS: the project is named, the rest copied.
@@ -2488,7 +2488,7 @@ class G3(unittest.TestCase):
                 three(w, lambda w: (w.gh.commit("someone/aa", {"a": b"1"}), w.gh.plant("someone/aa", name, "main")))
                 self.assertIn(name.encode("utf-8", "surrogateescape"), gh_raw(w, "aa"))        # the premise
                 time.sleep(1.1)                        # pushed_at has whole seconds: a push in a fetch's own second is fetched again
-                limit = "problem: someone/aa: " + mirror.NOT_TEXT.format(n=1, names="a\\udcffb")
+                limit = "problem: someone/aa: " + mirror.NOT_TEXT.format(n=1, names="a?b; " + mirror.SHOWN_CHANGED)
                 if label == "planted" and not disk_holds(os.path.dirname(w.p["state"]), "a\udcffb"):
                     # A disk that cannot hold the name (seen: a Mac's): a named problem at every sync, in git's
                     # words, never the left-out road, and the others copied (M123's guard, M124's cure).
@@ -2516,7 +2516,7 @@ class G3(unittest.TestCase):
                 rc, out = sync_in(w, "en_US.UTF-8", "lfs", "status")
                 self.assertNotRegex(out, r"not refreshed|cannot refresh|last good sync: none yet", out)
                 self.assertIn(f"\ncopies: 3 on GitHub, 3 copied, {1 if label == 'planted' else 0} behind, 0 unreadable", out)
-                self.assertEqual(f"problem: someone/aa: {mirror.NOT_TEXT.format(n=1, names='a' + chr(92) + 'udcffb')}"
+                self.assertEqual(f"problem: someone/aa: {mirror.NOT_TEXT.format(n=1, names='a?b; ' + mirror.SHOWN_CHANGED)}"
                                  in out, label == "planted", out)
                 for n in ("bb", "cc"):
                     self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({label})")
@@ -4247,6 +4247,87 @@ class G6(unittest.TestCase):
             mirror.system = saved
 
 
+    def test_G6_19_a_name_in_the_older_sentences_is_never_printed_in_a_form_a_shell_runs(self):
+        """M134 (family rule 31(B), the maintainer's word for 0.1.0, 2026-11-25): a name on GitHub is chosen by
+        whoever can push there. In every line of sync, status and restore --check, a branch's or a tag's name with a
+        backtick or a dollar-parenthesis is shown changed, and the line says so; the names themselves are stored,
+        kept and pushed as they are, and two names that show alike stay two."""
+        forms = lambda out: [l for l in out.splitlines() if "`" in l or "$(" in l]
+        note = f" ({mirror.SHOWN_CHANGED})"
+        with World(self) as w:
+            full = "someone/alpha"
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit(full, {"a": b"1"})
+            two = w.gh.commit(full, {"a": b"2"})
+            blob = w.gh.git(full, "rev-parse", "main:a").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            for b in ("d`x`", "d$(x)", "c$(q)", "plain"):
+                w.gh.git(full, "branch", b, one)
+            w.gh.git(full, "tag", "t$(y)", one)
+            w.gh.git(full, *me, "tag", "-a", "-m", "a note", "t`z`", one)
+            w.gh.git(full, "tag", "f$(b)", blob)
+            odd = disk_holds(os.path.dirname(w.p["state"]), "n`\udcff")   # a Mac's disk cannot hold it
+            if odd:
+                w.gh.plant(full, "refs/heads/n`\udcff", "main")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            said = out
+            if odd:                                   # M120: left out, named at every sync and in status
+                limit = "problem: someone/alpha: " + mirror.NOT_TEXT.format(n=1, names="n??; " + mirror.SHOWN_CHANGED)
+                self.assertIn(limit, out)
+            # GitHub moves and deletes them: each kept line shows the name changed, and says so.
+            for b in ("d`x`", "d$(x)"):
+                w.gh.git(full, "update-ref", "-d", "refs/heads/" + b)
+            w.gh.git(full, "update-ref", "refs/tags/t$(y)", two)
+            w.gh.git(full, "update-ref", "-d", "refs/tags/t`z`")
+            w.gh.git(full, "update-ref", "-d", "refs/tags/f$(b)")
+            w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            said += out
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            for was, what in (("d?x?", "deleted"), ("d$?x)", "deleted"), ("tags/t$?y)", "moved"),
+                              ("tags/t?z?", "deleted")):
+                self.assertIn(f"{full}: {was} was {what} on GitHub; its old commit is kept as kept/{day}/{was}{note}",
+                              out)
+            self.assertIn(mirror.TAG_NOT_KEPT.format(full=full, short="tags/f$?b)", what="deleted", at="a file")
+                          + note, out)
+            # Only the printed form changed: the forge holds every name as it is, each kept ref by its own name.
+            held = w.forge_refs("someone--alpha")
+            for r in ("refs/heads/kept/%s/d`x`", "refs/heads/kept/%s/d$(x)", "refs/heads/kept/%s/tags/t$(y)",
+                      "refs/heads/kept/%s/tags/t`z`"):
+                self.assertIn(r % day, held)
+            out = subprocess.run(["git", "--git-dir", os.path.join(w.gh.root, "someone", "alpha.git"), "for-each-ref",
+                                  "--format=%(refname)"], capture_output=True, check=True).stdout
+            gh = {os.fsdecode(r) for r in out.split(b"\n") if r}
+            gh = {r for r in gh if not mirror.written_not_text(r)}
+            self.assertEqual({r for r in held if not r.startswith("refs/heads/kept/")}, gh)
+            rc, out = quiet(mirror.main, ["status"])
+            said += out
+            if odd:
+                self.assertIn(limit, out)
+            # restore --check's difference line: a name taken out of the copy behind the tool's back.
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            subprocess.run(["git", "--git-dir", folder, "update-ref", "-d", "refs/heads/c$(q)"], check=True)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 1, out)
+            said += out
+            self.assertRegex(out, re.escape(f"{full}: refs/heads/c$?q) is missing in the copy, ") + r"[0-9a-f]{12}"
+                             + re.escape(" when GitHub was last seen" + note))
+            # Two lines that need a world the guard alone makes (NOT_AS_LISTED, FORGE_NOT_AS_LISTED), read by their
+            # one builder; two names that show alike stay two.
+            for words in (mirror.NOT_AS_LISTED, mirror.FORGE_NOT_AS_LISTED):
+                line = mirror.not_as_listed_line([("refs/heads/a`b", "missing"), ("refs/heads/a$(b", "missing"),
+                                                  ("refs/tags/v`1", "at another commit")], words)
+                self.assertEqual(line, words.format(n=3, names="a?b: missing, a$?b: missing, tag v?1: at another "
+                                                    "commit; " + mirror.SHOWN_CHANGED))
+                said += line + "\n"
+            self.assertEqual(mirror.shown_names(["x`1", "x\udcff1"]), "x?1, x?1; " + mirror.SHOWN_CHANGED)
+            self.assertEqual(forms(said), [], said)
+            self.assertNotIn(mirror.SHOWN_CHANGED, mirror.shown_names(["plain", "x;y"]))
+
+
 def bare_home(root, name, with_commit=False):
     path = os.path.join(root, name + ".git")
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", path], check=True)
@@ -4430,7 +4511,8 @@ class G7(unittest.TestCase):
             self.assertEqual(rc, 1, out)
             self.assertIn(f"restored someone/alpha: 1 branch(es) and 1 tag(s) to {home}", out)
             shown = [hidden.get(b, b) for b in sorted(names)]
-            said = mirror.RESTORE_LEFT_OUT.format(n=11, names=", ".join(shown[:5]) + " and 6 more")
+            said = mirror.RESTORE_LEFT_OUT.format(n=11, names=", ".join(shown[:5]) + " and 6 more; "
+                                                  + mirror.SHOWN_CHANGED)
             self.assertIn(said, out)
             # Rule 31(B): no line restore --to prints carries a backtick or a dollar-parenthesis.
             self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
