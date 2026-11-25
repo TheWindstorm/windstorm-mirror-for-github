@@ -561,10 +561,25 @@ def text_of(data):
     return os.fsdecode(data)
 
 
+def program_lines(text):
+    """A program's words cut into lines at a carriage return too (M120), as they came: read, never shown."""
+    return [x for x in re.split(r"\r\n|\r|\n", text or "") if x.strip()]
+
+
 def shown_lines(text):
     """A program's words as lines for a PERSON (M120, the owner's ruling 11-24): cut at a carriage return too, so
-    words after one never reach the screen over the words before it. Records are read with lines_of."""
-    return [x for x in re.split(r"\r\n|\r|\n", text or "") if x.strip()]
+    words after one never reach the screen over the words before it. Records are read with lines_of. M134 (family
+    rule 31(B), the owner's ruling 11-25): git and the forge quote a name somebody else chose in their own words, so
+    each line goes through shown_line; nothing decides by these lines."""
+    return [shown_line(x) for x in program_lines(text)]
+
+
+def shown_line(line):
+    """One line of a program's words for a person: a backtick and the ( of a dollar-parenthesis are each put as a ?,
+    every other character stays as it came (so the words can be searched for), and a line where one was put says
+    so. No line is dropped for it."""
+    out = line.replace(BACKTICK, "?").replace(DOLLAR_PAREN, "$?")
+    return line if out == line else out.rstrip() + "; " + SHOWN_CHANGED
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -2034,9 +2049,11 @@ def forge_refusal(text):
     ls = [x.strip() for x in shown_lines(text)]
     said = [re.sub(r"^remote:\s*(error:|fatal:)\s*", "", x) for x in ls if re.match(r"^remote:\s*(error:|fatal:)", x)]
     said = [x.strip() for x in said if x.strip()]
-    refused = next((x for x in ls if x.startswith("! [remote rejected]")), "")
+    # The refused ref's reason is read from the line as it came (the shown line can end in the sentence about a ?),
+    # then shown on its own.
+    refused = next((x.strip() for x in program_lines(text) if x.strip().startswith("! [remote rejected]")), "")
     why = re.search(r"\(([^()]*)\)\s*$", refused)
-    words = said[:2] + ([why.group(1)] if why else [])
+    words = said[:2] + ([shown_line(why.group(1))] if why else [])
     return redact("; ".join(words)) if words else git_reason(text)
 
 

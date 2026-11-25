@@ -4326,6 +4326,58 @@ class G6(unittest.TestCase):
             self.assertEqual(mirror.shown_names(["x`1", "x\udcff1"]), "x?1, x?1; " + mirror.SHOWN_CHANGED)
             self.assertEqual(forms(said), [], said)
             self.assertNotIn(mirror.SHOWN_CHANGED, mirror.shown_names(["plain", "x;y"]))
+        # git's and the forge's own words (M134's second part, the maintainer's word 11-25): they quote a name that
+        # somebody else chose. Each is read on the printed line (what the sync's service writes to its log) and in
+        # status, which reads the problem the sync wrote down; only the two forms change, the rest letter for letter.
+        bad = "e`x`$(y)"
+        for road in ("git", "forge"):
+            with World(self) as w:
+                full = "someone/beta"
+                w.gh.add_repo("someone", "beta")
+                one = w.gh.commit(full, {"a": b"1"})
+                w.gh.git(full, "branch", bad, one)
+                w.key_set()
+                rc, out = w.first_sync()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("refs/heads/" + bad, w.forge_refs("someone--beta"))          # the premise
+                w.gh.git(full, "update-ref", "refs/heads/" + bad, w.gh.commit(full, {"a": b"2"}))   # it moves too
+                w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"
+                folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--beta.git")
+                saved = mirror.forge_call
+                if road == "git":
+                    # The name taken out of the cache between the listing and the push: git itself says
+                    # "src refspec <the name> does not match any".
+                    def gone(forge, cache, *args, **kw):
+                        if args[:1] == ("push",):
+                            subprocess.run(["git", "--git-dir", cache, "update-ref", "-d", "refs/heads/" + bad],
+                                           check=True)
+                        return saved(forge, cache, *args, **kw)
+                    mirror.forge_call = gone
+                    words = "error: src refspec refs/heads/e?x?$?y) does not match any; " + mirror.SHOWN_CHANGED
+                else:
+                    # The forge refuses the push and names the ref in its own words: a hook in the copy's own folder,
+                    # run by Gitea's pre-receive and relayed by git as "remote: error: ...".
+                    hooks = os.path.join(folder, "hooks", "pre-receive.d")
+                    self.assertTrue(os.path.isdir(hooks), os.listdir(os.path.join(folder, "hooks")))
+                    hook = os.path.join(hooks, "zz-refuse")
+                    with open(hook, "w") as f:
+                        f.write("#!/bin/sh\nwhile read o n r; do case \"$r\" in *e?x?*) echo \"error: refusing $r\" >&2"
+                                ";; esac; done\nexit 1\n")
+                    os.chmod(hook, 0o755)
+                    words = ("refusing refs/heads/e?x?$?y); " + mirror.SHOWN_CHANGED + "; pre-receive hook declined")
+                try:
+                    rc, out = w.sync()
+                finally:
+                    mirror.forge_call = saved
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"{full}: the push into the forge failed, so nothing in its copy was moved (the push is "
+                              f"all or nothing): {words}", out)
+                said = out
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(words, out, road)
+                said += out
+                self.assertEqual(forms(said), [], (road, said))
+                self.assertIn("refs/heads/" + bad, w.forge_refs("someone--beta"))          # the name, as it is
 
 
 def bare_home(root, name, with_commit=False):
