@@ -1,0 +1,68 @@
+# A trial, on this branch only: what `launchctl print` answers for one made-up launch agent on each macOS image
+# GitHub offers, named by its number. Each job loads the agent into the runner account's own gui domain, keeps
+# the print, its exit code and sw_vers in this log, then takes the agent off and reads it gone. Nothing else on the
+# runner is changed; no secret is used; no action from outside is run.
+name: trial-launchd-print
+on:
+  push:
+    branches: [trial-launchd-print]
+permissions: {}
+jobs:
+  print:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel, macos-26, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: the print of one made-up agent
+        shell: bash
+        run: |
+          set -u; set +e        # every exit code is kept and said, never a stop of the step
+          label=org.example.trial.print
+          dir=$(mktemp -d)
+          plist="$dir/$label.plist"
+          echo "== image ${{ matrix.os }}"
+          sw_vers; uname -m; echo "uid $(id -u)"
+          launchctl print "gui/$(id -u)" > "$dir/domain.txt" 2>&1
+          code=$?
+          echo "== the account's gui domain: launchctl print gui/<uid> answered $code"
+          if [ "$code" != 0 ]; then
+            head -5 "$dir/domain.txt"
+            echo "== no gui domain for this account: that is the record; nothing loaded"
+            exit 0
+          fi
+          cat > "$plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>org.example.trial.print</string>
+            <key>ProgramArguments</key>
+            <array><string>/bin/sh</string><string>-c</string><string>sleep 300</string></array>
+            <key>EnvironmentVariables</key>
+            <dict><key>TRIAL_VALUE</key><string>made up</string></dict>
+            <key>RunAtLoad</key><true/>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "$plist"
+          launchctl bootstrap "gui/$(id -u)" "$plist"
+          echo "== bootstrap answered $?"
+          sleep 2
+          echo "== launchctl print gui/<uid>/$label: BEGIN (each line as printed, tabs shown as \\t)"
+          launchctl print "gui/$(id -u)/$label" > "$dir/print.txt" 2>&1
+          code=$?
+          perl -pe 's/\t/\\t/g' "$dir/print.txt"
+          echo "== launchctl print gui/<uid>/$label: END, exit $code"
+          launchctl bootout "gui/$(id -u)/$label"
+          echo "== bootout answered $?"
+          for i in $(seq 1 20); do
+            launchctl print "gui/$(id -u)/$label" > /dev/null 2>&1
+            code=$?
+            [ "$code" = 113 ] && break
+            sleep 1
+          done
+          echo "== read gone: launchctl print answered $code after $i read(s)"
+          rm -rf "$dir"
