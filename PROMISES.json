@@ -1850,6 +1850,22 @@
    "moved_why": "",
    "seen": "2026-11-24, on macOS 27.2.1 on Apple Silicon (APFS, Apple git 2.54.0, Gitea 28.4.0), with the stand-in GitHub only, on 0.1.0's head before row M123's guard: branches Feature and feature and tags V1 and v1 were one file each in the cache, and the copy held one of each pair at the other's commit and was called whole; two branches named with the two spellings of an e-acute stopped the fetch ('cannot lock ref ... File exists'); a branch whose name is not UTF-8 was refused by the disk ('Illegal byte sequence') and stopped the fetch. Not seen: GitHub itself holding such a pair; a Mac whose disk keeps case apart.",
    "promise": "One list of a project's branches and tags is read from GitHub first (row M123's). Each name this computer's disk cannot keep apart from another (case, the two ways to write an accented letter) or cannot hold at all is left out of the fetch, both names of a pair and never one, since neither can be trusted. Each is named with why at every sync and in status, as a limit of the copy (the road a name that is not UTF-8 takes on Linux), and every other branch and tag is copied. What the disk can hold is asked of the disk the cache is on and of the disk the forge is on, never guessed by the system's name. A list that could not be read is could not be read, never none to leave out. It leans on row M123's guard, and the guard stays after it. Proven by the three worlds, each beside a control, on a disk that folds them and on one that keeps them apart, the left-out names read in the sync's words, in status and in restore --check, and the guard silent where this row holds."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#155",
+   "id": "M127",
+   "codon": "G5.8",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "test worlds: a stand-in GitHub whose project holds branches named kept/... (a plain one and one shaped like a kept ref), beside a control",
+   "moved_why": "",
+   "seen": "2026-11-25, with the stand-in GitHub only. In a reviewer's world on 0.1.0's head be04251: a project whose GitHub branches include kept/foo was copied whole the first time; at the next sync and every one after, the sync exited 1, 'error: dst ref refs/heads/kept/foo receives from more than one src' (the forge keeps the tool's own kept refs under refs/heads/kept/, and GitHub's own branch maps to the same name), and the copy stood still; nothing was seen deleted or moved wrongly. On the head with row M123's guard and rows M125 and M126: restore --check called kept/foo and kept/2020-01-01/old 'missing in the copy' though the forge held both, and restore --to exited 0 and brought back main and the tag without the two kept/ branches, and without saying so.",
+   "promise": "A branch on GitHub whose name begins with kept/ is copied, followed at every sync, counted by status and restore --check, and brought back by restore --to like any other branch, and is never mistaken for one of the tool's own kept refs, nor they for it. Until then the README names it as a known edge, in only the words seen. Proven by test worlds with such branches (a plain one and one shaped like kept/<date>/<name>) beside a control: a first copy, later syncs with a change on GitHub, status, restore --check and restore --to, each read whole."
   }
  ],
  "declined": []
