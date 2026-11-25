@@ -1913,7 +1913,7 @@
    "codon": "G7.3",
    "stand_in": "the tests' stand-in GitHub, which is never asked or written by a refused restore",
    "seen": "2026-11-25, read in the code of 0.1.0's release head 922d6b9 (restore_to): restore --to takes an address as GitHub's when its host is github.com or ends in .github.com, or when github.com appears anywhere in it, so the ssh:// form (ssh://git@github.com/<owner>/<name>.git) is refused with the words that this skill never writes to GitHub and the one push --mirror line, as the other forms are. The suite gives restore --to the stand-in's own address, the https form and the scp form (git@github.com:<owner>/<name>.git), each refused with exit 2 and the stand-in GitHub not asked; it gives no ssh:// form, so that form's refusal, which the promise that the skill never writes to GitHub leans on, is read in the code only.",
-   "promise": "restore --to refuses every common form of a GitHub address, the ssh:// form among them, with exit 2, the words that this skill never writes to GitHub and the one line to put the project back there by hand, and asks and writes nothing on GitHub. Proven by one more value, an ssh:// address, in the test world that gives restore --to the other forms."
+   "promise": "restore --to refuses every common form of a GitHub address, the ssh:// form among them, with exit 2, the words that this skill never writes to GitHub and the one line to put the project back there by hand, and asks and writes nothing on GitHub. Proven by one test of its own, a test no other row names, that gives restore --to an ssh:// address; it may share the setup of the test world that gives restore --to the other forms."
   }
  ],
  "declined": []
