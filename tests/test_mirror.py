@@ -7602,7 +7602,7 @@ def to_build_wrong(plan, rows, ver):
     than `ver`, a row not marked built (no test named). Returns [(test, why)]."""
     wrong = []
     for line in plan.splitlines():
-        m = re.match(r"\| (G\d+\.\d+) \|", line)
+        m = re.match(r"\| (G\d+\.\d+|T\d+) \|", line)            # a T codon (the suite's own) as a G codon
         for t in re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", line):
             if ver == "0.0.0":
                 continue
