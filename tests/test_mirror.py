@@ -237,6 +237,21 @@ def sd_standin_words(value, home):
     return out
 
 
+# G1.24's floor (the owner's ruling, 11-25): setup's one read of the manager's version over the user bus, before its
+# first write; a read, asked of nothing else
+# busctl's own words with no user bus, RECORDED from the real program, 2026-11-25: on an Ubuntu 24.04 host, systemd
+# 255.4, and on a stock Ubuntu 24.04 guest, systemd 255.4-1ubuntu8.18, the same words state by state (research logs
+# busctl-nobus-words and busctl-words-guest): with neither variable set (on the guest also after su - from root and
+# under sudo -u, which leave both unset); with XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS set and no bus where it
+# leads. The family's record of five stock systems (systemd 237 to 255) holds the same for 249 and 255. (systemctl's
+# words in the first shell are other words: "Failed to connect to bus: No medium found".)
+BUSCTL_NO_ADDRESS = ("Failed to set bus address: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined (consider "
+                     "using --machine=<user>@.host --user to connect to bus of other user)")
+BUSCTL_NO_BUS = "Failed to connect to bus: No such file or directory"
+FLOOR_READ = ["busctl", "--user", "--json=short", "get-property", mirror.SD_DEST, "/org/freedesktop/systemd1",
+              mirror.SD_DEST + ".Manager", "Version"]
+
+
 def sd_standin_unit(text, home):
     """(ExecStart's data, Environment's data) as busctl --json=short gives them for a unit with this text: a start
     line systemd refuses (a program path holding a double quote, an apostrophe or a backslash, seen: the unit reads bad-setting) gives no
@@ -285,12 +300,29 @@ class Home:
         # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
         self.bus_answer, self.bus_starts, self.bus_objs = None, None, {}
         self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set
+        self.launchd_form = None     # a loaded job's whole print block in a MADE-UP other form, instead, when set
         self.bus_env_extra = []      # Environment entries a person's own drop-in adds to every unit (rule 31 (v.5) (3))
         self.launchd_env_extra = {}  # variables a loaded job's print shows besides its file's own
         self.no_bus_words = "Failed to connect to bus: No medium found"     # systemd 255's; 262 says it otherwise
+        # bus_version: what setup's floor read (the manager's Version over the bus) answers: (code, stdout, stderr),
+        # or "timeout"; bus_answer "timeout": every other busctl call runs past its limit. bus_kws: each busctl
+        # call's keywords, so a test reads its time limit. sd_version: systemctl --version's number.
+        self.bus_version = (0, json.dumps({"type": "s", "data": "255.4-1ubuntu8"}) + "\n", "")
+        self.bus_kws, self.sd_version = [], "255"
+        # bus_env_set: variables a person's own drop-in sets, in the form SEEN on systemd 237 to 255 (the family's
+        # rule 31 (v.5) (3), 4:03 PM ET 11-25): the list holds each ONCE, with the drop-in's value. bus_dropins: the
+        # unit's DropInPaths.
+        self.bus_env_set, self.bus_dropins = {}, []
+        # bus_starts_extra: start lines a person's own drop-in adds after the unit's own, in the form SEEN on the same
+        # five (rule 31 (v.5) (3), 4:22 PM ET 11-25: beside ours, ours first); bus_type: the Type every unit reads
+        # instead of its file's own, when set (a drop-in that sets it).
+        self.bus_starts_extra, self.bus_type = [], None
+        # XDG_RUNTIME_DIR: a login of the person's own sets it, so a home has one (setup's floor reads it, G1.24)
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
-                    "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
+                    "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config"),
+                    "XDG_RUNTIME_DIR": os.path.join(self.tmp, "run")}
         os.makedirs(self.env["HOME"])
+        os.makedirs(self.env["XDG_RUNTIME_DIR"], mode=0o700)
         self.saved_env = {k: os.environ.get(k) for k in self.env}
         self.saved_run = mirror.run
         self.procs = []
@@ -376,8 +408,17 @@ class Home:
     def bus(self, cmd):
         """busctl --user --json=short, as systemd 255 answered it on a stock guest (2026-11-25)."""
         done = lambda rc, out="", err="": subprocess.CompletedProcess(cmd, rc, out, err)
+        if not os.environ.get("XDG_RUNTIME_DIR") and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            return done(1, "", BUSCTL_NO_ADDRESS + "\n")
         if not self.user_bus:
-            return done(1, "", self.no_bus_words + "\n")
+            return done(1, "", BUSCTL_NO_BUS + "\n")
+        if cmd[3:] == ["get-property", mirror.SD_DEST, "/org/freedesktop/systemd1", mirror.SD_DEST + ".Manager",
+                       "Version"]:
+            if self.bus_version == "timeout":
+                raise subprocess.TimeoutExpired(cmd, mirror.BUS_WAIT)
+            return done(*self.bus_version)
+        if self.bus_answer == "timeout":
+            raise subprocess.TimeoutExpired(cmd, mirror.BUS_WAIT)
         if self.bus_answer is not None:
             return done(*self.bus_answer)
         if cmd[3] == "call" and cmd[-3:-1] == ["LoadUnit", "s"]:
@@ -392,15 +433,30 @@ class Home:
             starts, env = sd_standin_unit(text, self.env["HOME"])
             if cmd[7] == "ExecStart":
                 return done(0, json.dumps({"type": "a(sasbttttuii)",
-                                           "data": starts if self.bus_starts is None else self.bus_starts}) + "\n")
+                                           "data": (starts if self.bus_starts is None else self.bus_starts)
+                                           + self.bus_starts_extra}) + "\n")
+            if cmd[6:8] == [mirror.SD_DEST + ".Service", "Type"]:
+                if self.bus_type == "unreadable":
+                    return done(1, "", "Failed to get property Type: made up for this test\n")
+                typ = self.bus_type or next((ln[5:] for ln in text.split("\n") if ln.startswith("Type=")), "simple")
+                return done(0, json.dumps({"type": "s", "data": typ}) + "\n")
             if cmd[7] == "Environment":
+                env = [e for e in env if e.split("=", 1)[0] not in self.bus_env_set]
+                env += [f"{k}={v}" for k, v in self.bus_env_set.items()]
                 return done(0, json.dumps({"type": "as", "data": env + self.bus_env_extra}) + "\n")
+            if cmd[6:8] == [mirror.SD_DEST + ".Unit", "DropInPaths"]:
+                return done(0, json.dumps({"type": "as", "data": self.bus_dropins}) + "\n")
         return done(1, "", "Unknown object or property\n")
 
     def fake_run(self, cmd, **kw):
         if cmd[0] == "busctl":
             self.calls.append(cmd)
+            self.bus_kws.append(kw)
             return self.bus(cmd)
+        if cmd == ["systemctl", "--version"]:
+            self.calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, f"systemd {self.sd_version} ({self.sd_version}.4-1ubuntu8)\n"
+                                                       "+PAM +AUDIT +SELINUX\n", "")
         if cmd[0] == "pkcheck":
             self.calls.append(cmd)
             self.kws.append(kw)
@@ -476,7 +532,8 @@ class Home:
                 if self.timer_next is None and label == mirror.SYNC_LABEL:
                     return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
                 return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n"
-                                                   + self.launchd_job(label), "")
+                                                   + (self.launchd_form if self.launchd_form is not None
+                                                      else self.launchd_job(label)), "")
             if cmd[:2] == ["loginctl", "disable-linger"]:
                 self.linger = "no"
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -840,7 +897,8 @@ class G1(unittest.TestCase):
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
             reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"],
                      ["pkcheck", "--action-id"], ["launchctl", "print"])                         # read-only checks
-            changed = [c for c in h.calls if c[:2] not in reads and c[:3] != ["systemctl", "--user", "show-environment"]]
+            changed = [c for c in h.calls if c[:2] not in reads and c[:3] != ["systemctl", "--user", "show-environment"]
+                       and c not in (FLOOR_READ, ["systemctl", "--version"])]       # G1.24's floor is a read
             self.assertFalse(changed, "the dry run ran a command that changes something")
             p = h.place_gitea()
             self.assertEqual(h.setup()[0], 0)
@@ -1734,15 +1792,15 @@ class G1(unittest.TestCase):
 
     def test_G1_24_setup_stops_before_its_first_write_on_a_value_no_manager_takes_whole(self):
         """M148: a character that cannot be seen (a control character, a format character, a line or paragraph
-        separator) or bytes that are not text in WSM_HOME, and on Linux a dollar sign, a double quote, an apostrophe or a backslash in the
-        path of the Python setup runs with (seen 2026-11-25 on systemd 255: there is no spelling of those that a
-        program's path takes whole): setup and its dry run end 2 before anything is written or any service manager
-        is asked, never print the value, and name the one next step. On a Mac the same Python path is written whole
-        into its file, so setup goes on there."""
+        separator) or bytes that are not text in WSM_HOME, and on Linux a dollar sign, a double quote, an apostrophe
+        or a backslash in the path of the Python setup runs with (seen 2026-11-25 on systemd 255: no one spelling
+        carried every such path whole): setup and its dry run end 2 before anything is written or any service
+        manager is asked, never print the value, and name the character and the one next step. On a Mac the same
+        Python path is written whole into its file, so setup goes on there."""
         saved_sys, saved_exe = mirror.system, sys.executable
         try:
             mirror.system = lambda: ("linux", "x86_64")
-            for bad in ("a\nb", "a\x7fb", "a b", "a​b", "a\udcffb"):
+            for bad in ("a\nb", "a\x7fb", "a\u2028b", "a\u200bb", "a\udcffb"):   # each planted character as an escape
                 with Home() as h, self.subTest(home=repr(bad)):
                     os.environ["WSM_HOME"] = os.path.join(h.tmp, bad)
                     before = tree(h.tmp)
@@ -1756,7 +1814,8 @@ class G1(unittest.TestCase):
                         self.assertNotIn(bad, out)
                         self.assertIn(mirror.SHOWN_CHANGED, out)
                     self.assertEqual(tree(h.tmp), before)
-                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")], h.calls)
+                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")
+                                      and c != FLOOR_READ], h.calls)          # the floor's one read only
             for exe, named in (("/opt/a$b/python3", "a dollar sign"), ('/opt/a"b/python3', "a double quote"),
                                ("/opt/a'b/python3", "an apostrophe"), ("/opt/a\\b/python3", "a backslash"),
                                ("/opt/a$\\b/python3", "a dollar sign and a backslash")):
@@ -1773,7 +1832,8 @@ class G1(unittest.TestCase):
                                   f"not take a program's path holding {it} as one whole value. Nothing was changed. The one next step: run setup with a Python whose "
                                   "path has none (for example /usr/bin/python3).", out)
                     self.assertEqual(tree(h.tmp), before)
-                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")], h.calls)
+                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")
+                                      and c != FLOOR_READ], h.calls)          # the floor's one read only
             mirror.system = lambda: ("darwin", "arm64")
             with Home():
                 sys.executable = "/opt/a$b\"c'd\\e&f<g/python3"
@@ -1809,22 +1869,24 @@ class G1(unittest.TestCase):
                                              "unread")):
                     setattr(h, name, value)
                     n = len(h.calls)
-                    for got in (mirror.install_service(p), mirror.install_timer(p, 15)):
+                    for which, got in (("forge", mirror.install_service(p)), ("sync", mirror.install_timer(p, 15))):
                         self.assertFalse(got[0])
                         self.assertIn("its start line is not read as setup wrote it" if answer == "differs" else
                                       "as setup wrote it could not be read", got[1])
-                        self.assertTrue(got[1].endswith(mirror.SETUP_READ_BACK_STEP), got[1])
+                        self.assertTrue(got[1].endswith(mirror.read_back_step(which, answer)), got[1])
+                        # the owner's ruling, 11-25: never uninstall first; the person's own setting is looked at first
+                        self.assertNotIn("uninstall", got[1].split(";")[0])
                     self.assertFalse([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
                     self.assertEqual(mirror.service_read_back(p, "forge"), answer)
                     line = mirror.restart_line(p, {})
                     self.assertTrue(line.startswith("After a restart: systemd does not hold the forge's service"
                                                     if answer == "differs" else
                                                     "After a restart: whether systemd holds the forge's service"), line)
-                    self.assertTrue(line.endswith(mirror.STATUS_READ_BACK_STEP[answer]), line)
+                    self.assertTrue(line.endswith(mirror.read_back_step("forge", answer, "status")), line)
                     self.assertNotIn("starts by itself", line)
                     setattr(h, name, None)
             src = inspect.getsource(mirror.cmd_status)
-            self.assertIn('problems.append(read_back_words(which, held, "it is not set up", STATUS_READ_BACK_STEP[held], parts))', src)
+            self.assertIn('read_back_step(which, held, "status")', src)
             mirror.system = lambda: ("darwin", "arm64")
             with Home() as h:
                 p = mirror.paths()
@@ -1835,11 +1897,16 @@ class G1(unittest.TestCase):
                 n = len(h.calls)
                 ok, why = mirror.install_service(p)
                 self.assertFalse(ok)
-                self.assertIn("launchd does not hold the forge's service as setup wrote it: its arguments are not read "
-                              "as setup wrote it, so it was taken off again.", why)
+                self.assertIn("launchd does not hold the forge's service as setup wrote it: its arguments are not "
+                              "read as setup wrote it, so it was taken off again, and launchd reads it gone. Run setup "
+                              "again, which writes it again and reads it back; if this line comes back after that, "
+                              "run uninstall", why)
+                job = ["launchctl", "print", f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"]
                 boot = [i for i, c in enumerate(h.calls[n:]) if c[:2] == ["launchctl", "bootstrap"]]
                 out = [i for i, c in enumerate(h.calls[n:]) if c == ["launchctl", "bootout", f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"]]
                 self.assertTrue(boot and out and max(out) > max(boot), h.calls[n:])
+                # G1.17: taken off by the one function, and read gone after it (the owner's ruling, 11-25)
+                self.assertTrue([i for i, c in enumerate(h.calls[n:]) if c == job and i > max(out)], h.calls[n:])
                 h.launchd_args = None
                 h.print_code = 1
                 self.assertEqual(mirror.service_read_back(p, "forge"), "unread")
@@ -1899,6 +1966,30 @@ class G1(unittest.TestCase):
                         self.assertEqual(mirror.service_read(p, "forge")[0], "equal")
                     finally:
                         os.environ["WSM_HOME"] = home
+                    if name == "linux":
+                        # SEEN on systemd 237 to 255 (the family's rule 31 (v.5) (3), 4:03 PM ET 11-25): a drop-in of
+                        # the person's own that sets WSM_HOME leaves ONE entry, with their value. A stop; their value
+                        # is never said; the step is the manager's own listing, never uninstall or setup again.
+                        h.bus_env_extra = [f"HTTPS_PROXY={planted}"]
+                        h.bus_env_set = {"WSM_HOME": planted}
+                        h.bus_dropins = [os.path.join(os.path.dirname(p["unit"]), mirror.SERVICE + ".service.d",
+                                                      "mine.conf")]
+                        self.assertEqual(mirror.service_read(p, "forge"),
+                                         ("differs", ["HTTPS_PROXY"], ["its WSM_HOME entry"]))
+                        line = mirror.restart_line(p, {})
+                        self.assertTrue(line.startswith("After a restart: systemd does not hold the forge's service as "
+                                                        "setup wrote it: its WSM_HOME entry is not read as setup wrote "
+                                                        "it, so it is not set up. 1 drop-in file stands on it"), line)
+                        self.assertTrue(line.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), line)
+                        mirror.DOOR_SEEN.clear()
+                        rc, out = status()
+                        for said in (line, out):
+                            self.assertNotIn(secret, said)
+                            self.assertNotIn("uninstall", said.split("its WSM_HOME entry")[-1].split("\n")[0])
+                            self.assertNotIn("setup again", said.split("its WSM_HOME entry")[-1].split("\n")[0])
+                        h.bus_env_set, h.bus_dropins = {}, []
+                    # Below, on Linux, a SECOND entry for WSM_HOME: the STAND-IN'S OWN FORM, produced by none of the
+                    # five systemd versions tried (rule 31 (v.5) (3)); the stop it holds is said by its count.
                     if name == "darwin":
                         h.launchd_env_extra = {"HTTPS_PROXY": planted, "WSM_HOME": planted}
                     else:
@@ -1922,6 +2013,311 @@ class G1(unittest.TestCase):
                         self.assertFalse([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
         finally:
             mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
+
+    def test_G1_24_a_start_line_of_the_persons_own_beside_the_syncs_is_theirs_by_its_count(self):
+        """M148, the family's rule 31 (v.5) (3) as corrected 4:22 PM ET 11-25: the sync's unit is one-shot (the
+        list holds its start lines in order, seen; that the manager runs them so is not recorded, and no line says
+        it: rule 31 (v.5) (3), 4:27 PM ET). A start line of the person's own beside ours, ours held
+        once, as written and first, is theirs: named by its count, never its words (it holds a made-up secret here),
+        the listing as the step and as the last words of the line, and the answer stays "set up" (the timer goes on).
+        Ours not first, ours twice, ours changed, the manager holding the sync as another type, and any start line of
+        theirs on the forge (written simple: seen by no one) are each a stop, its step the listing where a drop-in
+        stands. Each line that gives a command ends with it (the same rule, the same hour)."""
+        secret = "madeup-secret-5c1e"
+        theirs = ["/bin/sh", ["/bin/sh", "-c", f"curl -s https://me:{secret}@hook.example/"], False, 0, 0, 0, 0, 0, 0, 0]
+        import socket
+        saved, door, rel = mirror.system, mirror.read_door, mirror.release_check
+        mirror.system = lambda: ("linux", "x86_64")
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")
+        mirror.release_check = lambda st, force=False: []
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                for d in (p["data"], p["conf"], os.path.dirname(p["unit"])):
+                    os.makedirs(d, mode=0o700, exist_ok=True)
+                    os.chmod(d, 0o700)
+                s = socket.socket()
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+                s.close()
+                mirror.save_state(p, {"port": port})
+                with open(p["mirror_key"], "w") as f:
+                    f.write("a stand-in key\n")
+                shutil.copyfile(SCRIPT, p["script"])
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                sync = mirror.SYNC_UNIT + ".service"
+                ours = sd_standin_unit(fread(os.path.join(os.path.dirname(p["unit"]), sync)), h.env["HOME"])[0]
+                self.assertEqual(len(ours), 1)
+                h.bus_dropins = [os.path.join(os.path.dirname(p["unit"]), sync + ".d", "mine.conf")]
+                h.bus_starts_extra = [theirs]
+                self.assertEqual(mirror.service_read(p, "sync"), ("equal", [1], []))
+                warn = mirror.theirs_line(p)
+                # what was READ, the order in the list; that systemd runs them in that order is not recorded (rule 31
+                # (v.5) (3), 4:27 PM ET 11-25), so no line says it
+                self.assertEqual(warn, "1 start line of your own is in the sync's service, set by you, not by this "
+                                       "tool; it stands after the skill's own in systemd's list, and it is left as it "
+                                       "is. To read it: systemctl --user cat " + sync)
+                self.assertNotIn("runs", warn)
+                n = len(h.calls)
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))       # set up: the timer goes on
+                self.assertTrue([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
+                mirror.DOOR_SEEN.clear()
+                rc, out = status()
+                self.assertIn("note: " + warn, out)
+                self.assertNotIn("the sync's service as setup wrote it", out)   # (the stand-in plants it on the forge too)
+                h.bus_starts_extra = [theirs, theirs]
+                self.assertTrue(mirror.theirs_line(p).startswith("2 start lines of your own are in the sync's"))
+                self.assertNotIn(secret, out + warn + mirror.theirs_line(p))
+                changed = [ours[0][0], ours[0][1] + ["--more"]] + ours[0][2:]
+                for label, starts, typ in (("ours not first", [theirs] + ours, None),
+                                           ("ours twice", ours + [theirs] + ours, None),
+                                           ("ours changed", [changed, theirs], None),
+                                           ("held as another type", ours + [theirs], "simple")):
+                    with self.subTest(case=label):
+                        h.bus_starts, h.bus_starts_extra, h.bus_type = starts, [], typ
+                        self.assertEqual(mirror.service_read(p, "sync"), ("differs", [], ["its start line"]))
+                        ok, why = mirror.install_timer(p, 15)
+                        self.assertFalse(ok)
+                        self.assertTrue(why.endswith("systemctl --user cat " + sync), why)
+                        self.assertNotIn("setup again", why.split("its start line")[-1])
+                        self.assertNotIn(secret, why)
+                h.bus_starts, h.bus_starts_extra, h.bus_type = None, [theirs], "unreadable"
+                self.assertEqual(mirror.service_read(p, "sync"), ("unread", [], []))   # a read that failed: unread
+                h.bus_starts, h.bus_type = None, None
+                h.bus_starts_extra = [theirs]            # the forge, written simple: theirs there is seen by no one
+                h.bus_dropins = [os.path.join(os.path.dirname(p["unit"]), mirror.SERVICE + ".service.d", "mine.conf")]
+                self.assertEqual(mirror.service_read(p, "forge"), ("differs", [], ["its start line"]))
+                line = mirror.restart_line(p, {})
+                self.assertTrue(line.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), line)
+                self.assertNotIn(secret, line)
+                # A COMMAND STANDS LAST ON ITS LINE: each step line of the cure that gives a command ends with it.
+                given = [mirror.theirs_line(p)]
+                for n_in in ([], h.bus_dropins):
+                    h.bus_dropins = n_in
+                    for which in ("forge", "sync"):
+                        for answer in ("differs", "unread", "unrecorded"):
+                            for where in ("setup", "status"):
+                                given.append(mirror.read_back_step(which, answer, where))
+                h.user_bus = False
+                given.append(mirror.bus_floor(p))
+                h.user_bus = True
+                cmds = 0
+                for g in given:
+                    m = re.search(r"systemctl --user cat \S+|" + re.escape(mirror.own_command(p, "setup")), g)
+                    if m:
+                        cmds += 1
+                        self.assertEqual(g[m.end():], "", g)
+                self.assertGreaterEqual(cmds, 6)
+        finally:
+            mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
+
+    def test_G1_24_a_mac_print_in_a_made_up_other_form_is_could_not_be_read(self):
+        """M148 (the owner's ruling, 11-25, point 7 (b)): launchd's print form is seen on macOS 27.2.1 only. A print
+        block in another form, MADE UP here (no macOS has been seen printing these: one with no arguments block of
+        the seen form, one with the seen arguments block and no environment block where setup set a variable), is
+        answered "could not be read" with its step: never "differs", never "not set up", never a road to uninstall;
+        the step ends with the command that prints this Mac's version. A job setup wrote with no variable reads equal
+        with no environment block (whether launchd prints one for such a job is not seen)."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        made_up_no_arguments = ("gui/501/x = {\n\tstate = running\n\tProgramArguments = (\n\t\t\"/usr/bin/python3\",\n"
+                                "\t)\n\tEnvironmentVariables = (\n\t\tWSM_HOME = \"/made/up\"\n\t)\n}\n")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                args = mirror.read_meant(p, "forge")[0]
+                made_up_no_environment = ("gui/501/x = {\n\tstate = running\n\targuments = {\n"
+                                          + "".join(f"\t\t{a}\n" for a in args) + "\t}\n}\n")
+                for label, form in (("made up: no arguments block", made_up_no_arguments),
+                                    ("made up: no environment block", made_up_no_environment)):
+                    with self.subTest(form=label):
+                        h.launchd_form = None
+                        self.assertEqual(mirror.install_service(p), (True, ""))      # loaded again, read equal
+                        h.launchd_form = form
+                        self.assertEqual(mirror.service_read(p, "forge"), ("unread", [], []))
+                        line = mirror.restart_line(p, {})           # read while it is loaded
+                        ok, why = mirror.install_service(p)
+                        self.assertFalse(ok)
+                        for said, first in ((why, "Run setup again in a minute;"),
+                                            (line, "Run status from a terminal window of your own;")):
+                            self.assertIn("whether launchd holds the forge's service as setup wrote it could not be "
+                                          "read", said)
+                            self.assertIn(first + " if this line comes back, launchd's answer on this Mac may be in a "
+                                          "form this tool does not read yet (it was seen on macOS 27.2.1)", said)
+                            self.assertTrue(said.endswith("which this prints: sw_vers -productVersion"), said)
+                            for never in ("not set up", "uninstall", "does not hold"):
+                                self.assertNotIn(never, said)
+                h.launchd_form = None
+                self.assertEqual(mirror.install_service(p), (True, ""))
+            with Home() as h:
+                os.environ.pop("WSM_HOME", None)            # put back by Home on its way out
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.read_meant(p, "forge")[1], {})
+                args = mirror.read_meant(p, "forge")[0]
+                h.launchd_form = ("gui/501/x = {\n\tstate = running\n\targuments = {\n"
+                                  + "".join(f"\t\t{a}\n" for a in args) + "\t}\n}\n")
+                self.assertEqual(mirror.service_read(p, "forge"), ("equal", [], []))
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_setup_stops_before_its_first_write_when_the_read_backs_road_is_not_there(self):
+        """M148 (the owner's ruling, 11-25: the read-back's road is a floor, and a floor is checked before the first
+        write): on Linux setup reads the manager's own version over the user bus in busctl's JSON form before it
+        makes anything. A shell with no user bus, a busctl that does not answer in that form, none at all, or no
+        answer within the limit: setup and its dry run end 2, the home is read unchanged, no unit is written and
+        systemd is asked nothing else; the line says what was found and the one next step. On a Mac there is no
+        such read."""
+        saved = mirror.system
+        login = "The one next step: run setup from a login of your own to this computer, such as ssh or a terminal at the screen"
+        # (what the case sets, its value, the words said, busctl reads, how the line ends: "cmd" = with the command)
+        cases = (("no_vars", True, "this shell cannot reach your account's own systemd: it has neither "
+                                   "XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS", 0, "cmd"),
+                 ("user_bus", False, "this shell cannot reach your account's own systemd: busctl found no bus where "
+                                     "XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS leads", 1, "cmd"),
+                 # RECORDED (the family's record of five stock systems, 2026-11-25): busctl's own refusal of the JSON
+                 # form on systemd 237 (Ubuntu 18.04) and 239 (AlmaLinux 8.10), in every shell, with a bus too
+                 ("old", ("237", (1, "", "busctl: unrecognized option '--json=short'\n")),
+                  "this computer's systemd is 237 whose busctl does not know the JSON form setup reads with (busctl "
+                  f"answered that the option is not one it knows); the skill was seen to run on systemd "
+                  f"{mirror.OLDEST_SEEN_SYSTEMD},", 1,
+                  "set the skill up on a computer whose busctl answers in that form, such as one with systemd "
+                  f"{mirror.OLDEST_SEEN_SYSTEMD}, as the README says."),
+                 # MADE UP: an answer no one has recorded, on the oldest systemd seen, and on 249, which the same
+                 # record shows answering the read: the version alone never names a cause (the owner's ruling, 11-25)
+                 ("bus_version", (3, "", "made-up words\n"), "busctl answered exit 3 when setup read your account's "
+                                                              "own systemd over its bus", 1, "cmd"),
+                 ("old", ("249", (1, "", "made-up words\n")), "busctl answered exit 1 when setup read your "
+                                                               "account's own systemd over its bus", 1, "cmd"),
+                 # RECORDED (the same family record): systemd 245's busctl, a runtime folder with no bus, its words
+                 # between colour escapes although standard error was a file
+                 ("bus_version", (1, "", "\x1b[0;1;31mFailed to connect to bus: No such file or directory\x1b[0m\n"),
+                  "this shell cannot reach your account's own systemd: busctl found no bus where XDG_RUNTIME_DIR or "
+                  "DBUS_SESSION_BUS_ADDRESS leads", 1, "cmd"),
+                 ("bus_version", (0, "made-up, not JSON\n", ""), "systemd 255 answered over your account's bus in a "
+                                                                 "form setup does not read (busctl's JSON form)", 1,
+                  "open an issue with this line."),
+                 ("bus_version", (127, "", "busctl is not installed on this computer"), "this computer has no busctl",
+                  1, "open an issue with this line."),
+                 ("bus_version", "timeout", f"did not answer over its bus within {mirror.BUS_WAIT} s", 1,
+                  "run setup again in a minute."))
+        try:
+            mirror.system = lambda: ("linux", "x86_64")
+            for name, value, said, reads, end in cases:
+                for args in (("--dry-run",), ("--linger",)):
+                    with Home(linger="yes") as h, self.subTest(case=said, args=args):
+                        if name == "no_vars":
+                            os.environ.pop("XDG_RUNTIME_DIR", None)
+                            saved_dbus = os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+                        elif name == "old":
+                            h.sd_version, h.bus_version = value
+                        else:
+                            setattr(h, name, value)
+                        before = tree(h.tmp)
+                        try:
+                            rc, out = h.setup(*args)
+                        finally:
+                            if name == "no_vars" and saved_dbus is not None:
+                                os.environ["DBUS_SESSION_BUS_ADDRESS"] = saved_dbus
+                        line = [x for x in out.splitlines() if x.startswith("Stopped: ")]
+                        self.assertEqual(rc, 2, out)
+                        self.assertEqual(len(line), 1, out)
+                        self.assertIn(said, line[0])
+                        self.assertIn("Setup made nothing. The one next step: ", line[0])
+                        if end == "cmd":                # the login first; the command stands last on the line
+                            self.assertIn(login, line[0])
+                            self.assertTrue(line[0].endswith(": " + mirror.own_command(mirror.paths(), "setup")),
+                                            line[0])
+                            if "answered exit" in said:  # an issue only if the line comes back in that login
+                                self.assertIn(login + ", and if this line comes back there, open an issue", line[0])
+                        else:
+                            self.assertTrue(line[0].endswith(end), line[0])
+                        if name in ("no_vars", "user_bus"):
+                            self.assertNotIn("issue", line[0])
+                        if name == "old" and value[0] == "249":
+                            self.assertNotIn("249", line[0])       # nothing blamed on the version it read
+                        if (name, value[0] if name == "old" else None) != ("old", "237") and \
+                                (name != "bus_version" or value[0] != 0):
+                            self.assertNotIn("form", line[0])     # nothing about a form unless JSON came back
+                        self.assertEqual(tree(h.tmp), before)
+                        self.assertFalse(os.path.exists(mirror.paths()["unit"]))
+                        self.assertFalse([c for c in h.calls if c[:2] == ["systemctl", "--user"]], h.calls)
+                        self.assertEqual(len([c for c in h.calls if c[0] == "busctl"]), reads, h.calls)
+            mirror.system = lambda: ("darwin", "arm64")
+            with Home() as h:
+                h.user_bus = False
+                self.assertIsNone(mirror.bus_floor(mirror.paths()))
+                self.assertFalse([c for c in h.calls if c[0] in ("busctl", "systemctl")])
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_every_read_of_a_service_manager_has_a_limit_and_each_is_read_once(self):
+        """M148 (the owner's ruling, 11-25): every read over the manager's bus, and launchd's print, is given
+        BUS_WAIT; past it the answer is "could not be read", never a wait without end. Status reads each service once
+        and the warning about the person's own entry uses those reads; setup reads that warning once. Setup's own
+        record not there is its own answer, "unrecorded", with setup again as the first step and no bus read."""
+        seen = []
+
+        def slow(cmd, **kw):
+            seen.append((cmd[0], kw.get("timeout")))
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        saved_run, saved = mirror.run, mirror.system
+        try:
+            mirror.run = slow
+            mirror.system = lambda: ("linux", "x86_64")
+            self.assertIsNone(mirror.systemd_parsed(mirror.SERVICE + ".service"))
+            self.assertIsNone(mirror.launchd_parsed(mirror.LAUNCHD_LABEL))
+            self.assertEqual(mirror.systemd_version(), "")
+            was = os.environ.get("XDG_RUNTIME_DIR")
+            os.environ["XDG_RUNTIME_DIR"] = "/run/user/made-up"          # as a login sets it
+            try:
+                self.assertIn(f"within {mirror.BUS_WAIT} s", mirror.bus_floor(None))
+            finally:
+                if was is None:
+                    os.environ.pop("XDG_RUNTIME_DIR")
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = was
+        finally:
+            mirror.run = saved_run
+        self.assertEqual({t for _, t in seen}, {mirror.BUS_WAIT}, seen)
+        self.assertEqual({c for c, _ in seen}, {"busctl", "launchctl", "systemctl"}, seen)
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["unit"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                self.assertTrue(h.bus_kws and all(k.get("timeout") == mirror.BUS_WAIT for k in h.bus_kws), h.bus_kws)
+                reads = {w: mirror.service_read(p, w) for w in ("forge", "sync")}
+                n = len(h.calls)
+                self.assertEqual(mirror.theirs_line(p, reads), "")
+                self.assertEqual(len(h.calls), n, "the warning read the services again")
+                h.bus_answer = "timeout"
+                self.assertEqual(mirror.service_read(p, "forge")[0], "unread")
+                self.assertIn("could not be read", mirror.restart_line(p, {}))
+                h.bus_answer = None
+                os.remove(os.path.join(p["data"], mirror.SERVICE_MEANT))
+                n = len(h.calls)
+                self.assertEqual(mirror.service_read(p, "forge"), ("unrecorded", [], []))
+                self.assertFalse([c for c in h.calls[n:] if c[0] == "busctl"], "a missing record is not a bus read")
+                line = mirror.restart_line(p, {})
+                self.assertIn("what setup wrote for the forge's service could not be read from setup's own record, "
+                              "so it is not set up. Run setup again, which writes that record again", line)
+                self.assertNotIn("uninstall", line.split(";")[0])
+                step = mirror.read_back_step("forge", "differs")
+                self.assertTrue(step.startswith("A setting of your own that changes it comes off first, then run setup "
+                                                "again; if this line comes back after that, run uninstall"), step)
+                self.assertTrue(step.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), step)
+            status_src, setup_src = inspect.getsource(mirror.cmd_status), inspect.getsource(mirror.cmd_setup)
+            self.assertIn("theirs_line(p, reads)", status_src)
+            self.assertEqual(status_src.count("service_read("), 1)
+            self.assertEqual(setup_src.count("theirs_line("), 1)
+        finally:
+            mirror.system = saved
 
 
 def files_holding(root, needle):
@@ -4516,9 +4912,29 @@ class G6(unittest.TestCase):
     def test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback(self):
         """A real machine (2026-11-23): `status | head -3` ended in a Python traceback (a broken pipe). The tool is
         run with its output going to a pipe nobody reads: it ends with its own code, says nothing on stderr, and
-        does the whole of its work (setup --dry-run reads this computer to its end and changes nothing)."""
+        does the whole of its work (setup --dry-run reads this computer to its end and changes nothing). Its own
+        code is the one the same run gives with a reader: where setup's floors stop it (G8.7, G1.24: a shell with
+        no user bus), that is 2 both ways; past them, 0."""
         home = tempfile.mkdtemp(prefix="wsm-pipe-")
         TEMPS.append(home)
+        read = subprocess.run([sys.executable, "-I", SCRIPT, "setup", "--dry-run"], capture_output=True, text=True,
+                              timeout=120, env=dict(os.environ, WSM_HOME=home))
+        self.assertIn(read.returncode, (0, 2), read.stdout + read.stderr)
+        if read.returncode == 2:            # 2 only from a floor's own line, read here as the tool reads it
+            saved_home = os.environ.get("WSM_HOME")
+            os.environ["WSM_HOME"] = home
+            try:
+                p = mirror.paths()
+                p["script"] = SCRIPT
+                floors = {mirror.bus_floor(p)} | {(mirror.door_floor() or "") + " Setup made nothing."}
+            finally:
+                if saved_home is None:
+                    os.environ.pop("WSM_HOME")
+                else:
+                    os.environ["WSM_HOME"] = saved_home
+            self.assertIn(read.stdout.strip().splitlines()[-1], floors, read.stdout)
+        self.assertEqual(read.stderr, "")
+        self.assertEqual(os.listdir(home), [])
         r, w = os.pipe()
         os.close(r)                                   # the reader is gone before the first word
         try:
@@ -4526,7 +4942,7 @@ class G6(unittest.TestCase):
                                 text=True, timeout=120, env=dict(os.environ, WSM_HOME=home))
         finally:
             os.close(w)
-        self.assertEqual(pr.returncode, 0, pr.stderr)
+        self.assertEqual(pr.returncode, read.returncode, pr.stderr)
         self.assertEqual(pr.stderr, "")
         self.assertEqual(os.listdir(home), [])
 
@@ -8385,7 +8801,7 @@ class G6Words(unittest.TestCase):
                         mine.add("HardStop")                  # says a HardStop's words: every raise is checked
                     built |= mine
                     if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>",
-                               "door_line"}:
+                               "door_line", "<bus>"}:
                         continue                              # checked below, where the words are built
                     if not self.NEXT.search(words(arg)):
                         lacking.append((a.lineno, words(arg)[:90]))
@@ -8404,7 +8820,7 @@ class G6Words(unittest.TestCase):
             line = mirror.door_line(kind, 21000, "why", never)
             self.assertTrue(re.search(r"\. (Run setup|Run status again|The mirror needs that read to run; the README)",
                                       line), line)
-        for fn in ("other_install_stop", "home_is_not_ours"):          # G9.12: each stop it returns, one by one
+        for fn in ("other_install_stop", "home_is_not_ours", "bus_floor"):  # G9.12, G1.24: each stop it returns
             for r in ast.walk(funcs[fn]):
                 if isinstance(r, ast.Return) and r.value is not None and words(r.value):
                     self.assertTrue(self.NEXT.search(words(r.value)), (fn, words(r.value)[:90]))
@@ -8417,7 +8833,7 @@ class G6Words(unittest.TestCase):
                 "own_command",                                                   # (the command to run, as it runs)
                 "SHOWN_CHANGED"}                                                 # (what a ? stands for, M132)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
-                                         "<other>", "door_line"},
+                                         "<other>", "door_line", "<bus>"},
                          set(),
                          "a stop line is built from something this test does not check")
 

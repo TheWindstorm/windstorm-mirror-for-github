@@ -210,6 +210,14 @@ with no key; a sync and a restore on a Mac are not seen yet.
   listed, with the skill in place. The short form (`TheWindstorm/windstorm-mirror-for-github`) worked the same
   way on 2.1.280. Versions older than 2.1.280: not seen.
 - **Not seen yet:**
+  - on Linux, a systemd older than 255. The skill was seen to run on systemd 255 (Ubuntu 24.04). Before it makes
+    anything, setup reads your account's own systemd over its user bus, in the form it later reads each service
+    back in; where busctl does not know that form (seen on systemd 237 and 239), setup stops there, having made
+    nothing, and says which systemd it found;
+  - on a Mac, setup and status read back how launchd holds the skill's two jobs, in the form `launchctl print`
+    shows them. That form was seen on macOS 27.2.1 only. On another macOS the read-back may answer that it
+    "could not be read"; setup then takes the job off again and does not finish, and the line it prints says the
+    next step;
   - a sync and a restore with 0.1.0's own tool on a Mac: not seen by us; they need a key, and wait for a
     fine-grained read-only one. Seen with it on a Mac: setup, status and uninstall in a test account with no key
     (above), and the test suite on GitHub's macOS runners, against a stand-in for GitHub;

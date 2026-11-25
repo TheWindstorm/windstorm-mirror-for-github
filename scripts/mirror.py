@@ -860,10 +860,11 @@ def service_env():
     return [f"WSM_HOME={h}"] if h else []
 
 
+# G1.24: what setup wrote into each service file, the read-back's "meant" side
 SERVICE_MEANT = "service-meant.json"
 # set by launchd itself in a loaded job's environment block, never by the person (seen 2026-11-25 on a Mac, macOS
 # 27.2.1, a test account: `launchctl print` showed these two beside the job file's own variables)
-LAUNCHD_OWN_ENV = ("OSLogRateLimit", "XPC_SERVICE_NAME")   # G1.24: what setup wrote into each service file, the read-back's "meant" side
+LAUNCHD_OWN_ENV = ("OSLogRateLimit", "XPC_SERVICE_NAME")
 
 
 def record_meant(p, which, argv):
@@ -894,8 +895,9 @@ def read_meant(p, which):
 # Seen 2026-11-25 on two stock Ubuntu 24.04 guests (systemd 255): an argument written as sd_word reached the started
 # program whole for a space, two spaces, a leading space, %, %h, $, ${X}, ", \, a trailing \, ', ;, & < > and a
 # non-ASCII letter, each alone and all at once, and the bus held each $ as $$ (expanded at start, not at parse). The
-# program's own path takes no ", ' or \ (the unit is refused), and no spelling of $ works there; SD_PATH_REFUSED is
-# refused by setup before its first write, so the path's word needs only the percent sign doubled.
+# program's own path takes no ", ' or \ (the unit is refused), and no one spelling carried every such path holding a $
+# whole; SD_PATH_REFUSED is refused by setup before its first write, so the path's word needs only the percent sign
+# doubled.
 SD_PATH_REFUSED = "$\"'\\"
 SD_PATH_NAMES = {"$": "a dollar sign", '"': "a double quote", "'": "an apostrophe", "\\": "a backslash"}
 
@@ -1004,18 +1006,121 @@ def sync_plist_text(p, minutes):
 
 
 SD_DEST = "org.freedesktop.systemd1"
+# seconds each read of a service manager is given; past it, it "could not be read" (the owner's ruling, 11-25)
+BUS_WAIT = 10
 
 
 def bus_json(*args):
     """One answer of the user manager over its bus (busctl's JSON form), its data, or None when it could not be read
-    (an error is never an absence)."""
-    out = run(["busctl", "--user", "--json=short", *args])
+    (an error is never an absence), within BUS_WAIT."""
+    try:
+        out = run(["busctl", "--user", "--json=short", *args], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return None
     if out.returncode != 0:
         return None
     try:
         return json.loads(out.stdout)["data"]
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def systemd_version():
+    """systemd's own version number as `systemctl --version` prints it on its first line (no bus needed), or ''."""
+    try:
+        out = run(["systemctl", "--version"], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return ""
+    m = re.match(r"systemd (\d+)\b", (out.stdout or "").split("\n")[0]) if out.returncode == 0 else None
+    return m.group(1) if m else ""
+
+
+BUS_ROAD = "and setup reads back over that bus what systemd takes from each service file it writes"
+
+
+# The oldest systemd the skill was seen to run on: a stock Ubuntu 24.04 guest's, 2026-11-25 (setup, its read-back over
+# the bus, a restart). An older one may hold everything setup needs; it was not seen.
+OLDEST_SEEN_SYSTEMD = 255
+# busctl's own refusal of the JSON form setup reads with, RECORDED on stock systemd 237 (Ubuntu 18.04) and 239
+# (AlmaLinux 8.10), in every shell, with a bus too (the family's record of five systems, 2026-11-25): "busctl:
+# unrecognized option '--json=short'". 245 and 249 answered the read in that form, as 255 does.
+NO_JSON_FORM = re.compile(r"unrecognized option\W+--json")
+
+
+def bus_floor(p):
+    """G1.24 (the owner's ruling, 11-25: the read-back's road is a floor, and a floor is checked before the first
+    write): on Linux, one harmless read over the user bus in busctl's JSON form, the manager's own version. None when
+    it answers in that form; otherwise the line that stops setup and its dry run, with what was found and the one
+    next step. What the tool can read itself decides first: a shell with neither XDG_RUNTIME_DIR nor
+    DBUS_SESSION_BUS_ADDRESS has no road to the user bus (busctl said so in its own words there, seen on Ubuntu
+    24.04, systemd 255.4, 2026-11-25). Then busctl's own answers as recorded: no bus (NO_USER_BUS), and its refusal
+    of the JSON form (NO_JSON_FORM, an older systemd's). Any answer no one recorded says what was read, busctl's
+    exit code, on every version, and nothing about a form unless JSON came back that could not be parsed: no line
+    names a cause the tool did not read (the owner's ruling, 11-25)."""
+    if system()[0] == "darwin":
+        return None
+    if not os.environ.get("XDG_RUNTIME_DIR") and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return ("Stopped: this shell cannot reach your account's own systemd: it has neither XDG_RUNTIME_DIR nor "
+                f"DBUS_SESSION_BUS_ADDRESS, the two that lead to its bus, {BUS_ROAD}. Setup made nothing. The one "
+                "next step: run setup from a login of your own to this computer, such as ssh or a terminal at the "
+                f"screen, which sets them: {own_command(p, 'setup')}")
+    try:
+        out = run(["busctl", "--user", "--json=short", "get-property", SD_DEST, "/org/freedesktop/systemd1",
+                   SD_DEST + ".Manager", "Version"], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return (f"Stopped: your account's own systemd did not answer over its bus within {BUS_WAIT} s, {BUS_ROAD}. "
+                "Setup made nothing. The one next step: run setup again in a minute.")
+    if out.returncode == 0:
+        try:
+            if isinstance(json.loads(out.stdout)["data"], str):
+                return None
+        except (ValueError, KeyError, TypeError):
+            pass
+        ver = systemd_version()
+        return (f"Stopped: {'systemd ' + ver if ver else 'this computer' + chr(39) + 's systemd'} answered over your "
+                f"account's bus in a form setup does not read (busctl's JSON form), {BUS_ROAD}. Setup made nothing. "
+                "The one next step: open an issue with this line.")
+    if NO_USER_BUS.search(out.stderr or "") or NO_USER_BUS.search(out.stdout or ""):
+        return ("Stopped: this shell cannot reach your account's own systemd: busctl found no bus where XDG_RUNTIME_DIR "
+                f"or DBUS_SESSION_BUS_ADDRESS leads, {BUS_ROAD}. Setup made nothing. The one next step: run setup "
+                f"from a login of your own to this computer, such as ssh or a terminal at the screen: "
+                f"{own_command(p, 'setup')}")
+    if out.returncode == 127:
+        return (f"Stopped: this computer has no busctl, systemd's own tool for its bus, {BUS_ROAD}. Setup made "
+                "nothing. The one next step: open an issue with this line.")
+    if NO_JSON_FORM.search(out.stderr or ""):
+        ver = systemd_version()
+        return (f"Stopped: {'this computer' + chr(39) + 's systemd is ' + ver if ver else 'this computer has a systemd'}"
+                f" whose busctl does not know the JSON form setup reads with (busctl answered that the option is not "
+                f"one it knows); the skill was seen to run on systemd {OLDEST_SEEN_SYSTEMD}, {BUS_ROAD}. Setup made "
+                f"nothing. The one next step: set the skill up on a computer whose busctl answers in that form, such "
+                f"as one with systemd {OLDEST_SEEN_SYSTEMD}, as the README says.")
+    return (f"Stopped: busctl answered exit {out.returncode} when setup read your account's own systemd over its bus, "
+            f"{BUS_ROAD}. Setup made nothing. The one next step: run setup from a login of your own to this computer, "
+            "such as ssh or a terminal at the screen, and if this line comes back there, open an issue with this "
+            f"line: {own_command(p, 'setup')}")
+
+
+def dropin_count(which):
+    """How many drop-in files stand on the job's unit, as the user manager lists them over its bus (DropInPaths):
+    a number, or None when that could not be read. Only the count is kept: the files are the person's."""
+    unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+    obj = bus_json("call", SD_DEST, "/org/freedesktop/systemd1", SD_DEST + ".Manager", "LoadUnit", "s", unit)
+    if not (isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], str)):
+        return None
+    got = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Unit", "DropInPaths")
+    return len(got) if isinstance(got, list) else None
+
+
+def unit_type(which):
+    """The job's unit type as the user manager holds it (a drop-in may set it too): "oneshot", "simple", ..., or None
+    when that could not be read."""
+    unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+    obj = bus_json("call", SD_DEST, "/org/freedesktop/systemd1", SD_DEST + ".Manager", "LoadUnit", "s", unit)
+    if not (isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], str)):
+        return None
+    got = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Service", "Type")
+    return got if isinstance(got, str) else None
 
 
 def systemd_parsed(unit):
@@ -1041,18 +1146,26 @@ def launchd_parsed(label):
     `launchctl print` (seen 2026-11-25 on a Mac, macOS 27.2.1: one argument to a line after two tabs inside
     "arguments = {", as written, spaces, &, <, a quote and a backslash alike; each variable as "NAME => value" inside
     "environment = {", beside the "inherited environment" and "default environment" blocks, which are not the
-    job's); None when that could not be read, and "absent" when launchd has no such job."""
-    out = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"])
+    job's); None when that could not be read, and "absent" when launchd has no such job. A print with no arguments
+    block of that form (another macOS's) is None too: could not be read, never "differs" (the owner's ruling, 11-25).
+    The environment is None when no block of that form stands (seen only for a job that sets variables: whether
+    launchd prints one for a job that sets none is not seen), and service_read decides."""
+    try:
+        out = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return None
     if out.returncode == 113:                      # the family's rule 24: no such job
         return "absent"
     if out.returncode != 0:
         return None
-    lines, args, env, block = out.stdout.split("\n"), None, {}, None
+    lines, args, env, block = out.stdout.split("\n"), None, None, None
     for line in lines:
         if line in ("\targuments = {", "\tenvironment = {"):
             block = line[1:].split(" ")[0]
             if block == "arguments":
                 args = []
+            elif env is None:
+                env = {}
             continue
         if block and line == "\t}":
             block = None
@@ -1072,31 +1185,56 @@ def service_read(p, which):
     line" or "its arguments", "its WSM_HOME entry") for the forge's ('forge') or the sync's
     ('sync') job. answer: 'equal' when what the service manager parsed is, word for word, what setup wrote (its
     record, never this terminal's environment): the start line, and for each variable setup set exactly one entry
-    with its value; 'differs'; 'unread' when it, or what setup wrote, could not be read; 'absent' (a Mac) when
-    launchd holds no such job. An entry for a variable setup did not set is the person's own (a drop-in of theirs):
-    never a fault of ours, and only its name is kept (rule 31 (v.5) (3): it may hold a password)."""
+    with its value; 'differs'; 'unread' when what the manager holds could not be read; 'unrecorded' when setup's own
+    record of what it wrote is not there or not readable (the owner's ruling, 11-25: not a bus that did not answer);
+    'absent' (a Mac) when launchd holds no such job. An entry for a variable setup did not set is the person's own
+    (a drop-in of theirs):
+    never a fault of ours, and only its name is kept (rule 31 (v.5) (3): it may hold a password). So is a start line
+    of theirs on a one-shot unit beside ours, where ours is held once, as written, and first (the same rule, 4:22 PM
+    ET 11-25; what was seen on five systems is the ORDER IN THE LIST, ours first, and the 4:27 PM change: that the
+    manager runs them in that order is systemd's manual, not recorded by us, so no line says it); it is kept by its
+    count alone, a number at the end of the names (a start line can hold a secret as a value can)."""
     meant = read_meant(p, which)
     if system()[0] == "darwin":
         got = launchd_parsed(LAUNCHD_LABEL if which == "forge" else SYNC_LABEL)
         if got in (None, "absent"):
             return ("unread" if got is None else "absent"), [], []
         if meant is None:
-            return "unread", [], []
+            return "unrecorded", [], []
         args, env = got
+        if env is None:                 # no environment block of the seen form: another form where setup set some
+            if meant[1]:
+                return "unread", [], []
+            env = {}
         theirs = sorted(k for k in env if k not in meant[1] and k not in LAUNCHD_OWN_ENV)
         parts = (["its arguments"] if args != meant[0] else []) + [
             f"its {k} entry" for k, v in meant[1].items() if env.get(k) != v]
         return ("differs" if parts else "equal"), theirs, parts
+    if meant is None:
+        return "unrecorded", [], []
     got = systemd_parsed((SERVICE if which == "forge" else SYNC_UNIT) + ".service")
-    if got is None or meant is None:
+    if got is None:
         return "unread", [], []
     starts, entries = got
     pairs = [e.split("=", 1) if "=" in e else [e, None] for e in entries]
-    theirs = sorted({k for k, _ in pairs if k not in meant[1]})
-    parts = ["its start line"] if starts != [sd_parsed_form(meant[0])] else []
+    theirs, parts, ours = sorted({k for k, _ in pairs if k not in meant[1]}), [], sd_parsed_form(meant[0])
+    if starts != [ours]:
+        # Ours not held, held changed, held more than once or not first is a stop; a start line of theirs on a unit of
+        # another type is seen by no one, so it is a stop too (rule 31 (v.5) (3), its LIMIT): the forge's is written
+        # simple, and only the sync's, written one-shot and held so by the manager, may carry theirs.
+        typ = unit_type(which) if which == "sync" and starts[:1] == [ours] and starts.count(ours) == 1 else ""
+        if typ is None:                             # the type could not be read: a read that failed, never a fault
+            return "unread", [], []
+        if typ == "oneshot":
+            theirs.append(len(starts) - 1)
+        else:
+            parts.append("its start line")
     for name, want in meant[1].items():
         held = [v for k, v in pairs if k == name]
-        if held != [want]:          # the count where setup wrote one entry, and no more (never which one wins)
+        # the count where setup wrote one entry, and no more (never which one wins). More than one was produced by
+        # none of the five systemd versions the family tried (rule 31 (v.5) (3), 4:03 PM ET 11-25): a stop kept for
+        # a form not seen, said by its count; no promise leans on it.
+        if held != [want]:
             parts.append(f"its {name} entry" if len(held) == 1 else f"its {name} entry ({len(held)} found where "
                          "setup wrote one)")
     return ("differs" if parts else "equal"), theirs, parts
@@ -1107,33 +1245,84 @@ def service_read_back(p, which):
     return service_read(p, which)[0]
 
 
-def theirs_line(p):
+def theirs_line(p, reads=None):
     """The family's rule 31 (v.5) (3): environment entries the person set in the skill's services themselves, named
-    (never their values) as theirs, a warning: '' when there are none or nothing could be read."""
-    names = []
+    (never their values) as theirs, a warning: '' when there are none or nothing could be read. reads: service_read's
+    answers already read, by job, so nothing is read twice (the owner's ruling, 11-25)."""
+    names, starts = [], {}
     for which in ("forge", "sync"):
-        for n in service_read(p, which)[1]:
-            if n not in names:
+        for n in (reads[which] if reads else service_read(p, which))[1]:
+            if isinstance(n, int):
+                starts[which] = n
+            elif n not in names:
                 names.append(n)
-    if not names:
+    if not names and not starts:
         return ""
-    return (f"Your own setting is in the skill's service too, set by you, not by this tool: {shown_names(names)}. "
-            "It is left as it is; this tool reads only the values it set itself.")
+    said = []
+    if names:
+        said.append(f"Your own setting is in the skill's service too, set by you, not by this tool: "
+                    f"{shown_names(names)}. It is left as it is; this tool reads only the values it set itself.")
+    for which, n in starts.items():               # rule 31 (v.5) (3): by its count, never its words; the listing
+        unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+        it, is_ = ("them", "they are") if n != 1 else ("it", "it is")
+        said.append(f"{n} start line{'s' if n != 1 else ''} of your own {'are' if n != 1 else 'is'} in the {which}'s "
+                    f"service, set by you, not by this tool; {'they stand' if n != 1 else 'it stands'} after the "
+                    f"skill's own in systemd's list, and {is_} left as {is_}. To read {it}: systemctl --user cat {unit}")
+    return " ".join(said)          # a command, where one is given, stands last (rule 31 (v.5) (3))
 
 
-SETUP_READ_BACK_STEP = "Run uninstall, which takes its files away, and open an issue with this line"
-STATUS_READ_BACK_STEP = {
-    "differs": "run setup again, which writes it again and reads it back; if this line comes back, run uninstall and "
-               "open an issue with this line",
-    "unread": "run status from a terminal window of your own; if this line comes back there, open an issue with this "
-              "line"}
+COMES_BACK = ("if this line comes back after that, run uninstall, which takes its files away, and open an issue with "
+              "this line")
 
 
-def read_back_words(which, answer, then, step=SETUP_READ_BACK_STEP, parts=()):
+def read_back_step(which, answer, where="setup"):
+    """G1.24 (the owner's ruling, 11-25: nobody is sent to uninstall over their own setting, or over the moment's):
+    the one next step after read_back_words. First what may be the person's own or the moment's; uninstall and an
+    issue only if the line comes back after that."""
+    if answer == "unrecorded":
+        return "Run setup again, which writes that record again and reads the service back; " + COMES_BACK
+    if answer == "unread":
+        if system()[0] == "darwin":
+            # Seen on macOS 27.2.1 only (the owner's ruling, 11-25: the README says so): another macOS may print the
+            # job in a form not read here, so this answer may come back; never a road to uninstall.
+            first = ("Run status from a terminal window of your own" if where == "status" else
+                     "Run setup again in a minute")
+            return (f"{first}; if this line comes back, launchd's answer on this Mac may be in a form this tool does "
+                    "not read yet (it was seen on macOS 27.2.1): open an issue with this line and this Mac's version, "
+                    "which this prints: sw_vers -productVersion")
+        if where == "status":
+            return ("Run status from a terminal window of your own; if this line comes back there, open an issue "
+                    "with this line")
+        return ("Run setup again (setup twice is one setup: what was done is read back, never done twice); "
+                + COMES_BACK)
+    if system()[0] == "darwin":
+        return "Run setup again, which writes it again and reads it back; " + COMES_BACK
+    unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+    n = dropin_count(which)
+    if n:
+        # The family's rule 31 (v.5) (3), 4:03 PM ET 11-25: a drop-in that sets a variable the tool set, or a start
+        # line, is the person's own; what it holds is never said. Setup again would write the same file under the
+        # same drop-in, so the step is the manager's own listing, never uninstall or setup again.
+        return (f"{n} drop-in file{'s' if n != 1 else ''} stand{'s' if n == 1 else ''} on it beside the skill's own "
+                "file: a setting there is not this tool's, so it is left as it is. The one next step: read the "
+                "manager's own listing of it and its drop-ins, and take off by your own hand the setting that changes "
+                f"it: systemctl --user cat {unit}")
+    return ("A setting of your own that changes it comes off first, then run setup again; " + COMES_BACK
+            + f". Every file systemd read for it, yours too: systemctl --user cat {unit}")
+
+
+def not_set_up(answer):
+    """What status and the restart line say was done about a read-back that is not equal: a parse that could not be
+    read is never called not set up (the owner's ruling, 11-25), only not said to be."""
+    return "it is not said to be set up" if answer == "unread" else "it is not set up"
+
+
+def read_back_words(which, answer, then, step=None, parts=()):
     """What setup and status say when the read-back is not 'equal' (the family's rule 31 (v.5): THAT a value is not
     read as setup wrote it, never what it is read as instead, and no value the tool did not write: the parts are
     named, never their values). then: what was done about it ("it was not started"); step: the one next step, for
-    where it is said."""
+    where it is said (read_back_step's for setup when not given)."""
+    step = step if step is not None else read_back_step(which, answer)
     job = "the forge's service" if which == "forge" else "the sync's service"
     mgr = "launchd" if system()[0] == "darwin" else "systemd"
     if answer == "differs":
@@ -1141,6 +1330,8 @@ def read_back_words(which, answer, then, step=SETUP_READ_BACK_STEP, parts=()):
         verb = "are" if len(parts) > 1 or list(parts) == ["its arguments"] else "is"
         return (f"{mgr} does not hold {job} as setup wrote it: {named} {verb} not read as setup wrote it, so "
                 f"{then}. {step}")
+    if answer == "unrecorded":
+        return f"what setup wrote for {job} could not be read from setup's own record, so {then}. {step}"
     return f"whether {mgr} holds {job} as setup wrote it could not be read, so {then}. {step}"
 
 
@@ -1150,9 +1341,14 @@ def launchd_checked(p, which, label, out):
     back, _, parts = service_read(p, which)
     if back == "equal":
         return True, ""
-    run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"])
-    return False, read_back_words(which, "differs" if back == "differs" else "unread", "it was taken off again",
-                                  parts=parts)
+    back = back if back in ("differs", "unrecorded") else "unread"
+    answer, waited, code = launchd_off(p, label)        # G1.17: off by the one function, and read gone
+    if answer == "gone":
+        return False, read_back_words(which, back, "it was taken off again, and launchd reads it gone", parts=parts)
+    seen = (f"launchd still had it {waited:.0f} s later" if answer == "there" else
+            f"whether launchd let go of it could not be read (launchctl print answered code {code})")
+    again = "Run setup again in a minute, which takes it off first and reads it gone; " + COMES_BACK
+    return False, read_back_words(which, back, f"it was told to come off again, and {seen}", again, parts)
 
 
 def install_timer(p, minutes):
@@ -1525,7 +1721,11 @@ def launchd_load(p, label, plist):
 SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told it to stop
 # systemctl --user's words in a shell with no user bus: "Failed to connect to bus: No medium found" (systemd 255, a
 # stock Ubuntu 24.04, 2026-11-24) and "Failed to connect to user scope bus via local transport: ..." (systemd 262,
-# another skill's log the same day). "Failed to connect to", then "bus" in the same line.
+# another skill's log the same day). busctl's, recorded 2026-11-25 on Ubuntu 24.04, systemd 255.4, with
+# XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS set and no bus where it leads: "Failed to connect to bus: No such file
+# or directory", and "...: Connection refused" for an address that is not one. "Failed to connect to", then "bus" in
+# the same line. (With neither set, busctl says "Failed to set bus address: ...", read by bus_floor from the two
+# variables themselves, not from words.)
 NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
 SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
 
@@ -2947,9 +3147,9 @@ def restart_line(p, st):
     """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to.
     G1.24: "starts by itself" only when the service manager holds the forge's service word for word as written."""
     held, _, parts = service_read(p, "forge")
-    if held in ("differs", "unread"):
-        return "After a restart: " + read_back_words("forge", held, "it is not set up", STATUS_READ_BACK_STEP[held],
-                                                     parts)
+    if held in ("differs", "unread", "unrecorded"):
+        return "After a restart: " + read_back_words("forge", held, not_set_up(held),
+                                                     read_back_step("forge", held, "status"), parts)
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
         return "After a restart it starts by itself." if back else f"After a restart: {note}"
@@ -3587,6 +3787,10 @@ def cmd_setup(args):
     if floor:
         say(floor + " Setup made nothing.")
         return 2
+    bus = bus_floor(p)                              # G1.24: the read-back's road, before the first write
+    if bus:
+        say(bus)
+        return 2
     other = other_install_stop(p, "setup") or home_is_not_ours(p)
     if other:
         say(other)
@@ -3723,8 +3927,10 @@ def cmd_setup(args):
     if timer_why:                                   # G1.17: the forge's own line stands; the sync's is its own
         ok = False
         say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
-    elif ok and theirs_line(p):                     # G1.24: a person's own entry is theirs, a warning
-        say(theirs_line(p))
+    elif ok:                                        # G1.24: a person's own entry is theirs, a warning
+        warn = theirs_line(p)                       # read once, and what is said is what was read
+        if warn:
+            say(warn)
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -4004,12 +4210,14 @@ def cmd_status(args):
                         f"a program answers on port {st['port']} at {a}; whether it is this mirror's forge could not "
                         "be read")
     if not no_screen:                               # G1.24: what the manager parsed, read now
-        for which in ("forge", "sync"):
-            held, _, parts = service_read(p, which)
-            if held in ("differs", "unread"):
-                problems.append(read_back_words(which, held, "it is not set up", STATUS_READ_BACK_STEP[held], parts))
-        if theirs_line(p):
-            notes.append("note: " + theirs_line(p))
+        reads = {which: service_read(p, which) for which in ("forge", "sync")}     # each read once
+        for which, (held, _, parts) in reads.items():
+            if held in ("differs", "unread", "unrecorded"):
+                problems.append(read_back_words(which, held, not_set_up(held), read_back_step(which, held, "status"),
+                                                parts))
+        warn = theirs_line(p, reads)
+        if warn:
+            notes.append("note: " + warn)
     when, tproblem = next_sync()
     if tproblem:
         problems.append(tproblem + (": this account is not logged in at this Mac's screen" if no_screen else ""))
