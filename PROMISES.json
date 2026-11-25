@@ -1770,6 +1770,22 @@
    "moved_why": "",
    "seen": "2026-11-24, read in 0.1.0's tests: both gates that ask whether a row is proven, the one before a tag for a row whose test leans on a stand-in and the one after a release, count a row proven when its proven line holds anything at all. Proven lines due in 0.1.0 already say of themselves that part was not seen (one names four things not seen on a Mac; one says a case of its promise was not met; others say what was steered or injected), and neither gate reads that. Not seen: a version that went out on such a line.",
    "promise": "A row may carry a field of its own, proof_owed: words that say what is still to be seen on a real machine; absent, empty or only spaces means nothing is owed. Every gate that asks whether a row is proven counts it proven only when its proven line is not empty and its proof_owed holds nothing, and its message names what is owed; it is never decided by words found in the proven line. One function decides, and both gates and their test call it. The test reads the file's own rows first (every row that owes is refused, read as a version after all of them), then rows it makes itself: owed with a proven line (refused, the message carries what is owed); owed with no proven line (refused); no field but the words not proven yet inside the proven line (passes); an empty field; a field of spaces; a row that ships in the version itself (not looked at). Seen red first on a real row that owes, with the old rule. A proven line written while part is unseen says what was seen, and the rest goes into proof_owed in the same commit; the field is emptied in the commit that adds the rest. A part no machine of ours can show stays in the line as not seen, with why and the date it was last checked, and takes the maintainer's word, never the field."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#144",
+   "id": "M118",
+   "codon": "G6.16",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "systemctl's answers for the sync timer held as a test sets them: active with no next run, and the files that set it",
+   "moved_why": "",
+   "seen": "2026-11-24, a stock Ubuntu 24.04.5 virtual machine, systemd 255, the tool at 2be8759 (mirror.py sha256 5bfed5c59a538ef6), no key: with a drop-in on the sync timer that took every trigger away but a calendar time in the past, systemd read the timer active, elapsed, with no next run, and status said: \"problem: the sync timer is on but has no next run (after a restart, check it with: systemctl --user list-timers)\", exit 1. Its one step only reads, and \"after a restart\" does not say of what. In that state a file that is not the tool's sets the timer, and neither a restart nor a second setup would change it. Seen once, the state made by hand.",
+   "promise": "Status's line for a sync timer that is on with no next run names what was read (the timer active, no next run given by systemd), a step that can change it, and what the person does when the same line comes back: where a file that is not the tool's sets the timer, the line names that file or gives the one read that shows every file setting it (systemctl --user cat on the timer, on a line of its own), and never a restart or a setup that would not change it. Proven by a test world for each: the tool's own timer with no next run, and a drop-in that is not the tool's; the step taken as printed, twice."
   }
  ],
  "declined": []

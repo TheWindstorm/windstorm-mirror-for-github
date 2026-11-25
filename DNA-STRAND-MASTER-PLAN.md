@@ -223,6 +223,7 @@ reaches several owners, and a classic key that can read private repositories can
 | G6.13 | Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write | `test_G6_13_a_command_for_the_person_stands_alone_on_its_line` *(to build)* |
 | G6.14 | A value the tool did not write passes through one helper on its way into a sentence: holding a backtick or a dollar-parenthesis, it is shown changed and the line says so; a command that must carry it exactly stands alone on its line, quoted for the shell | `test_G6_14_a_value_the_tool_did_not_write_is_never_printed_in_a_form_a_shell_runs` *(to build)* |
 | G6.15 | Status's line for a copy it could not read from a forge that answers says why, in git's own first line, and ends with one step: for a git setting git cannot read, the sync's own command on its own line; otherwise what the person can do, or show the line and report it | `test_G6_15_a_copy_status_cannot_read_from_the_forge_says_why_and_its_step` *(to build)* |
+| G6.16 | Status's line for a sync timer on with no next run names what was read, a step that can change it, and what to do when it comes back; where a file not the tool's sets the timer, it names the read that shows every such file | `test_G6_16_a_timer_with_no_next_run_says_what_was_read_and_a_step_that_changes_it` *(to build)* |
 
 ### G7 Restore
 
