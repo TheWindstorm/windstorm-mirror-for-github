@@ -6666,6 +6666,10 @@ class G9(unittest.TestCase):
             self.assertIn(f"  {lone}: the copy of the script setup was run from. It is yours; delete it when you want.", out)
             self.assertNotIn("the folder the skill was downloaded into", out)
             # The record deleted with the copies: what was downloaded is still named, with no place to guess at.
+            # The forge is stopped first: the stand-in service manager does not stop it on uninstall's disable --now
+            # (systemd does), and a folder removed under a running forge races its writes (seen once in CI).
+            stop_forge(w.home)
+            self.assertEqual([pr.poll() is None for pr in w.home.procs if pr.poll() is None], [])
             shutil.rmtree(p["data"])
             out = quiet(mirror.main, ["uninstall"])[1]
             self.assertIn("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
