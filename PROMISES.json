@@ -1753,6 +1753,22 @@
    "moved_why": "",
    "seen": "2026-11-24, seen in a test world while building 0.1.0's status-road test (git 2.43, Linux): with a line git cannot read (\"[url\" alone) still in ~/.gitconfig when status runs, status's own read of the copy from the forge fails, and its line reads only \"<owner>/<repository>: its copy could not be read from the forge\", with no reason, no step and no command; that test takes the setting out before status for this reason. Read in the code: any failed read of a copy gives this same line. When the forge does not answer at all, the forge's own line above it carries a step; when the forge refuses for a reason status knows, that reason's line stands instead of it. Not seen: this on a real computer.",
    "promise": "Status's line for a copy it could not read from a forge that answers says why, in git's own first line passed through the helper of M115, and ends with one step: for a git setting git cannot read, the same command on its own line that the sync's stop gives (git config --global --list); for any other reason, what the person can do, or, where the tool knows of nothing, show the line and report it at the issues link. Proven by a test world for each: the setting left in place while status runs, and a forge that refuses the read while it answers otherwise; both lines read whole."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#143",
+   "id": "M117",
+   "codon": "T7",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "none",
+   "moved_why": "",
+   "seen": "2026-11-24, read in 0.1.0's tests: both gates that ask whether a row is proven, the one before a tag for a row whose test leans on a stand-in and the one after a release, count a row proven when its proven line holds anything at all. Proven lines due in 0.1.0 already say of themselves that part was not seen (one names four things not seen on a Mac; one says a case of its promise was not met; others say what was steered or injected), and neither gate reads that. Not seen: a version that went out on such a line.",
+   "promise": "A row may carry a field of its own, proof_owed: words that say what is still to be seen on a real machine; absent, empty or only spaces means nothing is owed. Every gate that asks whether a row is proven counts it proven only when its proven line is not empty and its proof_owed holds nothing, and its message names what is owed; it is never decided by words found in the proven line. One function decides, and both gates and their test call it. The test reads the file's own rows first (every row that owes is refused, read as a version after all of them), then rows it makes itself: owed with a proven line (refused, the message carries what is owed); owed with no proven line (refused); no field but the words not proven yet inside the proven line (passes); an empty field; a field of spaces; a row that ships in the version itself (not looked at). Seen red first on a real row that owes, with the old rule. A proven line written while part is unseen says what was seen, and the rest goes into proof_owed in the same commit; the field is emptied in the commit that adds the rest. A part no machine of ours can show stays in the line as not seen, with why and the date it was last checked, and takes the maintainer's word, never the field."
   }
  ],
  "declined": []
