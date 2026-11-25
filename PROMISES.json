@@ -1720,7 +1720,7 @@
    "test": "",
    "stand_in": "none",
    "moved_why": "",
-   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: some commands the person or their administrator is asked to run are written inside a sentence, not on a line of their own: the lingering line, sudo loginctl enable-linger <user> (three places); the install lines for git and git lfs (sudo apt update && sudo apt install git, the same for git-lfs, and sudo dnf install for Fedora); chmod go-w <path> and chmod g-w <path> (five places); loginctl disable-linger <user>; uninstall --delete-copies (two places). None carries a backtick or a dollar-parenthesis, so nothing runs them when such a line is quoted. In 0.1.0 the commands that were set between backticks were taken out of them, and the whole ones (the two git config lines, Claude Code's plugin uninstall) stand on a line of their own. The sync that the timer starts prints its lines to its standard output: on Linux the unit names no other place for them, so they reach the journal, one entry per line; on a Mac launchd writes them to the forge's log/sync.log. Read in the code, not seen: whether the journal keeps a command's leading spaces, and whether its entry stands next to the reason that ends with a colon; a Mac's sync.log: not seen.",
+   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: some commands the person or their administrator is asked to run are written inside a sentence, not on a line of their own: the lingering line, sudo loginctl enable-linger <user> (three places); the install lines for git and git lfs (sudo apt update && sudo apt install git, the same for git-lfs, and sudo dnf install for Fedora); chmod go-w <path> and chmod g-w <path> (five places); loginctl disable-linger <user>; uninstall --delete-copies (two places). None carries a backtick or a dollar-parenthesis, so nothing runs them when such a line is quoted. In 0.1.0 the commands that were set between backticks were taken out of them, and the whole ones (the two git config lines, Claude Code's plugin uninstall) stand on a line of their own. The sync that the timer starts prints its lines to its standard output: on Linux the unit names no other place for them, so they reach the journal, one entry per line; on a Mac launchd writes them to the forge's log/sync.log. Read in the code, not seen: whether the journal keeps a command's leading spaces, and whether its entry stands next to the reason that ends with a colon; a Mac's sync.log: not seen. 2026-11-25, read in the change for codon G6.12 that names a copy of the tool that is there (issue #172, before 0.1.0's tag): uninstall's Kept line, once the skill's own copy is gone and the copy that runs is read there, carries the command python3 -I <the copy that runs> uninstall --delete-copies inside its sentence, with the words that follow it on the same line.",
    "promise": "Every command the tool prints for a person to type stands alone on a line of its own, quoted for the shell where it carries a value the tool did not write. A test reads every line the tool can print and fails on a command for the person written inside a sentence."
   },
   {
@@ -1736,7 +1736,7 @@
    "test": "",
    "stand_in": "a stand-in GitHub whose branch and tag names hold a backtick pair and a dollar-parenthesis",
    "moved_why": "",
-   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: values the tool prints but did not write, and who can choose each: branch and tag names, by anyone who can push to the repository on GitHub (sync's kept line, restore --check's difference line), where git allows a backtick pair and a dollar-parenthesis; git's, Gitea's and the service manager's own error words, which can echo such a name, a URL or a path; a URL from the person's git settings; paths, including the names of files someone else made in a folder the tool names; account and group names on the computer; the address and project named for restore --to; GitHub's owner and repository names, where by GitHub's naming rules as we know them neither form fits (not tried). 0.1.0 sets none of them between backticks, and none of the tool's own printed strings carries either form.",
+   "seen": "2026-11-24, read in 0.1.0's mirror.py before the tag: values the tool prints but did not write, and who can choose each: branch and tag names, by anyone who can push to the repository on GitHub (sync's kept line, restore --check's difference line), where git allows a backtick pair and a dollar-parenthesis; git's, Gitea's and the service manager's own error words, which can echo such a name, a URL or a path; a URL from the person's git settings; paths, including the names of files someone else made in a folder the tool names; account and group names on the computer; the address and project named for restore --to; GitHub's owner and repository names, where by GitHub's naming rules as we know them neither form fits (not tried). 0.1.0 sets none of them between backticks, and none of the tool's own printed strings carries either form. 2026-11-25, read in the same change for codon G6.12 (issue #172): the path of the copy of the tool that runs (a clone or the plugin's folder, in a place the person chose) is printed, quoted for the shell, in the commands uninstall prints once the skill's own copy is gone; that path is a value the tool did not write.",
    "promise": "One helper that every value the tool did not write passes through on its way into a sentence. A value that holds a backtick or a dollar-parenthesis is shown changed, and the line says it is shown changed. Where a command must carry the value exactly, it stands alone on its line, quoted for the shell, unchanged. Only the two forms; nothing stored or pushed is changed, only what is printed. One test world: a branch and a tag whose names hold both forms (sync's kept line, restore --check's difference line), and a failing fetch whose git error echoes such a name."
   },
   {
@@ -1866,6 +1866,54 @@
    "moved_why": "",
    "seen": "2026-11-25, with the stand-in GitHub only. In a reviewer's world on 0.1.0's head be04251: a project whose GitHub branches include kept/foo was copied whole the first time; at the next sync and every one after, the sync exited 1, 'error: dst ref refs/heads/kept/foo receives from more than one src' (the forge keeps the tool's own kept refs under refs/heads/kept/, and GitHub's own branch maps to the same name), and the copy stood still; nothing was seen deleted or moved wrongly. On the head with row M123's guard and rows M125 and M126: restore --check called kept/foo and kept/2020-01-01/old 'missing in the copy' though the forge held both, and restore --to exited 0 and brought back main and the tag without the two kept/ branches, and without saying so.",
    "promise": "A branch on GitHub whose name begins with kept/ is copied, followed at every sync, counted by status and restore --check, and brought back by restore --to like any other branch, and is never mistaken for one of the tool's own kept refs, nor they for it. Until then the README names it as a known edge, in only the words seen. Proven by test worlds with such branches (a plain one and one shaped like kept/<date>/<name>) beside a control: a first copy, later syncs with a change on GitHub, status, restore --check and restore --to, each read whole."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#173",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "moved_why": "",
+   "id": "M145",
+   "codon": "G1.16",
+   "stand_in": "a Mac's launchctl (a stand-in's answers for the account's own domain: 0, 125, and another code that is not 0)",
+   "seen": "2026-11-25, read in the change for codon G1.16 that names a step that works with no session at the Mac's screen (issue #171, before 0.1.0's tag): setup says that this account is not logged in at the Mac's screen (row M58) on any answer of launchctl print gui/<uid> other than 0, while status and setup --dry-run say it only on the answer 125, the one seen (2026-11-24 on macOS 13.7.8, 2026-11-25 on macOS 27.2.1). A read of the domain that fails with another code is read as no session by setup and not by status or the dry run. Not seen on a Mac: no other code has been seen.",
+   "promise": "One reading of the answer of launchctl print gui/<uid>, in one place, used by setup, status and the dry run alike: the account has no session at the Mac's screen only on the answer 125; any other answer that is not 0 is said as what it is, a read that failed, with launchctl's code, never taken for no session. Proven by one test with a stand-in launchctl that answers 0, 125 and another code for the account's domain, reading setup's, status's and the dry run's lines for each."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#174",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "moved_why": "",
+   "id": "M146",
+   "codon": "G9.12",
+   "stand_in": "two homes in one test world, the other home's own copy of the tool taken away",
+   "seen": "2026-11-25, read in the change for codon G6.12 (issue #172, before 0.1.0's tag): setup and uninstall stop against another home's install and print one step to run as printed, with that home's copy of the tool (own_command for that home); once that home's own copy is gone, the step names the copy that runs instead. No test runs that step with the other home's own copy gone, so whether it runs as printed there is read in the code only.",
+   "promise": "The step setup and uninstall print when this computer's install uses another home runs as printed in every state of that home's own copy: there, and gone. Proven by one test that runs the printed step in a world of two homes, with the other home's own copy there and with it taken away."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#175",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "moved_why": "",
+   "id": "M147",
+   "codon": "G7.3",
+   "stand_in": "the tests' stand-in GitHub, which is never asked or written by a refused restore",
+   "seen": "2026-11-25, read in the code of 0.1.0's release head 922d6b9 (restore_to): restore --to takes an address as GitHub's when its host is github.com or ends in .github.com, or when github.com appears anywhere in it, so the ssh:// form (ssh://git@github.com/<owner>/<name>.git) is refused with the words that this skill never writes to GitHub and the one push --mirror line, as the other forms are. The suite gives restore --to the stand-in's own address, the https form and the scp form (git@github.com:<owner>/<name>.git), each refused with exit 2 and the stand-in GitHub not asked; it gives no ssh:// form, so that form's refusal, which the promise that the skill never writes to GitHub leans on, is read in the code only.",
+   "promise": "restore --to refuses every common form of a GitHub address, the ssh:// form among them, with exit 2, the words that this skill never writes to GitHub and the one line to put the project back there by hand, and asks and writes nothing on GitHub. Proven by one more value, an ssh:// address, in the test world that gives restore --to the other forms."
   }
  ],
  "declined": []
