@@ -2074,6 +2074,22 @@
    "moved_why": "",
    "seen": "2026-11-25, in a reviewer's world 16, with the stand-in GitHub only, on 0.1.0's mirror.py 903750f3 and on the head with row M123's guard and rows M125, M126 and M128 (04f61830): GitHub held kept/foo in one project and kept/2020-01-01/old in another, a control beside them. After a new commit on GitHub's main, every sync exited 1 for both projects (7 runs of 7), and the copy's main was not GitHub's main; the control followed. The sync right after the first copy, with nothing changed on GitHub, exited 1 in some runs and 0 in others, by timing. The line a person read was git's own 'dst ref ... receives from more than one src', with no next step.",
    "promise": "When GitHub holds a branch named kept/... and the copy in the forge already holds that name, the sync's line for that project says so in plain words, before anything is pushed: GitHub holds such a branch (by name: a count and the first five), the name this version gives the copy's own kept refs, so this version copies such a project once and cannot refresh it; nothing in its copy was changed; and the one next step, to give that branch another name on GitHub. Status's line for it carries the same words. Copying such a branch like any other is row M127, due 0.1.1. Proven by one test: two such projects (a plain kept/ name and one shaped like a kept ref) and a control; a first copy, a change on GitHub, two syncs, each exit 1 with these words for both and no git refusal, neither copy moved, the control following; status read; then the next step taken (the branch renamed on GitHub) and the next sync good. Red on the head before this row."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#158",
+   "id": "M130",
+   "codon": "T8",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_T8_every_row_number_a_text_names_is_a_row",
+   "stand_in": "none",
+   "moved_why": "",
+   "seen": "2026-11-25, in a reviewer's read of 0.1.0's head before the tag: the plan, the rows and scripts/mirror.py named rows M124 and M127, and neither was a row in this tree's PROMISES.json; both stood only on the branch that holds the rows due later.",
+   "promise": "Every row number this tree's README, plan, rows, scripts or tests name is a row in this same tree's PROMISES.json (the family's rule 34). Proven by one test that reads every text file of the tree and fails on a row number the file does not hold; each run it first proves its reader catches a planted number. Red on the head before the rows commit (M124 and M127)."
   }
  ],
  "declined": []

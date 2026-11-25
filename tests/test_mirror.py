@@ -7632,6 +7632,16 @@ def git_commit_of(root):
     return commit_of
 
 
+def rows_not_here(texts, ids):
+    """Each row number (M and digits, standing alone) that a text names and `ids` does not hold: [(number, where)]."""
+    out = []
+    for name in sorted(texts):
+        for m in re.finditer(r"(?<![A-Za-z0-9_])M(\d+)(?![A-Za-z0-9_])", texts[name]):
+            if "M" + m.group(1) not in ids:
+                out.append(("M" + m.group(1), f"{name}:{texts[name].count(chr(10), 0, m.start()) + 1}"))
+    return out
+
+
 def to_build_wrong(plan, rows, ver):
     """Each proof the plan marks *(to build)* that may not stand at version `ver` (the maintainer's ruling,
     2026-11-23): before the first release any may; after it, only one whose codon has a row due in a later version
@@ -7874,6 +7884,28 @@ class Strand(unittest.TestCase):
                          "a proof marked 'to build' after the first release needs its codon's row due later")
         self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
         self.assertEqual(codon_tests - named, set(), "tests with no codon in the plan")
+
+    def test_T8_every_row_number_a_text_names_is_a_row(self):
+        """The family's rule 34 (2026-11-25, M130): every row number this tree's README, plan, rows, scripts or tests
+        name is a row in this same tree's PROMISES.json (seen: M124 and M127 named here, and their rows only on the
+        rows branch). Seen red first on a planted number, here, every run."""
+        ids = {r["id"] for r in jload(os.path.join(ROOT, "PROMISES.json"))["rows"]}
+        planted = "M" + str(10 ** 6)                          # built here, so this file names no such row
+        self.assertEqual(rows_not_here({"planted.md": f"as row {planted} says; rows M93-M98"}, {"M93", "M98"}),
+                         [(planted, "planted.md:1")], "the reader misses a planted number")
+        texts = {}
+        for top, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for f in files:
+                path = os.path.join(top, f)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        texts[os.path.relpath(path, ROOT)] = fh.read()
+                except (UnicodeDecodeError, OSError):
+                    continue                                  # not a text (an image, a binary)
+        self.assertIn("README.md", texts)
+        self.assertIn(os.path.join("scripts", "mirror.py"), texts)
+        self.assertEqual(rows_not_here(texts, ids), [], "a text names a row this tree's PROMISES.json does not hold")
 
     def test_T3_a_commits_checks_run_once(self):
         """M43 (the family's rule 17, 2026-11-23): one stack of pull requests queued 17 runs, each commit twice,
