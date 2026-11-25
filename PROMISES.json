@@ -1818,6 +1818,22 @@
    "moved_why": "",
    "seen": "2026-11-24, by the family's reviewer, on 0.1.0's head 50925aa, with the stand-in GitHub only: a project whose name in GitHub's JSON holds a lone surrogate (U+D83D, half of an emoji's pair, sent as a backslash-u escape) ended sync --announce and go in a traceback (UnicodeEncodeError) where the list of projects for the first copy is written, so the first copy started for no project. Not seen: GitHub sending such a name; GitHub's own rule for a repository's name keeps it out as far as known (not tried).",
    "promise": "A value from outside the tool that a file or a program cannot take never ends a run for the other projects: a lone surrogate from GitHub's JSON, and a byte that is not UTF-8 from a file's name (kept as U+DC80 to U+DCFF). The project is named with why, counted, and left out of that run, and every other project goes on. Each such value is followed to every place it leaves the tool (a file written, an argument or an environment value handed to git), each planted beside a control with a plain name in the same place, and every road where it leaves is read whole."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#149",
+   "id": "M122",
+   "codon": "G7.6",
+   "first_ship_in": "0.1.1",
+   "ship_in": "0.1.1",
+   "test": "",
+   "stand_in": "test worlds: a stand-in GitHub whose projects hold branch and tag names the copy leaves out (bytes that are not UTF-8), and the real pinned forge",
+   "moved_why": "",
+   "seen": "2026-11-24, by the family's reviewer, on 0.1.0's head 6aa0d67, with the stand-in GitHub only: restore --to of a project that has 10 branches and tags on GitHub, 7 of them names the copy leaves out, printed 'restored someone/aa: 2 branch(es) and 1 tag(s)' and nothing more. Each sync, status and restore --check do name what was left out. Not seen: a restore --to from a copy without its large files (LFS_NOT_IN_COPY), the other kind of limit.",
+   "promise": "restore --to names, in its last lines, what the copy it restored from lacks: the branch and tag names the copy never held (counted, and named as the sync names them), and large files left out of the copy. A person who restores after GitHub is gone learns at that moment what is not in the new home. It says it; it refuses nothing, and its exit stays what the push gave. Proven by a test world with left-out names and a control without them, restore --to run on each, its whole output read; and a world whose copy is without its large files."
   }
  ],
  "declined": []
