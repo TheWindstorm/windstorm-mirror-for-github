@@ -4340,6 +4340,13 @@ def bare_home(root, name, with_commit=False):
     return path
 
 
+def git_all_refs(path):
+    """Every ref a bare folder holds, as git holds it: {name: commit or tag object}."""
+    out = subprocess.run(["git", "--git-dir", path, "for-each-ref", "--format=%(objectname) %(refname)"],
+                         capture_output=True, text=True, check=True).stdout
+    return dict(reversed(l.split(" ", 1)) for l in out.splitlines())
+
+
 def lsremote(path):
     out = subprocess.run(["git", "ls-remote", path], capture_output=True, text=True).stdout
     return {r: s for s, r in (l.split("\t") for l in out.splitlines()) if r.startswith(("refs/heads/", "refs/tags/"))}
@@ -4471,7 +4478,7 @@ class G7(unittest.TestCase):
                 rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
                 self.assertEqual(rc, 2, url)
                 self.assertIn("This skill never writes to GitHub", out)
-                self.assertIn("git push --mirror", out)
+                self.assertIn(" push --mirror ", out)                       # the line itself: G7.8
             self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
             self.assertEqual(w.gh.writes(), [])
             if mirror.has_git_lfs():
@@ -4567,6 +4574,84 @@ class G7(unittest.TestCase):
             self.assertNotIn("not in the new home", out)
             self.assertNotIn("  git ", out)
             self.assertEqual(lsremote(home), w.gh_refs("someone/beta"))
+
+    def test_G7_8_the_line_to_put_a_copy_back_on_github_runs_as_printed(self):
+        """M132 (a reviewer's read, 2026-11-25): restore --to refuses GitHub and said how to do it yourself with a
+        clone over the forge's address, which asks for a login the text never names, and "cd <that folder>". Now it
+        gives one line that runs as printed: git pushes the copy as a mirror from the copy's own folder in the forge
+        (on this computer, no login there) to the new, empty GitHub repository, each part through shlex.quote. It
+        sends what the old pair would have sent. Run here against a local bare folder standing in for the new home,
+        through git's own insteadOf, with no call to GitHub."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.git("someone/alpha", "tag", "v1", one)
+            w.gh.git("someone/alpha", "-c", "user.email=a@example.invalid", "-c", "user.name=a",
+                     "tag", "-a", "-m", "a note", "v2", one)
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "branch", "topic", one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.gh.git("someone/alpha", "update-ref", "refs/heads/main", one)   # main moved back: its old commit kept
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2002-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            held = git_all_refs(folder)
+            self.assertTrue([r for r in held if r.startswith("refs/heads/kept/")], held)   # the premise: kept refs
+            url = "https://github.com/someone/new.git"
+            n = len(w.gh.log)
+            rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+            self.assertEqual(rc, 2, out)
+            self.assertIn("This skill never writes to GitHub", out)
+            self.assertIn("make a new, empty repository there", out)
+            lines = [l for l in out.splitlines() if l.startswith("  ")]
+            self.assertEqual(lines, [f"  git --git-dir {shlex.quote(folder)} push --mirror {shlex.quote(url)}"], out)
+            self.assertNotIn("<", out)                                 # nothing for the person to fill in
+            self.assertNotIn("clone", out)
+            # Run as printed, in an empty folder, nothing added but git's own address rewrite to the stand-in home.
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "new")
+            here = tempfile.mkdtemp(prefix="wsm-shell-")
+            TEMPS.append(here)
+            road = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0=f"url.{home}.insteadOf", GIT_CONFIG_VALUE_0=url)
+            r = subprocess.run(["bash", "-c", lines[0].strip()], cwd=here, capture_output=True, text=True, env=road,
+                               stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.listdir(here), [])
+            self.assertEqual(git_all_refs(folder), held, "the line changed the copy")
+            self.assertEqual(git_all_refs(home), held)
+            # What the old pair would have sent: a mirror clone over the forge's address (with the tool's own login
+            # here, which a person did not have), then a mirror push into a second empty home.
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            old = os.path.join(root, "old.git")
+            subprocess.run(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "clone", "-q",
+                            "--mirror", f"http://127.0.0.1:{w.port}/mirror/someone--alpha.git", old],
+                           check=True, capture_output=True, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+            home2 = bare_home(root, "new2")
+            subprocess.run(["git", "--git-dir", old, "push", "-q", "--mirror", home2], check=True, capture_output=True)
+            self.assertEqual(git_all_refs(home), git_all_refs(home2))
+            self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
+            self.assertEqual(w.gh.writes(), [])
+            # No copy, or a folder this tool does not print as it is: no line, and what to do.
+            for repo, words in (("someone/nothere", "could not be found"),):
+                rc, out = quiet(mirror.main, ["restore", "--to", url, repo])
+                self.assertEqual(rc, 2, out)
+                self.assertIn(words, out)
+                self.assertNotIn("  git ", out)
+            real = mirror.forge_folder
+            mirror.forge_folder = lambda p, forge, name: folder + "$(id>m4)"
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+            finally:
+                mirror.forge_folder = real
+            self.assertEqual(rc, 2, out)
+            self.assertIn("does not print as it is", out)
+            self.assertNotIn("  git ", out)
+            self.assertNotIn("$(", out)
 
     def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):
         with World(self) as w:

@@ -3798,10 +3798,22 @@ def restore_to(p, st, forge, url, repository):
     low = url.lower()
     host = (urllib.parse.urlsplit(url).hostname or re.sub(r"^[^@]*@([^:/]+).*$", r"\1", url)).lower()
     if any(h == host or host.endswith("." + h) for h in github_hosts()) or "github.com" in low:
+        # M132: one line a person runs as it is printed: the copy's own folder in the forge is on this computer, so
+        # git needs no login to the forge; each part through shlex.quote, and none from a name it does not print.
+        folder = forge_folder(p, forge, copy_name(repository)) if "/" in repository else ""
+        if not folder or not shows_as_is(folder):
+            say("This skill never writes to GitHub, so it will not restore there. "
+                + ("The copy's own folder in your forge could not be found" if not folder else
+                   "The copy's folder holds a character this tool does not print as it is")
+                + ", so no line is given to put it back there yourself. Run status to see the copies the forge holds, "
+                  "and name one of them as owner/name.")
+            return 2
         say("This skill never writes to GitHub, so it will not restore there. To put this project back on GitHub "
-            "yourself, clone it from your forge and push it with your own login:")
-        say(f"  git clone --mirror http://127.0.0.1:{st['port']}/{forge.user}/{copy_name(repository)}.git")
-        say("  cd <that folder> and run: git push --mirror <the new, empty GitHub repository>")
+            "yourself, make a new, empty repository there, then run this line in a terminal:")
+        say(f"  git --git-dir {shlex.quote(folder)} push --mirror {shlex.quote(url)}")
+        say("Run it as it stands: it sends every branch and tag of the copy, with its kept refs, from the copy's own "
+            "folder in your forge to the new repository, with your own login to GitHub, and changes nothing in the "
+            "copy.")
         return 2
     rec = next((r for r in (st.get("repos") or {}).values()
                 if (r.get("full_name") or "").lower() == repository.lower()
