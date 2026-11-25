@@ -2961,6 +2961,28 @@ class G3(unittest.TestCase):
             rc, out, ls = run_(w)
             self.assertEqual(rc, 0, out)
             self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+        # 9. A GitHub branch named kept/...: the read-back leaves refs/heads/kept/ out on both sides, so the first copy
+        # is whole and not called wrong (the name is checked in the cache against GitHub's list). Its later syncs are
+        # row M127's, due 0.1.1.
+        with World(self) as w:
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit("someone/" + n, {"a": b"1"})
+            w.gh.git("someone/aa", "branch", "kept/2020-01-01/old", "main")
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            rc, out = w.sync()                                       # the first copy
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("not what GitHub lists", out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+            self.assertEqual(w.forge_refs("someone--aa").get("refs/heads/kept/2020-01-01/old"),
+                             w.gh_refs("someone/aa")["refs/heads/main"])
+            st = mirror.load_json(w.p["state"], {})["repos"]
+            aa = next(r for r in st.values() if r.get("full_name") == "someone/aa")
+            self.assertEqual(aa.get("problem"), "", aa)
+            self.assertIn("refs/heads/kept/2020-01-01/old", aa["refs"])
 
 
 class G2Sync(unittest.TestCase):
@@ -3109,6 +3131,25 @@ class G4(unittest.TestCase):
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+        # The list quick and the fetch slow: the fetch's own words, tried exactly twice, and the rest copied.
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            put_settings(w.p, git_timeout_s=2)
+            w.gh.slow_fetch["someone/alpha"] = 5
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 1, out)
+            slow = "the fetch from GitHub took longer than 2 s, and so did the retry"
+            self.assertIn("problem: someone/alpha: " + slow, out)
+            self.assertNotIn("could not be read", out)
+            self.assertIn("2 on GitHub, 1 copied now", out)
+            self.assertEqual(w.gh.fetches.count("someone/alpha"), 2, "the slow fetch was not tried exactly twice")
+            self.assertEqual(w.forge_refs("someone--beta"), w.gh_refs("someone/beta"))
+            st = mirror.load_json(w.p["state"], {})
+            alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
+            self.assertEqual(alpha["problem"], "cannot refresh: " + slow)
 
     def test_G4_3_one_sync_at_a_time(self):
         with Home() as h:

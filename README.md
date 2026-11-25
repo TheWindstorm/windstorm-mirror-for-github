@@ -238,6 +238,10 @@ with no key; a sync and a restore on a Mac are not seen yet.
     git's own words; its copy stays as it was; the other projects are copied. Seen with a stand-in for GitHub on
     macOS 27.2.1 (before this release's guard, the case pair gave a copy called whole that held Feature at
     feature's commit and no feature); not seen with GitHub itself;
+  - a project whose branches on GitHub include one named `kept/...` is copied once. From the next sync on, git
+    refuses the push (two sources for one name), so each sync names that project as a problem and its copy stays as
+    it was. `restore --check` calls such names missing though the copy holds them, and `restore --to` brings the
+    project back without them, and without saying so. Seen with a stand-in for GitHub;
   - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
     the copy could not be read;
   - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were

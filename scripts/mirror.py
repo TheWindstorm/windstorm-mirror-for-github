@@ -2390,8 +2390,10 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     back = forge_refs_of(forge, check["name"])                    # M123: the copy is the forge; read it back
     if back is None:
         return "what the copy holds after the push could not be read from the forge, so it is not called whole"
+    # Both sides leave out refs/heads/kept/: in the forge that is where the tool's own kept refs live, so a GitHub
+    # branch named kept/... is checked in the cache (against GitHub's list, above), not here.
     back = {written(r): s for r, s in back.items() if not r.startswith("refs/heads/kept/")}
-    want = {r: s for r, s in seen.items() if not written_not_text(r)}
+    want = {r: s for r, s in seen.items() if not written_not_text(r) and not r.startswith("refs/heads/kept/")}
     if back != want:
         return not_as_listed_line(not_as_listed(back, want, want)[0], FORGE_NOT_AS_LISTED)
     # M120: a name the forge cannot hold is a known limit of this copy, not a failed refresh (the owner's ruling,

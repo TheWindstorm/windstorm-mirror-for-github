@@ -38,6 +38,8 @@ class FakeGitHub:
         self.limit_answer = None              # (code, retry_after or None): GitHub's "spent" answer, for every keyed GET
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
+        self.slow_fetch = {}                  # full_name -> seconds to stall a fetch's own request only (not a list)
+        self.fetches = []                     # full_name of each fetch's own request (a POST that asks no list)
         self.lfs_uploads = []                 # LFS batch calls that asked to upload (a batch call to download is a read)
         self.contents = {}                    # path in the skill's repository -> bytes, served with no key
         self.release = None                   # what /repos/<o>/<n>/releases/latest answers (no key needed)
@@ -311,6 +313,10 @@ class FakeGitHub:
                     self.end_headers()
                     return
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if method == "POST" and "git-upload-pack" in u.path and b"ls-refs" not in body:
+                    fake.fetches.append(full)                  # a fetch (protocol v2 asks a list with ls-refs)
+                    if full in fake.slow_fetch:
+                        time.sleep(fake.slow_fetch[full])
                 env = dict(os.environ, GIT_PROJECT_ROOT=fake.root, GIT_HTTP_EXPORT_ALL="1",
                            PATH_INFO=u.path, QUERY_STRING=u.query, REQUEST_METHOD=method,
                            CONTENT_TYPE=self.headers.get("Content-Type", ""),
