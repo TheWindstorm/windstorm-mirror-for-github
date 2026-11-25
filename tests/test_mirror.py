@@ -2248,7 +2248,7 @@ class G3(unittest.TestCase):
             for n in ("aa", "bb", "cc"):
                 w.gh.add_repo("someone", n)
             first(w)
-            w.gh.commit("someone/bb", {".gitattributes": b"\xf6*.dat -text\n", "a": b"1"})     # Latin-1, no LFS
+            w.gh.commit("someone/bb", {".gitattributes": b"\xf6*.dat -text\r\n", "a": b"1"})     # Latin-1, CR LF, no LFS
             w.gh.commit("someone/cc", {"a": b"1"})
             w.key_set()
             self.assertEqual(w.sync("--announce")[0], 0)
@@ -2256,7 +2256,7 @@ class G3(unittest.TestCase):
             self.assertEqual(rc, 0, out)
 
         def attrs(w):
-            w.gh.commit("someone/aa", {".gitattributes": b"# M\xf6\xdfe\n*.bin filter=lfs diff=lfs merge=lfs -text\n",
+            w.gh.commit("someone/aa", {".gitattributes": b"# M\xf6\xdfe\r*.bin filter=lfs diff=lfs merge=lfs -text\r\n",
                                        "a": b"1"})
 
         def names(w):
@@ -2331,6 +2331,53 @@ class G3(unittest.TestCase):
             self.assertNotIn("KeyError", out)
             for n in ("bb", "cc"):
                 self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+        # 5. The forge refuses a push for a reason the tool did not foresee (Gitea 28.4.0's own words, seen when it
+        # refused a name): the project is named with the forge's words, and the others are copied.
+        with World(self) as w:
+            three(w, lambda w: w.gh.commit("someone/aa", {"a": b"1"}))
+            saved = mirror.forge_call
+            gitea_said = ("remote: \nremote: error:        \nremote: error: Internal Server Error (no message for end "
+                          "users)        \nremote: error:        \nTo http://127.0.0.1:1/mirror/someone--aa.git\n"
+                          " ! [remote rejected] main -> main (pre-receive hook declined)\n"
+                          "error: failed to push some refs to 'http://127.0.0.1:1/mirror/someone--aa.git'\n")
+
+            def refused(forge, cache, *args, **kw):
+                if args[:1] == ("push",) and "someone--aa" in fread(os.path.join(cache, "config")):
+                    return subprocess.CompletedProcess(args, 1, "", gitea_said)
+                return saved(forge, cache, *args, **kw)
+            mirror.forge_call = refused
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.forge_call = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("someone/aa: the push into the forge failed, so nothing in its copy was moved (the push is "
+                          "all or nothing): Internal Server Error (no message for end users); pre-receive hook declined",
+                          out)
+            for n in ("bb", "cc"):
+                self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+        # 6. restore --to with a .gitattributes that cannot be read: never taken as no LFS; nothing is pushed.
+        with World(self) as w:
+            three(w, attrs)
+            self.assertEqual(w.sync()[0], 0)
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "bb")
+            saved = mirror.git
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "blob") and args[2].endswith(":.gitattributes"):
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git = unread
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            finally:
+                mirror.git = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("Whether someone/bb keeps files with Git LFS could not be read from its .gitattributes, so "
+                          "nothing was pushed.", out)
+            self.assertEqual(lsremote(home), {})
 
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():

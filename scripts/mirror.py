@@ -552,10 +552,11 @@ def lines_of(text):
 
 
 def text_of(data):
-    """A program's bytes as text: as text=True read them (line ends made \n), but never raising (M120)."""
+    """A program's bytes as text, never raising (M120), and with every byte kept: a carriage return stays one, so
+    a line ends only where the program wrote a line feed (family rule 31 (vi))."""
     if data is None:
         return None
-    return data.decode("utf-8", "surrogateescape").replace("\r\n", "\n").replace("\r", "\n")
+    return data.decode("utf-8", "surrogateescape")
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -735,7 +736,7 @@ def person_name():
 def forge_users(p):
     out = gitea(p, "admin", "user", "list")
     names = []
-    for line in out.stdout.splitlines()[1:]:
+    for line in lines_of(out.stdout)[1:]:
         cols = line.split()
         if len(cols) >= 2:
             names.append(cols[1])
@@ -760,8 +761,8 @@ def create_user(p, name, admin):
 
 
 def last_line(text):
-    lines = [x for x in (text or "").strip().splitlines() if x.strip()]
-    return redact(lines[-1]) if lines else ""
+    lines = lines_of(text)
+    return redact(lines[-1].rstrip()) if lines else ""
 
 
 def redact(text):
@@ -888,7 +889,7 @@ def next_sync():
         return (f"every {int(m.group(1)) // 60} min (launchd keeps no next-run time)" if m else "loaded"), ""
     out = run(["systemctl", "--user", "show", SYNC_UNIT + ".timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime",
                "-p", "NextElapseUSecMonotonic"])
-    vals = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+    vals = dict(line.split("=", 1) for line in lines_of(out.stdout) if "=" in line)
     if vals.get("ActiveState") != "active":
         return "", "the sync timer is not running"
     nxt = vals.get("NextElapseUSecRealtime", "").strip()
@@ -1029,7 +1030,7 @@ def service_path():
     if kind == "linux":
         try:
             out = run(["systemctl", "--user", "show-environment"], timeout=10)
-            for line in (out.stdout or "").splitlines() if out.returncode == 0 else []:
+            for line in lines_of(out.stdout) if out.returncode == 0 else []:
                 if line.startswith("PATH="):
                     return line[5:]
         except (OSError, subprocess.TimeoutExpired):
@@ -1196,9 +1197,9 @@ def systemd_off(p):
         start = time.monotonic()
         while True:
             out = run(["systemctl", "--user", "show", unit, "-p", "ActiveState"])
-            state = dict(x.split("=", 1) for x in out.stdout.splitlines() if "=" in x).get("ActiveState", "").strip()
+            state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
             if out.returncode != 0 or not state:
-                said = (out.stderr or out.stdout).strip().splitlines()
+                said = [x.strip() for x in lines_of(out.stderr or out.stdout)]
                 seen.append((words, "unread", time.monotonic() - start,
                              f"code {out.returncode}" + (f": {said[0]}" if said else "")))
                 break
@@ -1604,7 +1605,7 @@ def linux_listeners(port, files=None):
             raise DoorUnread(True, f"{f} is not there")
         except (OSError, UnicodeError):
             raise DoorUnread(False, f"{f} could not be read")
-        lines = text.splitlines()
+        lines = lines_of(text)
         if not lines or " ".join(lines[0].split()) not in LINUX_TCP_HEADS:
             raise DoorUnread(True, f"{f} has columns this release does not know")
         for line in lines[1:]:
@@ -1659,7 +1660,7 @@ def linux_holders(inodes, first=()):
 
 def mac_listeners(port, text):
     """[(pid)] of every TCP listener on this port, from netstat -anv's own columns, read by their header."""
-    lines = text.splitlines()
+    lines = lines_of(text)
     head = next((i for i, x in enumerate(lines) if x.split()[:1] == ["Proto"]), None)
     if head is None or " ".join(lines[head].split()) not in MAC_NETSTAT_HEADS:
         raise DoorUnread(True, "netstat names columns this release does not know")
@@ -2002,10 +2003,22 @@ def where_to(url):
     return f"an ssh address on {m.group(1)}" if m else "another address"
 
 
+def forge_refusal(text):
+    """M120: why the forge refused a push, in its own words: its error lines and the first refused ref's reason
+    (seen from Gitea 28.4.0: "Internal Server Error (no message for end users)", "pre-receive hook declined")."""
+    ls = [x.strip() for x in lines_of(text)]
+    said = [re.sub(r"^remote:\s*(error:|fatal:)\s*", "", x) for x in ls if re.match(r"^remote:\s*(error:|fatal:)", x)]
+    said = [x.strip() for x in said if x.strip()]
+    refused = next((x for x in ls if x.startswith("! [remote rejected]")), "")
+    why = re.search(r"\(([^()]*)\)\s*$", refused)
+    words = said[:2] + ([why.group(1)] if why else [])
+    return redact("; ".join(words)) if words else git_reason(text)
+
+
 def git_reason(text):
     """Why git failed, in its own words: its first fatal or error line (its last line can be the tail of a
     sentence), with anything that looks like a credential hidden."""
-    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
+    lines = [x.strip() for x in lines_of(text)]
     first = next((x for x in lines if x.startswith(("fatal:", "error:"))), lines[-1] if lines else "")
     return redact(first)
 
@@ -2254,7 +2267,8 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         if out is None:
             return f"the push into the forge took longer than {limit} s, and so did the retry"
         if out.returncode != 0:
-            return "the push into the forge failed: " + last_line(out.stderr)
+            return "the push into the forge failed, so nothing in its copy was moved (the push is all or nothing): " + (
+                forge_refusal(out.stderr))
     if dropped:
         report.append(f"{full}: {len(dropped)} kept ref(s) older than the kept period were dropped")
     rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
@@ -2960,7 +2974,7 @@ def own_forge_running(p):
         if out.returncode != 0:
             return None
         return any(f"--config {p['app_ini']}" in x and os.path.dirname(p["bin"]) + "/gitea-" in x
-                   for x in out.stdout.splitlines())
+                   for x in lines_of(out.stdout))
     try:
         pids = [x for x in os.listdir("/proc") if x.isdigit()]
     except OSError:
@@ -3627,19 +3641,24 @@ def restore_to(p, st, forge, url, repository):
             return 1
         mine = dict(os.environ, GIT_TERMINAL_PROMPT="0")
         run(["git", "--git-dir", into, "remote", "add", "home", url], env=mine)
-        if uses_lfs(into) and has_git_lfs():
+        said = uses_lfs(into)
+        if said is None:
+            say(f"Whether {repository} keeps files with Git LFS could not be read from its .gitattributes, so nothing "
+                "was pushed. Run restore --check, then restore --to again.")
+            return 1
+        if said and has_git_lfs():
             # Large files first, to the new home by its own name (git lfs would otherwise ask the forge).
             out = run(["git", "--git-dir", into, "lfs", "push", "--all", "home"], env=mine, timeout=3600)
             if out.returncode != 0:
                 say("The large files could not be put in the new home, so nothing else was pushed: "
-                    + " / ".join(out.stderr.strip().splitlines()[-3:])
+                    + " / ".join(x.strip() for x in lines_of(out.stderr)[-3:])
                     + ". Check that the new home takes large files, then run restore --to again.")
                 return 1
         specs = ["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*", "^refs/heads/kept/*"]
         out = run(["git", "--git-dir", into, "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--atomic", "home",
                    *specs], env=mine, timeout=3600)
         if out.returncode != 0:
-            say("The push to the new home failed: " + " / ".join(out.stderr.strip().splitlines()[-4:])
+            say("The push to the new home failed: " + " / ".join(x.strip() for x in lines_of(out.stderr)[-4:])
                 + ". Run restore --to again into a new, empty repository; if it fails the same way, git's words are "
                   "the reason.")
             return 1
