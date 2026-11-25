@@ -1,0 +1,71 @@
+gui/501/org.example.trial.print = {
+\tactive count = 1
+\tpath = /private/var/folders/fq/bhsbs5bd52791c8x2z6s3dh40000gn/T/tmp.APe3Z0QrPO/org.example.trial.print.plist
+\ttype = LaunchAgent
+\tstate = running
+
+\tprogram = /bin/sh
+\targuments = {
+\t\t/bin/sh
+\t\t-c
+\t\tsleep 300
+\t}
+
+\tinherited environment = {
+\t\tSSH_AUTH_SOCK => /var/run/com.apple.launchd.INP6cP9zaU/Listeners
+\t}
+
+\tdefault environment = {
+\t\tPATH => /usr/bin:/bin:/usr/sbin:/sbin
+\t}
+
+\tenvironment = {
+\t\tOSLogRateLimit => 64
+\t\tTRIAL_VALUE => made up
+\t\tXPC_SERVICE_NAME => org.example.trial.print
+\t}
+
+\tdomain = gui/501 [100001]
+\tasid = 100001
+\tminimum runtime = 10
+\texit timeout = 5
+\truns = 1
+\tpid = 7867
+\timmediate reason = speculative
+\tforks = 0
+\texecs = 3
+\tinitialized = 1
+\ttrampolined = 1
+\tstarted suspended = 0
+\tproxy started suspended = 0
+\tchecked allocations = 0 (queried = 1)
+\tchecked allocations reason = no host
+\tchecked allocations flags = 0x0
+\tlast exit code = (never exited)
+
+\tresource coalition = {
+\t\tID = 1276
+\t\ttype = resource
+\t\tstate = active
+\t\tactive count = 1
+\t\tname = org.example.trial.print
+\t}
+
+\tjetsam coalition = {
+\t\tID = 1277
+\t\ttype = jetsam
+\t\tstate = active
+\t\tactive count = 1
+\t\tname = org.example.trial.print
+\t}
+
+\tspawn type = daemon (3)
+\tjetsam priority = 40
+\tjetsam memory limit (active) = (unlimited)
+\tjetsam memory limit (inactive) = (unlimited)
+\tjetsamproperties category = daemon
+\tjetsam thread limit = 32
+\tcpumon = default
+
+\tproperties = runatload | inferred program | system service | tle system
+}

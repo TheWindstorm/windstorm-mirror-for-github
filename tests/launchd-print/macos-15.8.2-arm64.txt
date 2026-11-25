@@ -1,0 +1,55 @@
+gui/501/org.example.trial.print = {
+\tactive count = 1
+\tpath = /private/var/folders/9d/l02zfgrs7c16twd3wbpdmhkc0000gn/T/tmp.SiQSo7m6qb/org.example.trial.print.plist
+\ttype = LaunchAgent
+\tstate = running
+
+\tprogram = /bin/sh
+\targuments = {
+\t\t/bin/sh
+\t\t-c
+\t\tsleep 300
+\t}
+
+\tinherited environment = {
+\t\tSSH_AUTH_SOCK => /private/tmp/com.apple.launchd.r1TPyGqYjZ/Listeners
+\t}
+
+\tdefault environment = {
+\t\tPATH => /usr/bin:/bin:/usr/sbin:/sbin
+\t}
+
+\tenvironment = {
+\t\tTRIAL_VALUE => made up
+\t\tXPC_SERVICE_NAME => org.example.trial.print
+\t}
+
+\tdomain = gui/501 [100003]
+\tasid = 100003
+\tminimum runtime = 10
+\texit timeout = 5
+\truns = 1
+\tpid = 1011
+\timmediate reason = speculative
+\tforks = 0
+\texecs = 3
+\tinitialized = 1
+\ttrampolined = 1
+\tstarted suspended = 0
+\tproxy started suspended = 0
+\tlast exit code = (never exited)
+
+\tspawn type = daemon (3)
+\tjetsam priority = 40
+\tjetsam memory limit (active) = (unlimited)
+\tjetsam memory limit (inactive) = (unlimited)
+\tjetsamproperties category = daemon
+\tjetsam thread limit = 32
+\tcpumon = default
+\tprobabilistic guard malloc policy = {
+\t\tactivation rate = 1/1000
+\t\tsample rate = 1/0
+\t}
+
+\tproperties = runatload | inferred program | system service | tle system
+}

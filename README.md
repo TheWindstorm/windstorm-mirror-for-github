@@ -215,9 +215,11 @@ with no key; a sync and a restore on a Mac are not seen yet.
     back in; where busctl does not know that form (seen on systemd 237 and 239), setup stops there, having made
     nothing, and says which systemd it found;
   - on a Mac, setup and status read back how launchd holds the skill's two jobs, in the form `launchctl print`
-    shows them. That form was seen on macOS 27.2.1 only. On another macOS the read-back may answer that it
-    "could not be read"; setup then takes the job off again and does not finish, and the line it prints says the
-    next step;
+    shows them. That print form was seen for the skill's own jobs on macOS 27.2.1 (the test account above), and
+    for one made-up job, not the skill, on GitHub's own Macs on macOS 15.7.9 and 26.6.1 (Intel) and 15.8.2 and
+    26.7.2 (Apple Silicon); the skill itself was not set up on those four. On another macOS the read-back may
+    answer that it "could not be read"; setup then takes the job off again and does not finish, and the line it
+    prints says the next step;
   - a sync and a restore with 0.1.0's own tool on a Mac: not seen by us; they need a key, and wait for a
     fine-grained read-only one. Seen with it on a Mac: setup, status and uninstall in a test account with no key
     (above), and the test suite on GitHub's macOS runners, against a stand-in for GitHub;

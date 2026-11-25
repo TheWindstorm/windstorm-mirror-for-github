@@ -300,7 +300,8 @@ class Home:
         # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
         self.bus_answer, self.bus_starts, self.bus_objs = None, None, {}
         self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set
-        self.launchd_form = None     # a loaded job's whole print block in a MADE-UP other form, instead, when set
+        self.launchd_form = None     # a loaded job's whole print block instead, when set (recorded or MADE UP: each
+                                     # test names which)
         self.bus_env_extra = []      # Environment entries a person's own drop-in adds to every unit (rule 31 (v.5) (3))
         self.launchd_env_extra = {}  # variables a loaded job's print shows besides its file's own
         self.no_bus_words = "Failed to connect to bus: No medium found"     # systemd 255's; 262 says it otherwise
@@ -381,9 +382,10 @@ class Home:
 
     def launchd_job(self, label):
         """THE SUITE'S STAND-IN for the blocks `launchctl print` gives for a loaded job, built from its file with
-        plistlib in the form seen 2026-11-25 on a Mac, macOS 27.2.1, a test account (row M148): one argument to a
-        line after two tabs; the inherited and default environment blocks; then the job's own environment block,
-        launchd's OSLogRateLimit first and its XPC_SERVICE_NAME last around the file's variables."""
+        plistlib in the form seen 2026-11-25 on a Mac, macOS 27.2.1, a test account (row M148), and recorded the
+        same day on GitHub's macOS 15.7.9, 15.8.2, 26.6.1 and 26.7.2 (tests/launchd-print): one argument to a line
+        after two tabs; the inherited and default environment blocks; then the job's own environment block,
+        launchd's OSLogRateLimit first (not on 15) and its XPC_SERVICE_NAME last around the file's variables."""
         if self.launchd_args is not None:
             args, env = self.launchd_args
         else:
@@ -2016,8 +2018,8 @@ class G1(unittest.TestCase):
 
     def test_G1_24_a_start_line_of_the_persons_own_beside_the_syncs_is_theirs_by_its_count(self):
         """M148, the family's rule 31 (v.5) (3) as corrected 4:22 PM ET 11-25: the sync's unit is one-shot (the
-        list holds its start lines in order, seen; that the manager runs them so is not recorded, and no line says
-        it: rule 31 (v.5) (3), 4:27 PM ET). A start line of the person's own beside ours, ours held
+        list holds its start lines in order, seen; that the manager runs them in that order is recorded on five
+        systems, the user manager (rule 31 (v.5) (3), 4:52 PM ET), and a line still says only what the tool read). A start line of the person's own beside ours, ours held
         once, as written and first, is theirs: named by its count, never its words (it holds a made-up secret here),
         the listing as the step and as the last words of the line, and the answer stays "set up" (the timer goes on).
         Ours not first, ours twice, ours changed, the manager holding the sync as another type, and any start line of
@@ -2112,8 +2114,45 @@ class G1(unittest.TestCase):
         finally:
             mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
 
+    def test_G1_24_a_mac_print_as_recorded_on_each_macos_image_is_read_whole(self):
+        """M148 (the owner's ruling 3, 11-25): launchctl print's answer for one made-up agent, RECORDED on each macOS
+        image GitHub's standard runners offered that day (15.7.9 and 26.6.1 on Intel, 15.8.2 and 26.7.2 on Apple
+        Silicon; tests/launchd-print, each tab kept as \\t), is read by the tool whole: its arguments one by one, the
+        one with a space whole, and its own variable; with setup's record set to that agent the read-back is equal and
+        nothing is the person's own (launchd's own OSLogRateLimit is there on 26 and not on 15; neither is counted).
+        One argument other than recorded is a difference."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launchd-print")
+        forms = sorted(f for f in os.listdir(here) if f.endswith(".txt"))
+        self.assertEqual(forms, ["macos-15.7.9-x86_64.txt", "macos-15.8.2-arm64.txt", "macos-26.6.1-x86_64.txt",
+                                 "macos-26.7.2-arm64.txt"])
+        args = ["/bin/sh", "-c", "sleep 300"]
+        try:
+            for name in forms:
+                with Home() as h, self.subTest(form=name):
+                    p = mirror.paths()
+                    os.makedirs(p["data"], exist_ok=True)
+                    text = re.sub(r"\\([\\t])", lambda m: "\t" if m.group(1) == "t" else "\\",
+                                  fread(os.path.join(here, name)))
+                    h.launchd_form = text
+                    with open(os.path.join(p["data"], mirror.SERVICE_MEANT), "w") as f:
+                        json.dump({"forge": {"argv": args, "env": {"TRIAL_VALUE": "made up"}}}, f)
+                    got = mirror.launchd_parsed(mirror.LAUNCHD_LABEL)
+                    self.assertEqual(got[0], args)
+                    self.assertEqual(got[1]["TRIAL_VALUE"], "made up")
+                    self.assertEqual(set(got[1]) - {"TRIAL_VALUE"}, set(got[1]) & set(mirror.LAUNCHD_OWN_ENV))
+                    self.assertEqual("OSLogRateLimit" in got[1], name.startswith("macos-26"))
+                    self.assertEqual(mirror.service_read(p, "forge"), ("equal", [], []))
+                    with open(os.path.join(p["data"], mirror.SERVICE_MEANT), "w") as f:
+                        json.dump({"forge": {"argv": args[:2] + ["sleep 301"], "env": {"TRIAL_VALUE": "made up"}}}, f)
+                    self.assertEqual(mirror.service_read(p, "forge"), ("differs", [], ["its arguments"]))
+        finally:
+            mirror.system = saved
+
     def test_G1_24_a_mac_print_in_a_made_up_other_form_is_could_not_be_read(self):
-        """M148 (the owner's ruling, 11-25, point 7 (b)): launchd's print form is seen on macOS 27.2.1 only. A print
+        """M148 (the owner's ruling, 11-25, point 7 (b)): launchd's print form is seen on the macOS versions
+        MACOS_PRINT_SEEN names only. A print
         block in another form, MADE UP here (no macOS has been seen printing these: one with no arguments block of
         the seen form, one with the seen arguments block and no environment block where setup set a variable), is
         answered "could not be read" with its step: never "differs", never "not set up", never a road to uninstall;
@@ -2146,7 +2185,8 @@ class G1(unittest.TestCase):
                             self.assertIn("whether launchd holds the forge's service as setup wrote it could not be "
                                           "read", said)
                             self.assertIn(first + " if this line comes back, launchd's answer on this Mac may be in a "
-                                          "form this tool does not read yet (it was seen on macOS 27.2.1)", said)
+                                          f"form this tool does not read yet (it was seen on macOS "
+                                          f"{mirror.MACOS_PRINT_SEEN})", said)
                             self.assertTrue(said.endswith("which this prints: sw_vers -productVersion"), said)
                             for never in ("not set up", "uninstall", "does not hold"):
                                 self.assertNotIn(never, said)

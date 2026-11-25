@@ -1141,9 +1141,14 @@ def systemd_parsed(unit):
     return starts, list(env)
 
 
+# The macOS versions launchctl print's form for a job was seen on (row M148): 27.2.1 on a Mac, a test account, and
+# 15.7.9, 15.8.2, 26.6.1 and 26.7.2 on GitHub's standard runners with a made-up job, 2026-11-25 (tests/launchd-print).
+MACOS_PRINT_SEEN = "15.7.9, 15.8.2, 26.6.1, 26.7.2 and 27.2.1"
+
+
 def launchd_parsed(label):
     """G1.24: (the loaded job's arguments, one by one, {each environment name: its value}) as launchd holds them, read from
-    `launchctl print` (seen 2026-11-25 on a Mac, macOS 27.2.1: one argument to a line after two tabs inside
+    `launchctl print` (seen 2026-11-25 on macOS MACOS_PRINT_SEEN, the same form: one argument to a line after two tabs inside
     "arguments = {", as written, spaces, &, <, a quote and a backslash alike; each variable as "NAME => value" inside
     "environment = {", beside the "inherited environment" and "default environment" blocks, which are not the
     job's); None when that could not be read, and "absent" when launchd has no such job. A print with no arguments
@@ -1191,8 +1196,8 @@ def service_read(p, which):
     (a drop-in of theirs):
     never a fault of ours, and only its name is kept (rule 31 (v.5) (3): it may hold a password). So is a start line
     of theirs on a one-shot unit beside ours, where ours is held once, as written, and first (the same rule, 4:22 PM
-    ET 11-25; what was seen on five systems is the ORDER IN THE LIST, ours first, and the 4:27 PM change: that the
-    manager runs them in that order is systemd's manual, not recorded by us, so no line says it); it is kept by its
+    ET 11-25): the list holds them in order, ours first, and that the manager runs them in that order is recorded
+    on five systems, the user manager (4:52 PM ET); a line still says only what the tool read. It is kept by its
     count alone, a number at the end of the names (a start line can hold a secret as a value can)."""
     meant = read_meant(p, which)
     if system()[0] == "darwin":
@@ -1283,12 +1288,14 @@ def read_back_step(which, answer, where="setup"):
         return "Run setup again, which writes that record again and reads the service back; " + COMES_BACK
     if answer == "unread":
         if system()[0] == "darwin":
-            # Seen on macOS 27.2.1 only (the owner's ruling, 11-25: the README says so): another macOS may print the
-            # job in a form not read here, so this answer may come back; never a road to uninstall.
+            # Seen on the macOS versions in MACOS_PRINT_SEEN only (the owner's rulings, 11-25: the README names
+            # them): another macOS may print the job in a form not read here, so this answer may come back; never a
+            # road to uninstall.
             first = ("Run status from a terminal window of your own" if where == "status" else
                      "Run setup again in a minute")
             return (f"{first}; if this line comes back, launchd's answer on this Mac may be in a form this tool does "
-                    "not read yet (it was seen on macOS 27.2.1): open an issue with this line and this Mac's version, "
+                    f"not read yet (it was seen on macOS {MACOS_PRINT_SEEN}): open an issue with this line and this "
+                    "Mac's version, "
                     "which this prints: sw_vers -productVersion")
         if where == "status":
             return ("Run status from a terminal window of your own; if this line comes back there, open an issue "
