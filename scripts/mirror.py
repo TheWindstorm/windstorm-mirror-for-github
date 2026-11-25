@@ -1134,6 +1134,12 @@ KEPT_CLASH = ("GitHub holds {n} branch(es) named kept/... ({names}), the name th
 RESTORE_HIDDEN = ("{n} of those name(s) hold a character this tool does not print as it is (each such character is put "
                   "as a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
                   "holds it:")
+RESTORE_LACKS = ("but {n} branch or tag name(s) GitHub held when the sync last read its list are not in the new home, "
+                 "because the copy in your forge does not hold them ({names}){why}. Run restore --check, which names "
+                 "each difference; a sync brings over what has changed on GitHub since, where the forge can hold it.")
+RESTORE_LIST_UNREAD = ("but what GitHub held when the sync last read its list could not be read from this computer's record "
+                       "of {full}, so whether the new home lacks a branch or tag GitHub held is not known. Run sync, then "
+                       "restore --check, which compares the copy with that list.")
 RESTORE_TO_HIDDEN = ("The new home's address holds a character this tool does not print as it is, so no line is given "
                      "to bring them over here; this line lists every kept/ name the copy holds, as git holds it:")
 RESTORE_LEFT_OUT = ("but {n} GitHub branch(es) named kept/..., which the copy in your forge holds, are not in the new "
@@ -3779,7 +3785,7 @@ def cmd_restore(args):
             mine = 0
             have = {written(r): s for r, s in refs_under(into, "refs/heads", "refs/tags").items()
                     if not r.startswith("refs/heads/kept/")}
-            seen = rec.get("seen_refs") or rec.get("refs") or {}            # written(): the state's one form
+            seen = last_seen_list(rec) or {}                               # written(): the state's one form
             for ref in sorted(set(have) | set(seen)):
                 if have.get(ref) != seen.get(ref):
                     mine += 1
@@ -3807,6 +3813,14 @@ def github_hosts():
     if host:
         hosts.add(host.lower())
     return hosts
+
+
+def last_seen_list(rec):
+    """M135: GitHub's list of branches and tags as the sync last read it, as restore --check reads it (written(): the
+    state's one form); None when the record holds no list at all (rule 6: never taken as none)."""
+    if not isinstance(rec.get("seen_refs"), dict) and not isinstance(rec.get("refs"), dict):
+        return None
+    return rec.get("seen_refs") or rec.get("refs") or {}
 
 
 def restore_to(p, st, forge, url, repository):
@@ -3912,6 +3926,20 @@ def restore_to(p, st, forge, url, repository):
         held = {written(r) for r in refs_under(into, "refs/heads", "refs/tags")}
         home = {written(r) for r in there}
         left = sorted(r for r in (rec.get("refs") or {}) if r in held and r not in home)
+        # M135: a name GitHub's list held when the sync last read it, which the copy does not hold and so the new home
+        # did not get, is said too (a name that is not text, one GitHub added since, one taken out of the copy), with
+        # why where the record knows it; the exit is then not 0. What restore pushes does not change.
+        seen = last_seen_list(rec)
+        lacking = None if seen is None else sorted(r for r in seen if r not in home and r not in left)
+        if seen is None:
+            say(RESTORE_LIST_UNREAD.format(full=who + note))
+        elif lacking:
+            odd = sum(1 for r in lacking if written_not_text(r))
+            say(RESTORE_LACKS.format(
+                n=len(lacking),
+                names=shown_names([r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
+                                   for r in lacking]),
+                why=f"; {odd} of them are not UTF-8 text, which the forge cannot hold" if odd else ""))
         if left:
             # Each name stands for itself only where it can be read as it is (rule 31: a name we did not write is
             # never handed to a shell raw): one whole line per name, every name, each part through shlex.quote.
@@ -3938,7 +3966,7 @@ def restore_to(p, st, forge, url, repository):
             say("Run each git line above as it stands, in a terminal: each sends one name from the copy's own folder "
                 "in your forge to the new home, with your own login there, and changes nothing in the copy.")
             return 1
-        return 0
+        return 0 if lacking == [] else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

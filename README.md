@@ -160,7 +160,7 @@ pointed at is kept as `kept/<date>/tags/<name>`. For an annotated tag only that 
 message; a tag that pointed at a file or a folder, not a commit, cannot be kept, and the sync says so.
 On Linux, a branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one. Every other
 branch and tag of that project is copied, and each sync and `status` name the copy with the names it lacks, as with
-large files. On a Mac, such a project is not copied yet (see "Known, and not right yet" below). A project is called
+large files; `restore --to` names them too, and exits 1. On a Mac, such a project is not copied yet (see "Known, and not right yet" below). A project is called
 copied only when every branch and tag in GitHub's own list is in the copy at the commit GitHub lists, or is named as
 left out; where one is not, each sync and `status` name the project as a problem and its copy is not moved.
 

@@ -4630,6 +4630,63 @@ class G7(unittest.TestCase):
             self.assertNotIn("  git ", out)
             self.assertEqual(lsremote(home), w.gh_refs("someone/beta"))
 
+    def test_G7_9_restore_says_what_the_new_home_lacks_from_githubs_last_list(self):
+        """M135 (a reviewer's world 18, 2026-11-25): GitHub held a branch the copy did not (a name that is not text),
+        and restore --to said "restored ... 3 branch(es)" and exited 0, with no word of it. Now restore --to reads
+        GitHub's list as the sync last read it, as restore --check does, and says what the new home lacks of it: a
+        count, the names through the shown form, why where the record knows why; exit 1. A record without that list
+        is said as not read, never as none missing. What restore pushes does not change."""
+        with World(self) as w:
+            full = "someone/aa"
+            w.gh.add_repo("someone", "aa")
+            w.gh.add_repo("someone", "bb")
+            one = w.gh.commit(full, {"a": b"1"})
+            w.gh.git(full, "tag", "v1", one)
+            for b in ("b1", "c`x`", "d`y", "d\u200by"):           # the last two show alike: they stay two
+                w.gh.git(full, "branch", b, one)
+            w.gh.commit("someone/bb", {"a": b"1"})
+            odd = disk_holds(os.path.dirname(w.p["state"]), "a\udcffb")   # a Mac's disk cannot hold it
+            if odd:
+                w.gh.plant(full, "refs/heads/a\udcffb", "main")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            # Taken out of the copy behind the tool's back (the record does not know why), and kept by GitHub.
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--aa.git")
+            for b in ("b1", "c`x`", "d`y", "d\u200by"):
+                subprocess.run(["git", "--git-dir", folder, "update-ref", "-d", "refs/heads/" + b], check=True)
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "aa")
+            n = len(w.gh.log)
+            rc, out = quiet(mirror.main, ["restore", "--to", home, full])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"restored {full}: 1 branch(es) and 1 tag(s) to {home}; the kept refs stay in your forge\n",
+                          out)
+            names = (["a?b"] if odd else []) + ["b1", "c?x?", "d?y", "d?y"]
+            self.assertIn(mirror.RESTORE_LACKS.format(
+                n=len(names), names=", ".join(names) + "; " + mirror.SHOWN_CHANGED,
+                why="; 1 of them are not UTF-8 text, which the forge cannot hold" if odd else ""), out)
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            self.assertEqual(set(lsremote(home)), {"refs/heads/main", "refs/tags/v1"})   # what it pushes: as before
+            self.assertEqual(w.gh.log[n:], [], "restore asked GitHub")
+            # The control: a project the copy holds whole is restored with exit 0 and no such line.
+            home = bare_home(root, "bb")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("but ", out)
+            # A record without GitHub's list: said as not read, never as none missing; the exit is not 0.
+            st = mirror.load_json(w.p["state"], {})
+            rec = next(r for r in st["repos"].values() if r["full_name"] == "someone/bb")
+            rec.pop("seen_refs", None)
+            rec.pop("refs", None)
+            mirror.save_state(w.p, st)
+            home = bare_home(root, "bb-again")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(mirror.RESTORE_LIST_UNREAD.format(full="someone/bb"), out)
+            self.assertEqual(set(lsremote(home)), {"refs/heads/main"})
+
     def test_G7_8_the_line_to_put_a_copy_back_on_github_runs_as_printed(self):
         """M132 (a reviewer's read, 2026-11-25): restore --to refuses GitHub and said how to do it yourself with a
         clone over the forge's address, which asks for a login the text never names, and "cd <that folder>". Now it
