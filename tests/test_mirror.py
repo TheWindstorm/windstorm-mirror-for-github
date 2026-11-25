@@ -1067,6 +1067,84 @@ class G1(unittest.TestCase):
         for fn in (mirror.cmd_setup, mirror.setup_from):      # both say `why` whole, after the same words
             self.assertIn("did not start: {why}", inspect.getsource(fn))
 
+    def test_G1_16_with_no_session_at_the_screen_the_dry_run_and_status_name_a_step_that_works_there(self):
+        """M143 (seen 2026-11-25 on a Mac, macOS 27.2.1, an account reached over ssh only): with no session at the
+        Mac's screen, setup said the cause and its step, but status said "run setup again" alone, which cannot start
+        the forge there, and the dry run said setup would start it. Only the account's own domain answering 125 (its
+        read with no session, seen on macOS 13.7.8 and 27.2.1) changes a line: the dry run says the forge cannot start
+        now, why, and the step; status's forge line says the cause and a step that works there, in both states (setup
+        not finished: log in, then setup again; both jobs' files in place: the login, then status again), and its
+        timer and first-copy lines name no step that cannot work. Any other answer leaves every line as it was."""
+        import socket
+        saved, door, rel = mirror.system, mirror.read_door, mirror.release_check
+        mirror.system = lambda: ("darwin", "arm64")
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")    # nothing on the forge's port
+        mirror.release_check = lambda st, force=False: []
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                s = socket.socket()
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+                s.close()
+                for d in (p["data"], p["conf"], os.path.dirname(p["plist"])):
+                    os.makedirs(d, mode=0o700, exist_ok=True)
+                    os.chmod(d, 0o700)
+                mirror.save_state(p, {"port": port})
+                with open(p["mirror_key"], "w") as f:
+                    f.write("a stand-in key\n")
+                shutil.copyfile(SCRIPT, p["script"])
+                with open(p["plist"], "w") as f:                  # setup stopped after writing the forge's file
+                    f.write("<plist/>\n")
+                sync = os.path.join(os.path.dirname(p["plist"]), mirror.SYNC_LABEL + ".plist")
+                setup_line = mirror.own_command(p, "setup")
+                today_plan = "install the forge as your own service (a launch agent) and start it"
+                today_forge = (f"problem: the forge does not answer on 127.0.0.1:{port}; run setup again, which starts "
+                               f"it and keeps every copy: {setup_line}")
+                today_go = f"first copy: waiting for your go: in a terminal window of your own, run {mirror.own_command(p, 'go')}"
+
+                def look():
+                    mirror.DOOR_SEEN.clear()
+                    rc, out = status()
+                    return rc, out.splitlines(), mirror.setup_plan(p, {})
+                for code in (0, 113, 1, 5, None):              # every answer but 125: each line as it was
+                    h.domain_code, h.mac_session = (code, True) if code is not None else (None, True)
+                    rc, lines, plan = look()
+                    self.assertEqual(rc, 1, lines)
+                    self.assertIn(today_forge, lines, code)
+                    self.assertTrue([x for x in lines if x.startswith(today_go)], (code, lines))
+                    self.assertIn(today_plan, plan, code)
+                    self.assertFalse([x for x in lines if "logged in at this Mac's screen" in x], (code, lines))
+                h.domain_code, h.mac_session = None, False      # the domain answers 125, as seen
+                rc, lines, plan = look()
+                self.assertEqual(rc, 1, lines)
+                self.assertNotIn(today_plan, plan)
+                said = [x for x in plan if x.startswith("install the forge as your own service (a launch agent)")]
+                self.assertEqual(len(said), 1, plan)
+                for words in ("cannot start now", "this account is not logged in at this Mac's screen",
+                              "log in to this account at this Mac's screen, then run setup"):
+                    self.assertIn(words, said[0])
+                self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{port}: {mirror.MAC_NO_SESSION}: "
+                              f"{setup_line}", lines, "setup not finished: log in, then setup again")
+                self.assertNotIn(today_forge, lines)
+                self.assertIn("problem: the sync timer is not loaded: this account is not logged in at this Mac's "
+                              "screen", lines)
+                self.assertIn("first copy: waiting for your go, which can be given once the forge answers (see the "
+                              "problem above)", lines)
+                with open(sync, "w") as f:                       # both files in place: a restart since setup
+                    f.write("<plist/>\n")
+                rc, lines, plan = look()
+                self.assertEqual(rc, 1, lines)
+                forge = [x for x in lines if x.startswith(f"problem: the forge does not answer on 127.0.0.1:{port}")]
+                self.assertEqual(forge, [f"problem: the forge does not answer on 127.0.0.1:{port}: this account is not "
+                                         "logged in at this Mac's screen, and on a Mac the forge runs only in a login "
+                                         "session at the screen. Log in to this account at this Mac's screen, then run "
+                                         "status again; if the forge still does not answer there, run setup again: "
+                                         f"{setup_line}"], lines)
+                self.assertFalse([x for x in lines if "run setup again, which starts it" in x], lines)
+        finally:
+            mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
+
     def test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded(self):
         """Seen on a stock Ubuntu 24.04 with git removed: setup downloaded Gitea, then stopped on Gitea's own words."""
         with Home() as h:
@@ -3981,6 +4059,8 @@ class G6(unittest.TestCase):
             os.environ["WSM_HOME"] = root
             p = mirror.paths()
             self.assertIn(" ", p["script"])
+            os.makedirs(os.path.dirname(p["script"]), exist_ok=True)     # the skill's own copy is there (M144)
+            shutil.copyfile(SCRIPT, p["script"])
             for args in (("uninstall",), ("uninstall", "--delete-copies"), ("status",)):
                 argv = shlex.split(mirror.own_command(p, *args))
                 self.assertEqual(argv, ["python3", "-I", p["script"], *args])
@@ -3996,6 +4076,86 @@ class G6(unittest.TestCase):
             self.assertIn("command=own_command(p, \"uninstall\")", inspect.getsource(mirror.cmd_status))
             self.assertIn("own_command(paths(), a.cmd)", inspect.getsource(mirror.main))
             self.assertNotIn("{script}", mirror.PLUGIN_GONE)
+
+    def test_G6_12_every_printed_command_names_a_copy_of_the_tool_that_is_there(self):
+        """M144 (seen 2026-11-25 on a Mac, macOS 27.2.1): after uninstall had taken the skill's own copy away,
+        `uninstall --delete-copies` with no terminal printed a line for the person that named that copy, so it could
+        not run. Every command line the tool prints is tried in the state it was printed in, with the skill's own copy
+        there and with it gone: the file it names is there when it is printed. While the own copy is there, every
+        line names it, as before; once it is gone, the line names the copy that runs, and run as printed in a
+        terminal it asks for the number of copies; the Kept line names a way with no copy of the tool left."""
+        printed = []
+        real_say = mirror.say
+
+        def say(msg=""):
+            for m in re.finditer(r"python3 -I ('[^']*'|[^ ]+)", str(msg)):
+                path = shlex.split(m.group(1))[0]
+                printed.append((path, os.path.exists(path), str(msg)[:100]))
+            return real_say(msg)
+        saved = sys.stdin
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            mirror.say = say
+            try:
+                sys.stdin = io.StringIO("")                           # no terminal, as an agent runs it
+                for argv in (["status"], ["go"], ["uninstall", "--delete-copies"]):
+                    mirror.DOOR_SEEN.clear()
+                    quiet(mirror.main, argv)
+                self.assertGreaterEqual(len(printed), 3, printed)
+                self.assertEqual({x[0] for x in printed}, {w.p["script"]}, "the own copy, as before")
+                self.assertTrue(all(x[1] for x in printed), printed)
+                del printed[:]
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(os.path.exists(w.p["script"]))
+                kept = [x for x in out.splitlines() if x.startswith("Kept: the folder of copies")]
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                self.assertEqual(rc, 2, out)
+                self.assertTrue(printed, out)
+                self.assertEqual([x for x in printed if not x[1]], [], "a printed line names a file that is not there")
+                self.assertEqual(len(kept), 1, kept)
+                self.assertIn("once no copy of this skill is left on this computer, as you delete any folder of yours",
+                              kept[0])
+                cmd = out.split("in a terminal window of their own, they run ", 1)[1].split(" and type the number")[0]
+                argv = shlex.split(cmd)
+                self.assertEqual(argv[:3], ["python3", "-I", os.path.abspath(mirror.__file__)])
+                self.assertEqual(argv[3:], ["uninstall", "--delete-copies"])
+                sys.stdin = AtTerminal("7\n")                        # run as printed, at a terminal (not 0)
+                rc, out = quiet(mirror.main, argv[3:])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The copies were not deleted.", out)
+                self.assertTrue(os.path.exists(w.p["data"]))
+            finally:
+                mirror.say = real_say
+                sys.stdin = saved
+        # The maintainer's finding on this row's first commit (2026-11-25): uninstall run from the skill's OWN copy, the
+        # copy every printed line names, reads that copy gone once it has taken it, and the copy that runs is that same
+        # path, so no copy of the tool was read there. The Kept line said "no copy of this skill is left on this
+        # computer", which the tool had not read (a clone or the plugin's folder can still be there). It says what was
+        # read and no more: the own copy is gone now, and another copy only as an "if". "Run from the own copy" is stood
+        # in for by one thing: mirror.__file__, the path the tool reads as the copy that runs, is set to the own copy's
+        # path before uninstall; the tree's own scripts/mirror.py stays on the disk.
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            running = mirror.__file__
+            mirror.__file__ = w.p["script"]
+            try:
+                rc, out = quiet(mirror.main, ["uninstall"])
+            finally:
+                mirror.__file__ = running
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(w.p["script"]))
+            self.assertTrue(os.path.exists(running), "the tree's own copy stays on the disk, unread by uninstall")
+            kept = [x for x in out.splitlines() if x.startswith("Kept: the folder of copies")]
+            self.assertEqual(len(kept), 1, out)
+            self.assertNotIn("no copy of this skill is left", kept[0])
+            self.assertIn("delete it only when you are sure, as you delete any folder of yours; the skill's own copy is "
+                          "gone now, and if another copy of this skill is on this computer, its uninstall "
+                          "--delete-copies does it, in a terminal window of your own. Setup run again later", kept[0])
 
     def test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback(self):
         """A real machine (2026-11-23): `status | head -3` ended in a Python traceback (a broken pipe). The tool is
@@ -6415,6 +6575,9 @@ class G9(unittest.TestCase):
             f = p["plist"] if mirror.system()[0] == "darwin" else p["unit"]
             os.makedirs(os.path.dirname(f), exist_ok=True)
             other = os.path.join(h.tmp, "other home")
+            for q in (mirror.paths(other), mirror.paths(None)):         # each service's copy is there, as it runs (M144)
+                os.makedirs(os.path.dirname(q["script"]), exist_ok=True)
+                shutil.copyfile(SCRIPT, q["script"])
             for text, want in ((service_text(other), f"WSM_HOME={shlex.quote(other)} python3 -I "
                                 f"{shlex.quote(mirror.paths(other)['script'])}"),
                                (service_text(None), "unset WSM_HOME, then run python3 -I "
@@ -7289,10 +7452,15 @@ class G9(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn(f"Waiting: a sync is running (process {os.getpid()}); uninstall goes on as soon as it ends", out)
             lines = out.strip().splitlines()
+            # M144: the skill's own copy is gone now, so the way names the copy that runs, and the way with none left
+            running = shlex.quote(os.path.abspath(mirror.__file__))
             kept = lines.index(f"Kept: the folder of copies, {p['data']} (2 copies), with the record of what the skill "
-                               "did here. It is yours; delete it only when you are sure, with: uninstall --delete-copies. "
-                               "Setup run again later finds this folder and goes on from it: the mirror account gets a "
-                               "new key, and your Gitea account and its password are left as they are.")
+                               f"did here. It is yours; delete it only when you are sure, with: python3 -I {running} "
+                               "uninstall --delete-copies, in a terminal window of your own (it asks you to type the "
+                               "number of copies), or, once no copy of this skill is left on this computer, as you "
+                               "delete any folder of yours. Setup run again later finds this folder and goes on from it: "
+                               "the mirror account gets a new key, and your Gitea account and its password are left as "
+                               "they are.")
             self.assertEqual(lines[kept + 1], "Still on this computer, and not uninstall's to take:")
             self.assertTrue(all(x.startswith("  ") for x in lines[kept + 2:]), lines[kept:])
             self.assertIn("Gone now:", lines)

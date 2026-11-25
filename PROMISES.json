@@ -2170,6 +2170,38 @@
    "moved_why": "",
    "seen": "2026-11-25, in a reviewer's world 18 on 0.1.0's head ec9c9dc: GitHub held 4 branches and 1 tag; the copy lacked the branch whose name is not UTF-8 text (said by sync, by status, and by restore --check with exit 1). restore --to said \"restored someone/aa: 3 branch(es) and 1 tag(s)\" and exited 0, with no word that GitHub's last list held one more. Not new with that head. The maintainer's word, the same day: in 0.1.0.",
    "promise": "restore --to reads GitHub's list of branches and tags as the sync last read it, the same read restore --check makes (one function, last_seen_list). When the new home lacks a name of that list, it says so after its restored line: a count, the first five names through the shown form, and why where the record knows it (a name that is not UTF-8 text, which the forge cannot hold); the exit is 1. A GitHub branch named kept/... that the copy holds is left to row M128's lines. A record without that list is said as not read, never taken as none missing, and the exit is then 1 too. What restore pushes does not change, and two names that show alike stay two. Proven by one test: a project whose GitHub list holds a name that is not text (where the disk can hold one) and four branches taken out of the copy behind the tool's back (a plain one, one with a backtick pair, and two that show alike); restore --to exits 1 with the count, the names shown and the why for the one that is not text; the new home holds what was pushed as before; no call to GitHub; a whole project is the control (exit 0, no such line); a record without the list is said as not read, exit 1. Red on the head before this row."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#171",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G1_16_with_no_session_at_the_screen_the_dry_run_and_status_name_a_step_that_works_there",
+   "moved_why": "",
+   "id": "M143",
+   "codon": "G1.16",
+   "stand_in": "a Mac's launchctl (a stand-in's answer of 125 for a domain with no session at the screen)",
+   "seen": "2026-11-25, on a Mac (macOS 27.2.1, arm64), 0.1.0's release head 5a7b8c5 cloned from GitHub as a person would (scripts/mirror.py sha256 f7cc1b5b9ba08e72), in a test account reached by key over ssh only, with no session at the Mac's screen, no key, nothing of GitHub's copied: setup --dry-run answered 0 and said, as 8 of 12, \"Setup would install the forge as your own service (a launch agent) and start it.\", with no word that this account has no session at the screen. setup then answered 1 with \"The forge's service did not start: this account is not logged in at this Mac's screen, and on a Mac the forge starts only in a login session at the screen; it starts once this account is. Log in to this account at this Mac's screen, then run setup again\" (row M58). status right after it answered 1 with \"problem: the forge does not answer on 127.0.0.1:N; run setup again, which starts it and keeps every copy: python3 -I '<the skill's copy>' setup\" and \"problem: the sync timer is not loaded\", and no line of status said that this account is not logged in at the Mac's screen: the setup it names had just answered 1 without starting the forge. launchctl print of the account's own gui domain and of both labels each answered 125, before uninstall and after it (and seen 2026-11-24 over ssh on macOS 13.7.8, in a test account with no desktop process).",
+   "promise": "On a Mac, in an account with no session at the Mac's screen, the dry run says that the forge cannot start until this account is logged in at the Mac's screen, and status says that same cause with the one step that works in the state it read: with setup not finished, log in to this account at this Mac's screen, then run setup again; with both jobs' files in place (after a restart, say), log in there, then run status again, and setup again only if the forge still does not answer there; never \"run setup again\" alone: a step status names works in the state status read. Proven by one test with a stand-in launchctl that answers 125 for the account's domain (the dry run's line and status's lines, in both states), against a control where the domain answers 0."
+  },
+  {
+   "owner": "maintainer",
+   "proven": "",
+   "moved_by_person": "",
+   "exception": "",
+   "issue": "#172",
+   "first_ship_in": "0.1.0",
+   "ship_in": "0.1.0",
+   "test": "test_G6_12_every_printed_command_names_a_copy_of_the_tool_that_is_there",
+   "moved_why": "",
+   "id": "M144",
+   "codon": "G6.12",
+   "stand_in": "none",
+   "seen": "2026-11-25, the same run as M143's: uninstall answered 0, listed the skill's own copy (<the folder of copies>/mirror.py) as gone and kept the folder of copies (\"delete it only when you are sure, with: uninstall --delete-copies\"). uninstall --delete-copies, run then from the clone with no terminal (as an agent runs it), answered 2: \"Needs you: deleting the copies cannot be undone, so the person does it themselves: in a terminal window of their own, they run python3 -I '/Users/<the person>/Library/Application Support/windstorm-mirror/mirror.py' uninstall --delete-copies and type the number of copies. Nothing was changed.\" That file was gone (test -e answered 1), so the step cannot run as printed. Read in the code: own_command always names the skill's own copy, whether or not it is there, so the same line comes on Linux.",
+   "promise": "Every command the tool prints for the person to run names a copy of the tool that is there when it is printed: the skill's own copy while it is there, or while whether it is there could not be read (every line as before); once uninstall has taken it away, the copy that is running (the clone or the plugin's folder), quoted. The Kept line also says how the folder of copies goes with no copy of the tool left on the computer: as the person deletes any folder of theirs. When no copy of the tool was read there (uninstall run from the skill's own copy, which it has just taken), it says only what was read: the skill's own copy is gone now, and if another copy of this skill is on this computer, its uninstall --delete-copies does it; no new read is made for it. Proven by one test that tries each printed command's file in the state it was printed in, with the own copy there and with it gone, seen red first on the line uninstall --delete-copies printed after uninstall; the line is run as printed at a terminal and asks for the number of copies; and, in a world of its own, uninstall run with the copy that runs set to the own copy's path (the one thing stood in for), seen red first on that commit's Kept line, which said that no copy of this skill was left on this computer."
   }
  ],
  "declined": []

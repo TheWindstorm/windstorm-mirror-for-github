@@ -1170,6 +1170,27 @@ LAUNCHD_WAIT = 30      # seconds launchd is given to let go of a job it was told
 LAUNCHD_NO_SCREEN = 125
 
 
+def mac_no_screen():
+    """M143 (G1.16): True only on a Mac whose account's own domain answers LAUNCHD_NO_SCREEN to `launchctl print
+    gui/<uid>` (seen with no session at the screen: 2026-11-24 on macOS 13.7.8, 2026-11-25 on macOS 27.2.1). Any
+    other answer, or none, is False, so every line built on it stays as it was; off a Mac nothing is read."""
+    return system()[0] == "darwin" and run(["launchctl", "print", f"gui/{os.getuid()}"]).returncode == LAUNCHD_NO_SCREEN
+
+
+def forge_no_screen(p):
+    """M143 (G1.16): the cause and the one step for a forge that does not answer while this account has no session
+    at the Mac's screen, a step that works there. Setup not finished (the sync's job file not written): log in at
+    the screen, then setup again. Both jobs' files in place (a restart, or a logout, since setup): the login is the
+    step, and status read after it says what is still owed; that the jobs load by themselves at the login is not
+    said, because it has not been seen."""
+    sync = os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+    if os.path.exists(p["plist"]) and os.path.exists(sync):
+        return ("this account is not logged in at this Mac's screen, and on a Mac the forge runs only in a login "
+                "session at the screen. Log in to this account at this Mac's screen, then run status again; if the "
+                f"forge still does not answer there, run setup again: {own_command(p, 'setup')}")
+    return f"{MAC_NO_SESSION}: {own_command(p, 'setup')}"
+
+
 def launchd_off(p, label):
     """G1.17 (seen 2026-11-24 on a Mac, macOS 27.2.1: setup run while the forge ran answered "code 5" and left it
     unloaded): take the job off and read it gone. 'gone' when `launchctl print` answers 113 (the family's rule 24),
@@ -3024,10 +3045,32 @@ def other_install_stop(p, cmd):
             f"this {cmd} would use {p['data']}. Nothing was changed. The one next step, to run as printed: {step}")
 
 
+def path_there(path):
+    """True, False (read, and not there) or None (the read failed): M144's three answers. A read that failed is never
+    taken for "not there"."""
+    try:
+        os.stat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+
+
+def tool_copy(p):
+    """M144 (G6.12): the copy of the tool a printed command names. The skill's own copy while it is there, or while
+    whether it is there could not be read (every line as before); once it is read gone (uninstall takes it), the
+    copy that is running, when that is read there (the clone, or the plugin's folder); None when neither is."""
+    if path_there(p["script"]) is not False:
+        return p["script"]
+    here = os.path.abspath(__file__)
+    return here if here != p["script"] and path_there(here) is True else None
+
+
 def own_command(p, *args):
-    """G6.12 (M60): a command for the person to run, with this skill's own copy, as it runs when pasted whole into a
-    shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
-    return " ".join(["python3", "-I", shlex.quote(p["script"]), *args])
+    """G6.12 (M60, M144): a command for the person to run, with a copy of this skill that is there (tool_copy), as it
+    runs when pasted whole into a shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
+    return " ".join(["python3", "-I", shlex.quote(tool_copy(p) or p["script"]), *args])
 
 
 def plugin_place(here):
@@ -3164,7 +3207,11 @@ def setup_plan(p, st):
         plan.append(f"give the '{st['mirror_user']}' account that owns the copies a new key of its own in "
                     f"{p['mirror_key']}, readable by you only (its key went with uninstall)")
     plan.append(f"copy this script to {p['script']}")
-    if system()[0] == "darwin":
+    if system()[0] == "darwin" and mac_no_screen():                    # M143: a step that works there
+        plan.append("install the forge as your own service (a launch agent), which cannot start now: this account is "
+                    "not logged in at this Mac's screen, and on a Mac the forge starts only in a login session at the "
+                    "screen. Setup would stop there; log in to this account at this Mac's screen, then run setup")
+    elif system()[0] == "darwin":
         plan.append("install the forge as your own service (a launch agent) and start it")
     else:
         base = os.path.dirname(p["unit"])
@@ -3583,8 +3630,11 @@ def cmd_status(args):
     except DoorShut as e:                           # G8.7: said in its one line, and nothing sent to that port
         code, ver, shut, shut_kind = 0, None, str(e)[len("problem: "):], e.kind
     up = code == 200                                # the door read mine AND the forge answered
+    no_screen = not up and not shut and mac_no_screen()     # M143: the cause is read, never guessed
     if shut:
         problems.append(shut)
+    elif no_screen:
+        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}: {forge_no_screen(p)}")
     elif not up:
         # M105 (the family's rule 7): the problem line ends with its one step. Setup starts the forge again and keeps
         # every copy, or stops with its own reason (seen 2026-11-24 with the service's python3 taken away).
@@ -3648,7 +3698,7 @@ def cmd_status(args):
                         "be read")
     when, tproblem = next_sync()
     if tproblem:
-        problems.append(tproblem)
+        problems.append(tproblem + (": this account is not logged in at this Mac's screen" if no_screen else ""))
     n, found = key_scan(p, st)
     if n == 0:
         problems.append("the key scan read no files, so it proves nothing")
@@ -3665,6 +3715,8 @@ def cmd_status(args):
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
         + (f", {no_lfs} without its large files" if no_lfs else ""))
     say(f"first copy: made on {local_time(st['go'])}, on your go" if st.get("go") else
+        "first copy: waiting for your go, which can be given once the forge answers (see the problem above)"
+        if no_screen else
         "first copy: waiting for your go: in a terminal window of your own, run " + own_command(p, "go")
         + " (it shows what will be copied and waits for your Enter); a sync then starts it")
     for x in notes:
@@ -4784,10 +4836,20 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
     if unreadable:
         pass
     elif os.path.exists(p["forge"]) and record_here and set(os.listdir(p["forge"])) & FORGE_NAMES:
+        # M144: while the skill's own copy is there (or could not be read), the words as before; once it is gone, a
+        # way that works with the copy of the tool that is there, and one with no copy of it left. When no copy of the
+        # tool was read there (uninstall run from the own copy itself), only what was read: the own copy is gone, and
+        # another copy only as an "if" (the maintainer's ruling, 11-25: no new read is made for it)
+        how = ("with: uninstall --delete-copies" if path_there(p["script"]) is not False else
+               f"with: {own_command(p, 'uninstall', '--delete-copies')}, in a terminal window of your own (it asks "
+               "you to type the number of copies), or, once no copy of this skill is left on this computer, as you "
+               "delete any folder of yours" if tool_copy(p) else
+               "as you delete any folder of yours; the skill's own copy is gone now, and if another copy of this skill "
+               "is on this computer, its uninstall --delete-copies does it, in a terminal window of your own")
         say(f"Kept: the folder of copies, {p['data']} ({n} copies), with the record of what the skill did here. It "
-            "is yours; delete it only when you are sure, with: uninstall --delete-copies. Setup run again later finds "
-            "this folder and goes on from it: the mirror account gets a new key, and your Gitea account and its "
-            "password are left as they are.")
+            f"is yours; delete it only when you are sure, {how}. Setup run again later finds this folder and goes on "
+            "from it: the mirror account gets a new key, and your Gitea account and its password are left as they "
+            "are.")
     elif record_here:
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
     elif not foreign:
