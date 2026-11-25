@@ -50,7 +50,8 @@ jobs:
           WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
           WSM_TEST_REPORT: ${{ runner.temp }}/report.json
           WSM_OTHER_ACCOUNT: nobody       # G8.7: another account holds the forge's port (sudo, no password, on runners)
-        run: python -I tests/test_mirror.py -v
+        # T9: the rule 3 gate runs in the job rule-3-gate below, so this job's colour says the suite
+        run: python -I tests/test_mirror.py -v --without-rule3-gate
       - name: Keep what this job saw pass, for the join
         if: always()
         uses: actions/upload-artifact@v4
@@ -92,7 +93,8 @@ jobs:
           WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
           WSM_TEST_REPORT: ${{ runner.temp }}/report.json
           WSM_OTHER_ACCOUNT: nobody       # G8.7: another account holds the forge's port (sudo, no password, on runners)
-        run: python -I tests/test_mirror.py -v
+        # T9: the rule 3 gate runs in the job rule-3-gate below, so this job's colour says the suite
+        run: python -I tests/test_mirror.py -v --without-rule3-gate
       - name: Keep what this job saw pass, for the join
         if: always()
         uses: actions/upload-artifact@v4
@@ -118,6 +120,19 @@ jobs:
       - name: Every proof the plan names, and every built row's test, passed on at least one of the event's jobs
         # T4: the reports of the event it runs on: four on a pull request, five on main and release-*.
         run: python -I tests/test_mirror.py --join --expect ${{ github.event_name == 'pull_request' && 4 || 5 }} reports/*/report.json
+  rule-3-gate:
+    # T9 (M131): the family's rule 3, alone: a row whose test leans on a stand-in is proven on a real machine
+    # before its version is tagged. Red here says what is still to prove, and hides no other red.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # a release branch is compared with main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Every row that leans on a stand-in is proven on a real machine (rule 3)
+        run: python -I tests/test_mirror.py -v --gate-only test_PROMISES_a_row_with_a_stand_in_is_proven_before_its_tag
   skill-spec:
     runs-on: ubuntu-24.04
     steps:

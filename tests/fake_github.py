@@ -38,6 +38,8 @@ class FakeGitHub:
         self.limit_answer = None              # (code, retry_after or None): GitHub's "spent" answer, for every keyed GET
         self.fail_page = None                 # (path, page) that answers 502
         self.slow = {}                        # full_name -> seconds to stall a git request
+        self.slow_fetch = {}                  # full_name -> seconds to stall a fetch's own request only (not a list)
+        self.fetches = []                     # full_name of each fetch's own request (a POST that asks no list)
         self.lfs_uploads = []                 # LFS batch calls that asked to upload (a batch call to download is a read)
         self.contents = {}                    # path in the skill's repository -> bytes, served with no key
         self.release = None                   # what /repos/<o>/<n>/releases/latest answers (no key needed)
@@ -114,6 +116,28 @@ class FakeGitHub:
         out = subprocess.run(["git", "--git-dir", bare, *args], check=True, capture_output=True, text=True)
         self.touch(full)
         return out.stdout
+
+    def plant(self, full, ref, at=None):
+        """Put ref (bytes kept as the tool keeps them: str with surrogateescape) at the commit `at` names, or take it
+        away when at is None, in the project's packed-refs only. A name a file system cannot hold as a file (bytes
+        that are not UTF-8 on a Mac; two names one file there) stays one line here on every system, as GitHub
+        holds it."""
+        owner, name = full.split("/")
+        bare = os.path.join(self.root, owner, name + ".git")
+        subprocess.run(["git", "--git-dir", bare, "pack-refs", "--all"], check=True)
+        raw = os.fsencode(ref)
+        path = os.path.join(bare, "packed-refs")
+        with open(path, "rb") as f:
+            lines = [x for x in f.read().split(b"\n") if x and not x.startswith((b"#", b"^"))]
+        lines = [x for x in lines if x.split(b" ", 1)[1] != raw]
+        if at is not None:
+            sha = subprocess.run(["git", "--git-dir", bare, "rev-parse", "--verify", at + "^{}"], check=True,
+                                 capture_output=True).stdout.strip()
+            lines.append(sha + b" " + raw)
+        lines.sort(key=lambda x: x.split(b" ", 1)[1])
+        with open(path, "wb") as f:
+            f.write(b"# pack-refs with: sorted \n" + b"".join(x + b"\n" for x in lines))
+        self.touch(full)
 
     def touch(self, full):
         if full in self.repos:
@@ -289,6 +313,10 @@ class FakeGitHub:
                     self.end_headers()
                     return
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if method == "POST" and "git-upload-pack" in u.path and b"ls-refs" not in body:
+                    fake.fetches.append(full)                  # a fetch (protocol v2 asks a list with ls-refs)
+                    if full in fake.slow_fetch:
+                        time.sleep(fake.slow_fetch[full])
                 env = dict(os.environ, GIT_PROJECT_ROOT=fake.root, GIT_HTTP_EXPORT_ALL="1",
                            PATH_INFO=u.path, QUERY_STRING=u.query, REQUEST_METHOD=method,
                            CONTENT_TYPE=self.headers.get("Content-Type", ""),

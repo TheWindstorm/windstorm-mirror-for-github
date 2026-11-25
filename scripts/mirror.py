@@ -561,10 +561,25 @@ def text_of(data):
     return os.fsdecode(data)
 
 
+def program_lines(text):
+    """A program's words cut into lines at a carriage return too (M120), as they came: read, never shown."""
+    return [x for x in re.split(r"\r\n|\r|\n", text or "") if x.strip()]
+
+
 def shown_lines(text):
     """A program's words as lines for a PERSON (M120, the owner's ruling 11-24): cut at a carriage return too, so
-    words after one never reach the screen over the words before it. Records are read with lines_of."""
-    return [x for x in re.split(r"\r\n|\r|\n", text or "") if x.strip()]
+    words after one never reach the screen over the words before it. Records are read with lines_of. M134 (family
+    rule 31(B), the owner's ruling 11-25): git and the forge quote a name somebody else chose in their own words, so
+    each line goes through shown_line; nothing decides by these lines."""
+    return [shown_line(x) for x in program_lines(text)]
+
+
+def shown_line(line):
+    """One line of a program's words for a person: a backtick and each of the two characters of a dollar-parenthesis
+    are put as a ?, every other character stays as it came (so the words can be searched for), and a line where one
+    was put says so. No line is dropped for it."""
+    out = line.replace(BACKTICK, "?").replace(DOLLAR_PAREN, "??")
+    return line if out == line else out.rstrip() + "; " + SHOWN_CHANGED
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -1109,6 +1124,31 @@ LFS_UNREAD = ("whether it keeps files with Git LFS could not be read from its .g
               "refreshed; the next sync tries again")
 NOT_TEXT = ("{n} branch or tag name(s) on GitHub are not UTF-8 text, which the forge cannot hold, so they are not in "
             "the copy ({names}); every other branch and tag is copied")
+NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub lists ({names}), so the copy was not "
+                 "moved; it stays as it was until a sync shows every name at GitHub's commit")
+FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
+                       "({names}), so it is not called whole; the next sync tries again")
+KEPT_CLASH = ("GitHub holds {n} branch(es) named kept/... ({names}), the name this version gives the copy's own kept "
+              "refs, so it copies such a project once and cannot refresh it; nothing in its copy was changed. To have "
+              "it refreshed again, give that branch another name on GitHub; the copy as it was stays in your forge")
+RESTORE_HIDDEN = ("{n} of those name(s) hold a character this tool does not print as it is (each such character is put "
+                  "as a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
+                  "holds it:")
+RESTORE_LACKS = ("but {n} branch or tag name(s) GitHub held when the sync last read its list are not in the new home, "
+                 "because the copy in your forge does not hold them ({names}){why}. Run restore --check, which names "
+                 "each difference; a sync brings over what has changed on GitHub since, where the forge can hold it.")
+RESTORE_LIST_UNREAD = ("but what GitHub held when the sync last read its list could not be read from this computer's record "
+                       "of {full}, so whether the new home lacks a branch or tag GitHub held is not known. Run sync, then "
+                       "restore --check, which compares the copy with that list.")
+RESTORE_TO_HIDDEN = ("The new home's address holds a character this tool does not print as it is, so no line is given "
+                     "to bring them over here; this line lists every kept/ name the copy holds, as git holds it:")
+RESTORE_LEFT_OUT = ("but {n} GitHub branch(es) named kept/..., which the copy in your forge holds, are not in the new "
+                    "home ({names}): such a branch shares its name with the copy's own kept refs, so restore --to does "
+                    "not bring it back yet. To bring them over yourself:")
+TAG_NOT_KEPT = ("{full}: {short} was {what} on GitHub; it pointed at {at}, not a commit, so nothing of it could be "
+                "kept (a kept ref is a branch, and a branch holds only a commit)")
+LISTING_UNREAD = ("GitHub's list of its branches and tags could not be read ({why}), so its copy was not refreshed and is "
+                  "not called whole; nothing in it is called wrong, and the next sync tries again")
 UNFORESEEN = ("the tool met something in this project it was not built for, so its copy was not refreshed; every other "
               "project went on, and the next sync tries again")
 
@@ -2017,9 +2057,11 @@ def forge_refusal(text):
     ls = [x.strip() for x in shown_lines(text)]
     said = [re.sub(r"^remote:\s*(error:|fatal:)\s*", "", x) for x in ls if re.match(r"^remote:\s*(error:|fatal:)", x)]
     said = [x.strip() for x in said if x.strip()]
-    refused = next((x for x in ls if x.startswith("! [remote rejected]")), "")
+    # The refused ref's reason is read from the line as it came (the shown line can end in the sentence about a ?),
+    # then shown on its own.
+    refused = next((x.strip() for x in program_lines(text) if x.strip().startswith("! [remote rejected]")), "")
     why = re.search(r"\(([^()]*)\)\s*$", refused)
-    words = said[:2] + ([why.group(1)] if why else [])
+    words = said[:2] + ([shown_line(why.group(1))] if why else [])
     return redact("; ".join(words)) if words else git_reason(text)
 
 
@@ -2138,7 +2180,10 @@ def refs_under(cache, *prefixes):
 
 def keep_before_moving(cache, report, full):
     """G5.1: before a branch or tag of the copy moves backwards, is rewritten or is deleted, keep its old commit
-    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). Returns the new kept refs, or None on a failure."""
+    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). For a tag, its old commit is the commit it
+    pointed at, through any tag objects (M126): an annotated tag's own message is not kept. A tag that pointed at no
+    commit (a file or a tree) cannot be kept as a branch, and its line says so. Returns the new kept refs, or None on
+    a failure."""
     now = refs_under(cache, "refs/heads", "refs/tags")
     held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
     day = time.strftime("%Y-%m-%d", time.gmtime())
@@ -2153,17 +2198,31 @@ def keep_before_moving(cache, report, full):
         if new and name.startswith("heads/") and git(cache, "merge-base", "--is-ancestor", old, new).returncode == 0:
             continue                                           # moved forward: nothing is lost
         short = name[len("heads/"):] if name.startswith("heads/") else name
+        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
+        keep = old
+        if name.startswith("tags/"):                           # M126: the commit under any tag objects
+            peeled = git(cache, "rev-parse", "--verify", "-q", old + "^{}")
+            kind = git(cache, "cat-file", "-t", peeled.stdout.strip()) if peeled.returncode == 0 else peeled
+            if kind.returncode != 0:
+                return None                                    # a read that failed is never taken for a no (G5.4)
+            if kind.stdout.strip() != "commit":
+                at = {"blob": "a file", "tree": "a folder (a tree)"}.get(kind.stdout.strip(), kind.stdout.strip())
+                said, note = shown_one(short)
+                report.append(TAG_NOT_KEPT.format(full=full, short=said, what=what, at=at) + note)
+                continue
+            keep = peeled.stdout.strip()
         dest, n = f"refs/kept/{day}/{short}", 1
         while True:
             have = git(cache, "rev-parse", "--verify", "-q", dest).stdout.strip()
-            if not have or have == old:
+            if not have or have == keep:
                 break
             n += 1
             dest = f"refs/kept/{day}/{short}-{n}"
-        if git(cache, "update-ref", dest, old).returncode != 0:
+        if git(cache, "update-ref", dest, keep).returncode != 0:
             return None
-        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
-        report.append(f"{full}: {short} was {what} on GitHub; its old commit is kept as kept/{dest[len('refs/kept/'):]}")
+        said, note = shown_one(short)
+        kept, more = shown_one(dest[len("refs/kept/"):])
+        report.append(f"{full}: {said} was {what} on GitHub; its old commit is kept as kept/{kept}" + (note or more))
         made.append(dest)
     return made
 
@@ -2207,12 +2266,96 @@ def written_not_text(name):
     return any("\udc80" <= c <= "\udcff" for c in name)
 
 
+BACKTICK, DOLLAR_PAREN = chr(96), "$" + chr(40)               # spelled so, as no string the tool prints holds them
+
+
+def shows_as_is(name):
+    """A name (the state's form) this tool prints as it is: every character printable, no stand-in for a byte, and
+    no backtick or dollar-parenthesis (family rule 31(B): a line relayed through a shell runs nothing, and names on
+    GitHub are chosen by whoever can push there)."""
+    return shown_as_is(name) == name
+
+
+def shown_as_is(name):
+    """The name as this tool prints it: each character that cannot be shown as it is, each backtick, and both
+    characters of each dollar-parenthesis put as a ?. Only the printed form; the name itself is stored, copied and
+    pushed as it is."""
+    out = "".join(c if c.isprintable() and not "\udc80" <= c <= "\udcff" and c != BACKTICK else "?" for c in name)
+    return out.replace(DOLLAR_PAREN, "??")
+
+
+SHOWN_CHANGED = "a ? stands for each character this tool does not print as it is"
+
+
+def shown_names(names, first=5):
+    """Names for a line a person reads (family rule 31(B)): the first few through shown_as_is, the rest counted, and
+    the line says when a shown name is not the name itself. Only for the eyes: nothing that decides reads it, and two
+    names that show the same stay two."""
+    shown = [shown_as_is(n) for n in names]
+    out = ", ".join(shown[:first]) + (f" and {len(shown) - first} more" if len(shown) > first else "")
+    return out + ("; " + SHOWN_CHANGED if shown[:first] != list(names[:first]) else "")
+
+
+def shown_one(name):
+    """One name for a line a person reads, with the same words when what is shown is not the name itself."""
+    return shown_as_is(name), ("" if shows_as_is(name) else f" ({SHOWN_CHANGED})")
+
+
+def forge_folder(p, forge, name):
+    """The folder in which the forge keeps one copy (stock Gitea: data/gitea-repositories/<owner>/<name>.git, each
+    in lower case), read from the disk; "" when it is not there."""
+    root = os.path.join(p["forge"], "data", "gitea-repositories", forge.user.lower())
+    path = os.path.join(root, name.lower() + ".git")
+    return path if os.path.isfile(os.path.join(path, "HEAD")) else ""
+
+
 def not_text_line(refs):
     """The words for a copy without the names the forge cannot hold (refs as git gave them)."""
     shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
              for r in sorted(refs)]
-    return NOT_TEXT.format(n=len(shown), names=", ".join(shown[:5]) + (
-        f" and {len(shown) - 5} more" if len(shown) > 5 else ""))
+    return NOT_TEXT.format(n=len(shown), names=shown_names(shown))
+
+
+def github_listing(cache, url, key, limit):
+    """M123: GitHub's own list of the branches and tags the fetch asks for (FETCH_SPEC takes these two and nothing
+    else), by its bytes in the state's one form; {} for a project with none (read, and none); None when it could
+    not be read, which is never taken as none; and the words for why, when it could not be."""
+    out = twice(lambda: github_call(cache, url, "ls-remote", "--heads", "--tags", "github", key=key, timeout=limit))
+    if out is None:
+        return None, f"it took longer than {limit} s, and so did the retry"
+    if out.returncode != 0:
+        return None, git_reason(out.stderr).replace(key, "<the key>") if key else git_reason(out.stderr)
+    got = {}
+    for line in lines_of(out.stdout):
+        sha, tab, ref = line.partition("\t")
+        if not tab or not sha or ref.endswith("^{}") or not ref.startswith(("refs/heads/", "refs/tags/")):
+            continue
+        got[written(ref)] = sha
+    return got, ""
+
+
+def not_as_listed(held, first, second):
+    """M123: (wrong, seen). wrong: each name whose value in held (the cache, or the forge) is neither the first
+    listing's nor the second's (None: not read), with why; a name that moved or went on GitHub between the two
+    listings matches one of them. seen: what GitHub showed, per name the listing held agrees with."""
+    last = second if second is not None else first
+    wrong, seen = [], {}
+    for ref in sorted(set(held) | set(first) | set(last)):
+        if held.get(ref) in (first.get(ref), last.get(ref)):
+            if ref in held:
+                seen[ref] = held[ref]
+        else:
+            wrong.append((ref, "missing" if ref not in held else "not on GitHub" if ref not in last
+                          else "at another commit"))
+    return wrong, seen
+
+
+def not_as_listed_line(wrong, words=NOT_AS_LISTED):
+    """The words for names the copy would not hold (or, after the push, does not hold) as GitHub lists them, at
+    most five shown."""
+    shown = [(r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]) + ": " + why
+             for r, why in wrong]
+    return words.format(n=len(shown), names=shown_names(shown))
 
 
 def push_specs(cache):
@@ -2253,12 +2396,23 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         return ADDRESS_UNREAD.format(why=said)
     if not same:
         return REWRITTEN.format(where=said)
+    first, why = github_listing(cache, url, key, limit)         # M123: GitHub's own list, read before the fetch
+    if first is None:
+        return LISTING_UNREAD.format(why=why)
     out = twice(lambda: github_call(cache, url, "fetch", "--prune", "--quiet", "github", key=key, timeout=limit))
     if out is None:
         return f"the fetch from GitHub took longer than {limit} s, and so did the retry"
     if out.returncode != 0:
         return "the fetch from GitHub failed: " + git_reason(out.stderr).replace(key, "<the key>")
-    rec.update(seen_refs=refs_of(cache), seen_at=now_utc())      # G7.1: what GitHub showed, written down
+    held = refs_of(cache)
+    second, why = (None, "") if held == first else github_listing(cache, url, key, limit)   # a name may have moved
+    if held != first and second is None:
+        return LISTING_UNREAD.format(why=why)
+    wrong, seen = not_as_listed(held, first, second)
+    # G7.1: what GitHub showed, written down from GitHub's own list, never from the cache (M123)
+    rec.update(seen_refs=seen if not wrong else (second if second is not None else first), seen_at=now_utc())
+    if wrong:                                  # M123: the forge is not given a set GitHub does not list
+        return not_as_listed_line(wrong)
     lfs = None
     if not refs_of(cache):
         pass                                   # an empty repository has no large files to fetch or push
@@ -2284,10 +2438,19 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     git(cache, "config", "remote.forge.url", url)
     for i, spec in enumerate(FORGE_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.forge.fetch", spec)
-    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "forge", timeout=limit))
+    # M125: --no-tags, so git does not follow tags and write the forge's tags back into the cache's refs/tags, where
+    # the fetch from GitHub has just taken away every tag GitHub deleted. This fetch writes refs/forge/ and refs/kept/ only.
+    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "--no-tags", "forge", timeout=limit))
     if out is None or out.returncode != 0:
         return "what the copy holds now could not be read from the forge" + (
             "" if out is None else ": " + last_line(out.stderr))
+    # M127 (due 0.1.1): a GitHub branch named kept/... shares its name with a kept ref of the copy once the copy holds
+    # it, and git refuses a push with two sources for one name. Said in plain words, before anything is pushed.
+    there = refs_under(cache, "refs/forge/heads")                 # the copy's names, as just read from the forge
+    clash = sorted(r for r in refs_under(cache, "refs/heads")
+                   if r.startswith("refs/heads/kept/") and "refs/forge/heads/" + r[len("refs/heads/"):] in there)
+    if clash:
+        return KEPT_CLASH.format(n=len(clash), names=shown_names([written(r)[len("refs/heads/"):] for r in clash]))
     kept = keep_before_moving(cache, report, full)
     if kept is None:
         return "an old commit could not be kept, so the copy was not moved"
@@ -2309,11 +2472,20 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
                 forge_refusal(out.stderr))
     if dropped:
         report.append(f"{full}: {len(dropped)} kept ref(s) older than the kept period were dropped")
+    back = forge_refs_of(forge, check["name"])                    # M123: the copy is the forge; read it back
+    if back is None:
+        return "what the copy holds after the push could not be read from the forge, so it is not called whole"
+    # Both sides leave out refs/heads/kept/: in the forge that is where the tool's own kept refs live, so a GitHub
+    # branch named kept/... is checked in the cache (against GitHub's list, above), not here.
+    back = {written(r): s for r, s in back.items() if not r.startswith("refs/heads/kept/")}
+    want = {r: s for r, s in seen.items() if not written_not_text(r) and not r.startswith("refs/heads/kept/")}
+    if back != want:
+        return not_as_listed_line(not_as_listed(back, want, want)[0], FORGE_NOT_AS_LISTED)
     # M120: a name the forge cannot hold is a known limit of this copy, not a failed refresh (the owner's ruling,
     # 11-24): it goes the road lfs_missing goes, a flag said at every sync and in status.
-    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
+    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=seen,
                last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
-               lfs_missing=(lfs is False), left_out=sorted(r for r in rec.get("seen_refs") or {} if written_not_text(r)))
+               lfs_missing=(lfs is False), left_out=sorted(r for r in seen if written_not_text(r)))
     return ""
 
 
@@ -3613,12 +3785,13 @@ def cmd_restore(args):
             mine = 0
             have = {written(r): s for r, s in refs_under(into, "refs/heads", "refs/tags").items()
                     if not r.startswith("refs/heads/kept/")}
-            seen = rec.get("seen_refs") or rec.get("refs") or {}            # written(): the state's one form
+            seen = last_seen_list(rec) or {}                               # written(): the state's one form
             for ref in sorted(set(have) | set(seen)):
                 if have.get(ref) != seen.get(ref):
                     mine += 1
-                    diffs.append(f"{name}: {ref} is {(have.get(ref) or 'missing')[:12]} in the copy, "
-                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen")
+                    said, note = shown_one(ref)
+                    diffs.append(f"{name}: {said} is {(have.get(ref) or 'missing')[:12]} in the copy, "
+                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen{note}")
             out = git(into, "fsck", "--no-progress", "--no-dangling")
             if out.returncode != 0:
                 mine += 1
@@ -3642,18 +3815,48 @@ def github_hosts():
     return hosts
 
 
+def last_seen_list(rec):
+    """M135: GitHub's list of branches and tags as the sync last read it, as restore --check reads it (written(): the
+    state's one form); None when the record holds no list at all (rule 6: never taken as none)."""
+    if not isinstance(rec.get("seen_refs"), dict) and not isinstance(rec.get("refs"), dict):
+        return None
+    return rec.get("seen_refs") or rec.get("refs") or {}
+
+
 def restore_to(p, st, forge, url, repository):
     """G7.3: one copy, every branch and tag, into a new home the person names; never GitHub (INV1)."""
     if not repository:
         say("Name the repository: restore --to <url> <owner/name>.")
         return 2
+    # M132 (family rule 31(B), a reviewer's world 20, 11-25): the --to value and the project's name are typed by a
+    # person or their agent and passed on; each line shows them through the shown form, and no command carries one
+    # that this tool does not print as it is. The restore itself uses them as they are.
+    to, who = shown_as_is(url), shown_as_is(repository)
+    note = "" if shows_as_is(url) and shows_as_is(repository) else f" ({SHOWN_CHANGED})"
     low = url.lower()
     host = (urllib.parse.urlsplit(url).hostname or re.sub(r"^[^@]*@([^:/]+).*$", r"\1", url)).lower()
     if any(h == host or host.endswith("." + h) for h in github_hosts()) or "github.com" in low:
+        if not shows_as_is(url):
+            say("This skill never writes to GitHub, so it will not restore there. The address given holds a character "
+                f"this tool does not print as it is ({to}; {SHOWN_CHANGED}), so no line is given to put it back there "
+                "yourself. Make the new, empty repository on GitHub, then run restore --to again with its address.")
+            return 2
+        # M132: one line a person runs as it is printed: the copy's own folder in the forge is on this computer, so
+        # git needs no login to the forge; each part through shlex.quote, and none from a name it does not print.
+        folder = forge_folder(p, forge, copy_name(repository)) if "/" in repository else ""
+        if not folder or not shows_as_is(folder):
+            say("This skill never writes to GitHub, so it will not restore there. "
+                + ("The copy's own folder in your forge could not be found" if not folder else
+                   "The copy's folder holds a character this tool does not print as it is")
+                + ", so no line is given to put it back there yourself. Run status to see the copies the forge holds, "
+                  "and name one of them as owner/name.")
+            return 2
         say("This skill never writes to GitHub, so it will not restore there. To put this project back on GitHub "
-            "yourself, clone it from your forge and push it with your own login:")
-        say(f"  git clone --mirror http://127.0.0.1:{st['port']}/{forge.user}/{copy_name(repository)}.git")
-        say("  cd <that folder> and run: git push --mirror <the new, empty GitHub repository>")
+            "yourself, make a new, empty repository there, then run this line in a terminal:")
+        say(f"  git --git-dir {shlex.quote(folder)} push --mirror {shlex.quote(url)}")
+        say("Run it as it stands: it sends every branch and tag of the copy, with its kept refs, from the copy's own "
+            "folder in your forge to the new repository, with your own login to GitHub, and changes nothing in the "
+            "copy.")
         return 2
     rec = next((r for r in (st.get("repos") or {}).values()
                 if (r.get("full_name") or "").lower() == repository.lower()
@@ -3661,10 +3864,10 @@ def restore_to(p, st, forge, url, repository):
     try:
         cur = forge.by_id(rec["forge_id"]) if rec and rec.get("forge_id") else None
     except CouldNotRead as e:
-        say(f"The copy of {repository} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
+        say(f"The copy of {who}{note} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
         return 1
     if not cur:
-        say(f"There is no copy of {repository} in the forge. Run status to see the copies it holds, and name one "
+        say(f"There is no copy of {who}{note} in the forge. Run status to see the copies it holds, and name one "
             "of them as owner/name.")
         return 2
     # The person's own git login for the new home; the skill's keys are not used there.
@@ -3681,13 +3884,13 @@ def restore_to(p, st, forge, url, repository):
         into = os.path.join(work, "copy.git")
         why = clone_copy(forge, cur["name"], into)
         if why:
-            say(f"{repository}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
+            say(f"{who}{note}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
             return 1
         mine = dict(os.environ, GIT_TERMINAL_PROMPT="0")
         run(["git", "--git-dir", into, "remote", "add", "home", url], env=mine)
         said = uses_lfs(into)
         if said is None:
-            say(f"Whether {repository} keeps files with Git LFS could not be read from its .gitattributes, so nothing "
+            say(f"Whether {who}{note} keeps files with Git LFS could not be read from its .gitattributes, so nothing "
                 "was pushed. Run restore --check, then restore --to again.")
             return 1
         if said and has_git_lfs():
@@ -3715,9 +3918,55 @@ def restore_to(p, st, forge, url, repository):
                 "empty repository.")
             return 1
         heads = sum(1 for r in sent if r.startswith("refs/heads/"))
-        say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
-            "the kept refs stay in your forge")
-        return 0
+        say(f"restored {who}: {heads} branch(es) and {len(sent) - heads} tag(s) to {to}; "
+            f"the kept refs stay in your forge{note}")
+        # M128: a name GitHub held, in the copy, that the new home did not get is said by name, and the exit is not 0.
+        # Only a GitHub branch named kept/... can be one (it shares its name with the copy's own kept refs, M127):
+        # every tag and every other branch was sent, and "there != sent" above stops restore before this otherwise.
+        held = {written(r) for r in refs_under(into, "refs/heads", "refs/tags")}
+        home = {written(r) for r in there}
+        left = sorted(r for r in (rec.get("refs") or {}) if r in held and r not in home)
+        # M135: a name GitHub's list held when the sync last read it, which the copy does not hold and so the new home
+        # did not get, is said too (a name that is not text, one GitHub added since, one taken out of the copy), with
+        # why where the record knows it; the exit is then not 0. What restore pushes does not change.
+        seen = last_seen_list(rec)
+        lacking = None if seen is None else sorted(r for r in seen if r not in home and r not in left)
+        if seen is None:
+            say(RESTORE_LIST_UNREAD.format(full=who + note))
+        elif lacking:
+            odd = sum(1 for r in lacking if written_not_text(r))
+            say(RESTORE_LACKS.format(
+                n=len(lacking),
+                names=shown_names([r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
+                                   for r in lacking]),
+                why=f"; {odd} of them are not UTF-8 text, which the forge cannot hold" if odd else ""))
+        if left:
+            # Each name stands for itself only where it can be read as it is (rule 31: a name we did not write is
+            # never handed to a shell raw): one whole line per name, every name, each part through shlex.quote.
+            hidden = [r for r in left if not shows_as_is(r)]
+            shown = [r[len("refs/heads/"):] for r in left]                  # only branches: every tag was sent
+            say(RESTORE_LEFT_OUT.format(n=len(left), names=shown_names(shown)))
+            folder = forge_folder(p, forge, cur["name"])
+            if not folder:
+                say("The copy's own folder in the forge could not be found, so no line is given to bring them over. "
+                    "Run restore --check, and open an issue with these lines if it says the copy is whole.")
+                return 1
+            if not shows_as_is(url):
+                say(RESTORE_TO_HIDDEN)
+                say(f"  git --git-dir {shlex.quote(folder)} for-each-ref refs/heads/kept/")
+                say("Each can be sent from the copy's own folder in your forge with git push, naming the new home and "
+                    "the name yourself; that changes nothing in the copy.")
+                return 1
+            for r in left:
+                if r not in hidden:
+                    say(f"  git --git-dir {shlex.quote(folder)} push {shlex.quote(url)} {shlex.quote(r)}")
+            if hidden:
+                say(RESTORE_HIDDEN.format(n=len(hidden)))
+                say(f"  git --git-dir {shlex.quote(folder)} for-each-ref refs/heads/kept/")
+            say("Run each git line above as it stands, in a terminal: each sends one name from the copy's own folder "
+                "in your forge to the new home, with your own login there, and changes nothing in the copy.")
+            return 1
+        return 0 if lacking == [] else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

@@ -1639,6 +1639,30 @@ class AtTerminal(io.StringIO):
         return True
 
 
+def disk_holds(where, name):
+    """Whether the disk under the folder `where` can hold a file of that name at all (a Mac's refuses bytes that
+    are not UTF-8): asked of the disk, never guessed by the system's name."""
+    d = tempfile.mkdtemp(dir=where)
+    try:
+        open(os.path.join(d, name), "w").close()
+        return True
+    except OSError:
+        return False
+    finally:
+        shutil.rmtree(d)
+
+
+def disk_folds(where, a, b):
+    """Whether the disk under the folder `where` makes the names a and b one file (a Mac's folds case and the two
+    spellings of an accented letter): asked of the disk, never guessed by the system's name."""
+    d = tempfile.mkdtemp(dir=where)
+    try:
+        open(os.path.join(d, a), "w").close()
+        return os.path.exists(os.path.join(d, b))
+    finally:
+        shutil.rmtree(d)
+
+
 class World:
     """A stand-in GitHub, and a real forge of the person's own, set up and running, with the person's key kept."""
 
@@ -1878,8 +1902,9 @@ class G3(unittest.TestCase):
                 self.assertFalse(any(key in a for a in cmd), f"the key was on a command line: {cmd[:4]}")
                 holds = any(key in v or __import__("base64").b64encode(f"x-access-token:{key}".encode()).decode() in v
                             for v in env.values())
-                if holds:
-                    self.assertIn("fetch", cmd, f"the key was given to a process that does not fetch: {cmd[:6]}")
+                if holds:                       # the fetch, and the read of GitHub's own list before it (M123)
+                    self.assertTrue("fetch" in cmd or "ls-remote" in cmd,
+                                    f"the key was given to a process that does not read GitHub: {cmd[:6]}")
             hits, read = files_holding(w.home.tmp, key)
             self.assertGreater(read, 0)
             self.assertEqual(hits, [mirror.key_path(w.p, "someone")], "the key was written somewhere else")
@@ -2272,8 +2297,8 @@ class G3(unittest.TestCase):
         def names(w, twin=None):
             w.gh.commit("someone/aa", {"a": b"1"})
             w.gh.commit("someone/aa", {"b": b"2"}, branch="side")
-            w.gh.git("someone/aa", "update-ref", "refs/heads/a\udcffb", "side")
-            w.gh.git("someone/aa", "tag", "t\udcc3x", "main")
+            w.gh.plant("someone/aa", "refs/heads/a\udcffb", "side")
+            w.gh.plant("someone/aa", "refs/tags/t\udcc3x", "main")
             w.gh.git("someone/aa", "update-ref", "refs/heads/c" + (twin or "\u0085") + "d" + (twin or "\u2028") + "e",
                      "main")                                                    # UTF-8 that splitlines breaks
             w.gh.commit("someone/bb", {"z": b"0"})       # bb: the same names, in a project nothing else is wrong in
@@ -2287,8 +2312,19 @@ class G3(unittest.TestCase):
             never one fewer unnamed."""
             three(w, lambda w: names(w, twin))
             rc, out = sync_in(w, lang, "lfs")
+            if not disk_holds(os.path.dirname(w.p["state"]), "a\udcffb"):
+                # A disk that cannot hold such a name as a file (seen: a Mac's) cannot fetch it either: the project
+                # is a named problem in git's words, never the left-out road, and the projects after it are copied.
+                self.assertEqual(rc, 1, out)
+                self.assertIn("problem: someone/aa: the fetch from GitHub failed: ", out)
+                self.assertNotIn("not UTF-8 text", out)
+                for n in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
+                rc, said = sync_in(w, lang, "lfs", "status")
+                self.assertIn("\ncopies: 3 on GitHub, 2 copied, 1 behind, 0 unreadable\n", said)
+                return None
             self.assertEqual(rc, 0, out)
-            self.assertIn("problem: someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)
+            self.assertIn("problem: someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a?b, tag t?x; " + mirror.SHOWN_CHANGED), out)
             gh = gh_raw(w, "aa")
             self.assertEqual(len(gh), 5 + 2 * len(blanks))
             want = {r: s for r, s in gh.items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
@@ -2323,11 +2359,13 @@ class G3(unittest.TestCase):
             # are copied whole.
             with World(self) as w:
                 out = counted(w, lang)
+                if out is None:
+                    continue
                 self.assertIn(b"refs/heads/c\xc2\x85d\xe2\x80\xa8e", forge_raw(w, "aa"))
                 self.assertIn(b"refs/tags/v3000\xe3\x80\x80", forge_raw(w, "aa"))     # a tag ending in a blank
                 for n in ("bb", "cc"):
                     self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
-                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a\\udcffb, tag t\\udcc3x"), out)   # status
+                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a?b, tag t?x; " + mirror.SHOWN_CHANGED), out)   # status
         with World(self) as w:                                  # 2, the twin: "_" in every place a blank was
             counted(w, "en_US.UTF-8", twin="_")
         # 3. A .gitattributes that cannot be read is never taken as no LFS: the project is named, the rest copied.
@@ -2447,10 +2485,21 @@ class G3(unittest.TestCase):
         # the others are unchanged the next time, and no line says "not refreshed" or "cannot refresh" of it.
         for label, name in (("planted", "refs/heads/a\udcffb"), ("control", "refs/heads/a_b")):
             with World(self) as w:
-                three(w, lambda w: (w.gh.commit("someone/aa", {"a": b"1"}), w.gh.git("someone/aa", "update-ref", name, "main")))
+                three(w, lambda w: (w.gh.commit("someone/aa", {"a": b"1"}), w.gh.plant("someone/aa", name, "main")))
                 self.assertIn(name.encode("utf-8", "surrogateescape"), gh_raw(w, "aa"))        # the premise
                 time.sleep(1.1)                        # pushed_at has whole seconds: a push in a fetch's own second is fetched again
-                limit = "problem: someone/aa: " + mirror.NOT_TEXT.format(n=1, names="a\\udcffb")
+                limit = "problem: someone/aa: " + mirror.NOT_TEXT.format(n=1, names="a?b; " + mirror.SHOWN_CHANGED)
+                if label == "planted" and not disk_holds(os.path.dirname(w.p["state"]), "a\udcffb"):
+                    # A disk that cannot hold the name (seen: a Mac's): a named problem at every sync, in git's
+                    # words, never the left-out road, and the others copied (M123's guard, M124's cure).
+                    for i in (1, 2):
+                        rc, out = sync_in(w, "en_US.UTF-8", "lfs")
+                        self.assertEqual(rc, 1, out)
+                        self.assertIn("problem: someone/aa: the fetch from GitHub failed: ", out)
+                        self.assertNotIn(limit, out)
+                        for n in ("bb", "cc"):
+                            self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+                    continue
                 for i in (1, 2, 3):
                     rc, out = sync_in(w, "en_US.UTF-8", "lfs")
                     self.assertEqual(rc, 0, f"{label} {i}: {out}")
@@ -2467,13 +2516,13 @@ class G3(unittest.TestCase):
                 rc, out = sync_in(w, "en_US.UTF-8", "lfs", "status")
                 self.assertNotRegex(out, r"not refreshed|cannot refresh|last good sync: none yet", out)
                 self.assertIn(f"\ncopies: 3 on GitHub, 3 copied, {1 if label == 'planted' else 0} behind, 0 unreadable", out)
-                self.assertEqual(f"problem: someone/aa: {mirror.NOT_TEXT.format(n=1, names='a' + chr(92) + 'udcffb')}"
+                self.assertEqual(f"problem: someone/aa: {mirror.NOT_TEXT.format(n=1, names='a?b; ' + mirror.SHOWN_CHANGED)}"
                                  in out, label == "planted", out)
                 for n in ("bb", "cc"):
                     self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({label})")
                 if label == "planted":
                     time.sleep(1.1)                    # pushed_at has whole seconds
-                    w.gh.git("someone/aa", "update-ref", "-d", name)
+                    w.gh.plant("someone/aa", name)
                     rc, out = sync_in(w, "en_US.UTF-8", "lfs")
                     self.assertEqual(rc, 0, out)
                     self.assertNotIn("not UTF-8 text", out)
@@ -2673,6 +2722,268 @@ class G3(unittest.TestCase):
             first = ", ".join(f"someone/r{i:02d}" for i in range(mirror.ANNOUNCE_NAMES))
             self.assertIn(f"They are: {first}, and 5 more; the whole list is in {w.p['first_copy_list']}.", told(out))
             self.assertEqual(fread(w.p["first_copy_list"]).splitlines(), [f"someone/r{i:02d}" for i in range(25)])
+    def test_G3_16_a_copy_is_whole_only_as_githubs_own_list_shows_it(self):
+        """M123: a project is copied, and its copy whole, only when every branch and tag in GitHub's own list is in
+        the copy at the commit GitHub lists. Seen on a Mac (2026-11-24): a disk that folds case kept Feature at
+        feature's commit and lost feature, and the sync, status and restore --check all called the copy whole. Where
+        a name is not as listed, the project is a named problem, the forge keeps what it held, and the exit is 1;
+        a list that could not be read is said so and nothing is called wrong; a name that moved or went on GitHub
+        during the fetch is no problem; and where the disk keeps names apart the guard says nothing."""
+        drive = ("import importlib.util, json, os, subprocess, sys\n"
+                 "s = importlib.util.spec_from_file_location('mirror', sys.argv[1]); m = importlib.util.module_from_spec(s)\n"
+                 "s.loader.exec_module(m)\n"
+                 "inj = json.loads(os.environ.get('WSM_INJ') or '{}')\n"
+                 "n = {'ls': 0}\n"
+                 "real, real_forge = m.github_call, m.forge_call\n"
+                 "def g(*a, **k):\n"
+                 "    mine = 'ls-remote' in a and a[1].endswith('/someone/aa.git')\n"
+                 "    if 'ls-remote' in a:\n"
+                 "        open(os.environ['WSM_INJ_COUNT'], 'a').write(a[1].rsplit('/', 1)[-1] + '\\n')\n"
+                 "    if mine:\n"
+                 "        n['ls'] += 1\n"
+                 "        if n['ls'] in inj.get('unread', []):\n"
+                 "            return subprocess.CompletedProcess(a, 128, '', 'fatal: unable to access (planted)')\n"
+                 "    out = real(*a, **k)\n"
+                 "    if mine and n['ls'] == 1 and inj.get('move'):\n"
+                 "        bare, ref, sha = inj['move']\n"
+                 "        subprocess.run(['git', '--git-dir', bare, 'update-ref'] + (['-d', ref] if not sha else [ref, sha]), check=True)\n"
+                 "    if 'fetch' in a and 'github' in a and inj.get('fold'):\n"
+                 "        cache = a[0]\n"
+                 "        lines = subprocess.run(['git', '--git-dir', cache, 'for-each-ref', '--format=%(refname) %(objectname)',\n"
+                 "                                'refs/heads', 'refs/tags'], capture_output=True, check=True).stdout.split(b'\\n')\n"
+                 "        groups = {}\n"
+                 "        for x in lines:\n"
+                 "            if x:\n"
+                 "                r, sha = x.rsplit(b' ', 1); groups.setdefault(r.lower(), []).append((r, sha))\n"
+                 "        for grp in groups.values():\n"
+                 "            if len(grp) > 1:\n"
+                 "                grp.sort()\n"
+                 "                subprocess.run([b'git', b'--git-dir', os.fsencode(cache), b'update-ref', grp[0][0], grp[-1][1]], check=True)\n"
+                 "                for r, _ in grp[1:]:\n"
+                 "                    subprocess.run([b'git', b'--git-dir', os.fsencode(cache), b'update-ref', b'-d', r], check=True)\n"
+                 "    return out\n"
+                 "def f(forge, cache, *a, **k):\n"
+                 "    out = real_forge(forge, cache, *a, **k)\n"
+                 "    if a[:1] == ('push',) and inj.get('forge_drop'):\n"
+                 "        real_forge(forge, cache, 'push', '--quiet', 'forge', ':' + inj['forge_drop'])\n"
+                 "    return out\n"
+                 "m.github_call, m.forge_call = g, f\n"
+                 "sys.exit(m.main(sys.argv[2:]))\n")
+
+        def run_(w, *cmd, project="aa", **inj):
+            count = os.path.join(w.gh_root, "listings")
+            open(count, "w").close()
+            env = dict(os.environ, WSM_INJ=json.dumps(inj), WSM_INJ_COUNT=count)
+            r = subprocess.run([sys.executable, "-I", "-c", drive, w.p["script"], *(cmd or ["sync"])], env=env,
+                               capture_output=True, timeout=300)
+            out = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
+            self.assertNotIn("Traceback", out, out)
+            return r.returncode, out, open(count).read().split().count(project + ".git")
+
+        def raw(cmd):
+            out = subprocess.run(cmd, capture_output=True)
+            if out.returncode != 0:
+                return None
+            return {r: s for s, r in (x.split(b"\t" if b"\t" in x else b" ", 1) for x in out.stdout.split(b"\n") if x)
+                    if not r.endswith(b"^{}") and r != b"HEAD" and not r.startswith(b"refs/heads/kept/")}
+
+        def gh_raw(w, n):
+            return raw(["git", "--git-dir", os.path.join(w.gh.root, "someone", n + ".git"), "for-each-ref",
+                        "--format=%(objectname) %(refname)", "refs/heads", "refs/tags"])
+
+        def forge_raw(w, n):
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            return raw(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "ls-remote", "--heads",
+                        "--tags", f"http://127.0.0.1:{w.port}/mirror/someone--{n}.git"])
+
+        def folds(a, b):
+            return disk_folds(os.path.dirname(w.p["state"]), a, b)
+
+        def holds(name):
+            return disk_holds(os.path.dirname(w.p["state"]), name)
+
+        def world(w, pairs=()):
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+            c = [w.gh.commit("someone/aa", {"a": str(i).encode()}) for i in (1, 2, 3)]
+            for i, ref in enumerate(pairs):
+                w.gh.plant("someone/aa", ref, c[i % 2])
+            w.gh.commit("someone/bb", {"a": b"1"})
+            w.gh.commit("someone/cc", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            for ref in pairs:                                       # the premise: GitHub holds every name, apart
+                self.assertIn(os.fsencode(ref), gh_raw(w, "aa"))
+            return c
+
+        case = ["refs/heads/Feature", "refs/heads/feature", "refs/tags/V1", "refs/tags/v1"]
+        case_line = mirror.NOT_AS_LISTED.format(n=4, names="Feature: at another commit, feature: missing, "
+                                                "tag V1: at another commit, tag v1: missing")
+
+        def not_moved(w, rc, out, before, listings, n=2):
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/aa: " + case_line, out)
+            self.assertEqual(listings, n, out)
+            self.assertEqual(forge_raw(w, "aa"), before, "the forge was given a set GitHub does not list")
+            for x in ("bb", "cc"):
+                self.assertEqual(forge_raw(w, x), gh_raw(w, x), x)
+
+        # 1. A wrong cache on a first copy (made here as a disk that folds case makes it): a named problem at every
+        # sync and in status, the forge given nothing of it, restore --check not whole; right again once it is right.
+        with World(self) as w:
+            world(w, case)
+            for i in (1, 2):
+                rc, out, ls = run_(w, fold=True)
+                not_moved(w, rc, out, None, ls)
+            rc, out, _ = run_(w, "status")
+            self.assertIn(case_line, out)
+            self.assertIn("\ncopies: 3 on GitHub, 2 copied, 1 behind", out)
+            rc, out, _ = run_(w, "restore", "--check")
+            self.assertNotIn("3 whole", out)
+            if not folds("Feature", "feature"):
+                rc, out, ls = run_(w)
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn(case_line, out)
+                self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+                rc, out, _ = run_(w, "restore", "--check")
+                self.assertIn("3 copies, 3 whole, 0 difference(s)", out)
+        # 2. The same after a good copy: what the forge held before stays byte for byte, and what GitHub showed is
+        # written down from GitHub's own list, so restore --check names what the copy lacks.
+        with World(self) as w:
+            world(w)
+            rc, out, ls = run_(w)
+            self.assertEqual((rc, ls), (0, 1), out)
+            before = forge_raw(w, "aa")
+            gid = str(w.gh.repos["someone/aa"]["id"])
+            self.assertEqual({os.fsencode(r): s.encode() for r, s in mirror.load_json(w.p["state"], {})["repos"][gid]["seen_refs"].items()},
+                             gh_raw(w, "aa"))
+            time.sleep(1.1)                                         # pushed_at has whole seconds
+            for i, ref in enumerate(case):
+                w.gh.plant("someone/aa", ref, "main~" + str(i % 2))
+            rc, out, ls = run_(w, fold=True)
+            not_moved(w, rc, out, before, ls)
+            rc, out, _ = run_(w, "restore", "--check")
+            self.assertIn("someone/aa: refs/heads/feature is missing in the copy", out)
+        # 3. The three worlds a Mac's disk was seen to fold or refuse, with nothing planted in the tool: where the disk
+        # keeps the names apart, every name is at its own commit and the guard says nothing; where it folds case, the
+        # project is the named problem; where it folds two spellings or cannot hold a name, the fetch says so.
+        for label, pairs, a, b in (("case", case, "Feature", "feature"),
+                                   ("spelling", ["refs/heads/caf\u00e9", "refs/heads/cafe\u0301"], "caf\u00e9", "cafe\u0301"),
+                                   ("not UTF-8", ["refs/heads/a\udcffb", "refs/heads/a_b"], None, None)):
+            with World(self) as w:
+                world(w, pairs)
+                folded = folds(a, b) if a else not holds("a\udcffb")
+                rc, out, ls = run_(w)
+                if not folded:
+                    self.assertEqual((rc, ls), (0, 1), f"{label}: {out}")
+                    self.assertNotIn("would not be what GitHub lists", out)
+                    held = forge_raw(w, "aa")
+                    for ref in pairs:
+                        want = gh_raw(w, "aa")[os.fsencode(ref)]
+                        self.assertEqual(held.get(os.fsencode(ref)), None if mirror.not_text(ref) else want, label)
+                elif label == "case":
+                    not_moved(w, rc, out, None, ls)
+                else:
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("problem: someone/aa: the fetch from GitHub failed: ", out)
+                    self.assertIsNone(forge_raw(w, "aa"), label)
+        # 4. A name that moved, and one that went, on GitHub between the first list and the fetch: no problem, a
+        # second list read once, and the copy as GitHub holds it after; beside a control that reads one list.
+        for label, change in (("moved", lambda w, bare: [bare, "refs/heads/side", w.gh.git("someone/aa", "rev-parse", "main~1").strip()]),
+                              ("went", lambda w, bare: [bare, "refs/heads/side", ""]),
+                              ("control", None)):
+            with World(self) as w:
+                world(w)
+                rc, out, ls = run_(w)
+                self.assertEqual((rc, ls), (0, 1), out)
+                time.sleep(1.1)
+                w.gh.commit("someone/aa", {"b": b"1"})
+                w.gh.git("someone/aa", "branch", "side", "main")
+                bare = os.path.join(w.gh.root, "someone", "aa.git")
+                rc, out, ls = run_(w, **({"move": change(w, bare)} if change else {}))
+                self.assertEqual((rc, ls), (0, 2 if change else 1), f"{label}: {out}")
+                self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"), label)
+                self.assertEqual(b"refs/heads/side" in forge_raw(w, "aa"), label != "went", label)
+        # 5. A list that could not be read (both tries), the first and then the second: said so, nothing called wrong,
+        # the forge given nothing, the other projects copied; beside a control with the same wrong cache and both
+        # lists read.
+        for label, inj in (("first", {"unread": [1, 2]}), ("second", {"unread": [2, 3], "fold": True}),
+                           ("control", {"fold": True})):
+            with World(self) as w:
+                world(w, case)
+                rc, out, ls = run_(w, **inj)
+                self.assertEqual((rc, ls), (1, {"first": 2, "second": 3, "control": 2}[label]), out)
+                self.assertEqual("problem: someone/aa: " + mirror.LISTING_UNREAD.format(why="fatal: unable to access (planted)")
+                                 in out, label != "control", out)
+                self.assertEqual("would not be what GitHub lists" in out, label == "control", out)
+                self.assertIsNone(forge_raw(w, "aa"), label)
+                for x in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, x), gh_raw(w, x), x)
+        # 6. What the list does not hold is not compared (the fetch asks for branches and tags only): a note on
+        # GitHub is no problem; and a project with no branch and no tag is a list read with none, never unread.
+        with World(self) as w:
+            world(w)
+            w.gh.git("someone/aa", "update-ref", "refs/notes/commits", "main")
+            w.gh.add_repo("someone", "dd")
+            self.assertIn(b"refs/notes/commits", raw(["git", "--git-dir", os.path.join(w.gh.root, "someone", "aa.git"),
+                                                      "for-each-ref", "--format=%(objectname) %(refname)"]))
+            self.assertEqual(gh_raw(w, "dd"), {})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            self.assertEqual(w.go()[0], 0)
+            rc, out, ls = run_(w)
+            self.assertEqual((rc, ls), (0, 1), out)
+            time.sleep(1.1)
+            w.gh.commit("someone/aa", {"b": b"2"})
+            w.gh.touch("someone/dd")
+            rc, out, ls = run_(w, project="dd")
+            self.assertEqual((rc, ls), (0, 1), out)
+            self.assertNotIn("could not be read", out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+        # 7. A project skipped as unchanged reads no list.
+        with World(self) as w:
+            world(w)
+            time.sleep(1.1)                                         # a push in a fetch's own second is fetched again
+            self.assertEqual(run_(w)[0], 0)
+            rc, out, ls = run_(w)
+            self.assertEqual((rc, ls), (0, 0), out)
+            self.assertIn("0 copied now, 3 unchanged", out)
+        # 8. The copy is the forge, read back after the push: a branch gone from it then is a named problem.
+        with World(self) as w:
+            world(w)
+            w.gh.git("someone/aa", "branch", "side", "main")
+            rc, out, ls = run_(w, forge_drop="refs/heads/side")
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/aa: " + mirror.FORGE_NOT_AS_LISTED.format(n=1, names="side: missing"), out)
+            rc, out, ls = run_(w)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+        # 9. A GitHub branch named kept/...: the read-back leaves refs/heads/kept/ out on both sides, so the first copy
+        # is whole and not called wrong (the name is checked in the cache against GitHub's list). Its later syncs are
+        # row M127's, due 0.1.1.
+        with World(self) as w:
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit("someone/" + n, {"a": b"1"})
+            w.gh.git("someone/aa", "branch", "kept/2020-01-01/old", "main")
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            rc, out = w.sync()                                       # the first copy
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("not what GitHub lists", out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+            self.assertEqual(w.forge_refs("someone--aa").get("refs/heads/kept/2020-01-01/old"),
+                             w.gh_refs("someone/aa")["refs/heads/main"])
+            st = mirror.load_json(w.p["state"], {})["repos"]
+            aa = next(r for r in st.values() if r.get("full_name") == "someone/aa")
+            self.assertEqual(aa.get("problem"), "", aa)
+            self.assertIn("refs/heads/kept/2020-01-01/old", aa["refs"])
+
 
 class G2Sync(unittest.TestCase):
     def test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it(self):
@@ -2805,19 +3116,40 @@ class G4(unittest.TestCase):
             rc, out = w.first_sync()
             self.assertEqual(rc, 1, out)
             self.assertLess(time.time() - started, 40)
-            self.assertIn("problem: someone/alpha: the fetch from GitHub took longer than 2 s, and so did the retry", out)
+            # The first read of GitHub is its list of branches and tags (M123): that is the slow one, said with why.
+            slow = mirror.LISTING_UNREAD.format(why="it took longer than 2 s, and so did the retry")
+            self.assertIn("problem: someone/alpha: " + slow, out)
             self.assertIn("2 on GitHub, 1 copied now", out)
             self.assertEqual(len([x for x in git_calls(w.gh, "someone/alpha") if "info/refs" in x[1]]), 2,
                              "the slow fetch was not tried exactly twice")
             self.assertEqual(w.forge_refs("someone--beta"), w.gh_refs("someone/beta"))
             st = mirror.load_json(w.p["state"], {})
             alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
-            self.assertTrue(alpha["problem"].startswith("cannot refresh: the fetch from GitHub took longer"))
+            self.assertEqual(alpha["problem"], "cannot refresh: " + slow)
             # When it is quick again, the next sync copies it.
             w.gh.slow.clear()
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+        # The list quick and the fetch slow: the fetch's own words, tried exactly twice, and the rest copied.
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            put_settings(w.p, git_timeout_s=2)
+            w.gh.slow_fetch["someone/alpha"] = 5
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 1, out)
+            slow = "the fetch from GitHub took longer than 2 s, and so did the retry"
+            self.assertIn("problem: someone/alpha: " + slow, out)
+            self.assertNotIn("could not be read", out)
+            self.assertIn("2 on GitHub, 1 copied now", out)
+            self.assertEqual(w.gh.fetches.count("someone/alpha"), 2, "the slow fetch was not tried exactly twice")
+            self.assertEqual(w.forge_refs("someone--beta"), w.gh_refs("someone/beta"))
+            st = mirror.load_json(w.p["state"], {})
+            alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
+            self.assertEqual(alpha["problem"], "cannot refresh: " + slow)
 
     def test_G4_3_one_sync_at_a_time(self):
         with Home() as h:
@@ -3268,6 +3600,154 @@ class G5(unittest.TestCase):
             st = mirror.load_json(w.p["state"], {})
             self.assertEqual([r["full_name"] for r in st["repos"].values() if r.get("gone_since")], [])
 
+    def test_G5_6_a_tag_deleted_on_github_leaves_the_copy_its_commit_kept(self):
+        """M125 (seen 2026-11-25 in a reviewer's world): a tag deleted on GitHub stayed in the copy for ever, because
+        the fetch from the forge followed tags and wrote the forge's tag back into the cache."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "tag", "t1", one)
+            w.gh.git("someone/alpha", "tag", "t2")
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            self.assertEqual(w.forge_refs("someone--alpha")["refs/tags/t1"], one)       # the premise: it was copied
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            w.gh.git("someone/alpha", "tag", "-d", "t1")
+            tags = lambda refs: {r: v for r, v in refs.items() if r.startswith("refs/tags/")}
+            want = tags(w.gh_refs("someone/alpha"))           # read once: a read of the stand-in moves its pushed_at
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2002-01-01T00:00:00Z"   # GitHub's time moved (not to the second)
+            fetched = lambda: len(git_calls(w.gh, "someone/alpha"))     # its git calls to GitHub (a skip makes none)
+            # The sync after the delete, then one with nothing changed on GitHub but its time (so the project is
+            # fetched and pushed again, not skipped as unchanged), then one skipped as unchanged.
+            for step in ("after the delete", "nothing changed", "unchanged"):
+                if step == "nothing changed":
+                    w.gh.repos["someone/alpha"]["pushed_at"] = "2001-01-01T00:00:00Z"
+                was = fetched()
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, f"{step}: {out}")
+                self.assertEqual(fetched() == was, step == "unchanged", f"{step}: fetched again or not")
+                refs = w.forge_refs("someone--alpha")
+                self.assertEqual(tags(refs), want, step)
+                self.assertEqual(sorted(r for r in refs if "/kept/" in r), [f"refs/heads/kept/{day}/tags/t1"], step)
+                self.assertEqual(refs[f"refs/heads/kept/{day}/tags/t1"], one, step)
+                said = f"someone/alpha: tags/t1 was deleted on GitHub; its old commit is kept as kept/{day}/tags/t1"
+                (self.assertIn if step == "after the delete" else self.assertNotIn)(said, out)
+            rc, out = status()
+            self.assertIn("\ncopies: 1 on GitHub, 1 copied, 0 behind", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
+
+    def test_G5_7_an_annotated_tag_moved_or_deleted_keeps_its_commit(self):
+        """M126 (seen 2026-11-25 in a reviewer's world): an annotated tag moved on GitHub ended its project's refresh
+        for good, because the tag object, not its commit, was pushed to a kept branch, which git refuses."""
+        with World(self) as w:
+            full = "someone/alpha"
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit(full, {"a": b"1"})
+            two = w.gh.commit(full, {"a": b"2"})
+            blob = w.gh.git(full, "rev-parse", "main:a").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            for name, at in (("ta", one), ("tam", one), ("tfile", blob)):
+                w.gh.git(full, *me, "tag", "-a", "-m", f"the tag {name}", name, at)
+            w.gh.git(full, *me, "tag", "-a", "-m", "a tag of a tag", "ttag", "ta")
+            w.gh.git(full, "tag", "plain", one)                                     # a plain tag that stays
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            tags = lambda refs: {r: v for r, v in refs.items() if r.startswith("refs/tags/")}
+            self.assertEqual(tags(w.forge_refs("someone--alpha")), tags(w.gh_refs(full)))   # the premise
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            # On GitHub: an annotated tag deleted, one moved, a tag of a tag deleted, a tag at a file deleted.
+            w.gh.git(full, "tag", "-d", "ta")
+            w.gh.git(full, *me, "tag", "-a", "-f", "-m", "the tag tam, moved", "tam", two)
+            w.gh.git(full, "tag", "-d", "ttag")
+            w.gh.git(full, "tag", "-d", "tfile")
+            want = tags(w.gh_refs(full))                      # read once: a read of the stand-in moves its pushed_at
+            w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"              # GitHub's time moved (not to the second)
+            fetched = lambda: len(git_calls(w.gh, "someone/alpha"))     # its git calls to GitHub (a skip makes none)
+            for step in ("after the change", "nothing changed", "unchanged"):
+                if step == "nothing changed":
+                    w.gh.repos[full]["pushed_at"] = "2001-01-01T00:00:00Z"
+                was = fetched()
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, f"{step}: {out}")
+                self.assertEqual(fetched() == was, step == "unchanged", f"{step}: fetched again or not")
+                refs = w.forge_refs("someone--alpha")
+                self.assertEqual(tags(refs), want, step)
+                kept = {r: v for r, v in refs.items() if "/kept/" in r}
+                self.assertEqual(kept, {f"refs/heads/kept/{day}/tags/{n}": one for n in ("ta", "tam", "ttag")}, step)
+                lines = [f"someone/alpha: tags/{n} was {what} on GitHub; its old commit is kept as kept/{day}/tags/{n}"
+                         for n, what in (("ta", "deleted"), ("tam", "moved"), ("ttag", "deleted"))]
+                lines.append(mirror.TAG_NOT_KEPT.format(full=full, short="tags/tfile", what="deleted", at="a file"))
+                for line in lines:
+                    (self.assertIn if step == "after the change" else self.assertNotIn)(line, out)
+            rc, out = status()
+            self.assertIn("\ncopies: 1 on GitHub, 1 copied, 0 behind", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
+            # tam moved again: a read of its kind that failed is never taken for a no (G5.4), so the copy is not moved
+            # on that pass; the next pass keeps its commit under a name of its own.
+            w.gh.git(full, *me, "tag", "-a", "-f", "-m", "the tag tam, moved back", "tam", one)
+            w.gh.repos[full]["pushed_at"] = "2003-01-01T00:00:00Z"
+            saved, before = mirror.git, w.forge_refs("someone--alpha")
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "-t") and "^" not in args[2]:      # keep_before_moving's read only
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git = unread
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.git = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/alpha: an old commit could not be kept, so the copy was not moved", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), before, "the copy moved on a read that failed")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"someone/alpha: tags/tam was moved on GitHub; its old commit is kept as kept/{day}/tags/tam-2", out)
+            refs = w.forge_refs("someone--alpha")
+            self.assertEqual(tags(refs), tags(w.gh_refs(full)))
+            self.assertEqual(refs[f"refs/heads/kept/{day}/tags/tam-2"], two)
+
+    def test_G5_9_a_github_branch_named_kept_is_said_in_plain_words(self):
+        """M129 (a reviewer's world 16, 2026-11-25): with a branch named kept/... on GitHub, every sync after something
+        changed there ended on git's own "dst ref ... receives from more than one src", with no next step, and the
+        copy's main stayed behind GitHub's. Now the sync says what it is, before anything is pushed, and its one next
+        step, run, gives a sync that is good again. The cure is row M127, due 0.1.1."""
+        with World(self) as w:
+            for n, b in (("alpha", "kept/foo"), ("beta", "kept/2020-01-01/old"), ("gamma", None)):
+                w.gh.add_repo("someone", n)
+                one = w.gh.commit(f"someone/{n}", {"a": b"1"})
+                if b:
+                    w.gh.git(f"someone/{n}", "branch", b, one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)                       # this version copies such a project once
+            before = {n: w.forge_refs(f"someone--{n}") for n in ("alpha", "beta")}
+            for n in ("alpha", "beta", "gamma"):                         # then something changes on GitHub
+                w.gh.commit(f"someone/{n}", {"a": b"2"})
+                w.gh.repos[f"someone/{n}"]["pushed_at"] = "2002-01-01T00:00:00Z"
+            for _ in (1, 2):                                             # every sync after that, not by timing
+                rc, out = w.sync()
+                self.assertEqual(rc, 1, out)
+                for n, b in (("alpha", "kept/foo"), ("beta", "kept/2020-01-01/old")):
+                    self.assertIn(f"problem: someone/{n}: " + mirror.KEPT_CLASH.format(n=1, names=b), out)
+                    self.assertEqual(w.forge_refs(f"someone--{n}"), before[n], "the copy moved")
+                self.assertNotIn("receives from more than one src", out)
+                self.assertEqual(w.forge_refs("someone--gamma")["refs/heads/main"],
+                                 w.gh_refs("someone/gamma")["refs/heads/main"])     # the control follows
+            rc, out = status()
+            self.assertIn("cannot refresh: " + mirror.KEPT_CLASH.format(n=1, names="kept/foo"), out)
+            # The one next step, taken: the branch gets another name on GitHub, and the next sync is good.
+            w.gh.git("someone/alpha", "branch", "-m", "kept/foo", "foo")
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2003-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertNotIn("problem: someone/alpha", out)
+            refs, gh = w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha")
+            self.assertEqual({r: v for r, v in refs.items() if not r.startswith("refs/heads/kept/")}, gh)
+
 
 def status():
     return quiet(mirror.main, ["status"])
@@ -3304,8 +3784,8 @@ class G6(unittest.TestCase):
             self.assertTrue(any("someone/a: last good refresh" in x and "older than twice the sync interval" in x for x in problems))
             b_good = next(r for r in st["repos"].values() if r["full_name"] == "someone/b")["last_good"]
             self.assertTrue(b_good, st)              # b had a good refresh, so its line says since when first (G6.2)
-            self.assertTrue(any(x.startswith(f"problem: someone/b: not refreshed since {b_good}; cannot refresh: the "
-                                             "fetch from GitHub failed") for x in problems), out)
+            self.assertTrue(any(x.startswith(f"problem: someone/b: not refreshed since {b_good}; cannot refresh: GitHub's "
+                                             "list of its branches and tags could not be read (") for x in problems), out)
             self.assertIn("problem: someone/c: the copy's branches and tags differ from what GitHub last showed", problems)
 
     def test_G6_2_a_refused_key_reads_as_not_refreshed_since_the_last_good_one(self):
@@ -3767,6 +4247,142 @@ class G6(unittest.TestCase):
             mirror.system = saved
 
 
+    def test_G6_19_a_name_in_the_older_sentences_is_never_printed_in_a_form_a_shell_runs(self):
+        """M134 (family rule 31(B), the maintainer's word for 0.1.0, 2026-11-25): a name on GitHub is chosen by
+        whoever can push there. In every line of sync, status and restore --check, a branch's or a tag's name with a
+        backtick or a dollar-parenthesis is shown changed, and the line says so; the names themselves are stored,
+        kept and pushed as they are, and two names that show alike stay two."""
+        forms = lambda out: [l for l in out.splitlines() if "`" in l or "$(" in l]
+        note = f" ({mirror.SHOWN_CHANGED})"
+        with World(self) as w:
+            full = "someone/alpha"
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit(full, {"a": b"1"})
+            two = w.gh.commit(full, {"a": b"2"})
+            blob = w.gh.git(full, "rev-parse", "main:a").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            for b in ("d`x`", "d$(x)", "c$(q)", "plain"):
+                w.gh.git(full, "branch", b, one)
+            w.gh.git(full, "tag", "t$(y)", one)
+            w.gh.git(full, *me, "tag", "-a", "-m", "a note", "t`z`", one)
+            w.gh.git(full, "tag", "f$(b)", blob)
+            odd = disk_holds(os.path.dirname(w.p["state"]), "n`\udcff")   # a Mac's disk cannot hold it
+            if odd:
+                w.gh.plant(full, "refs/heads/n`\udcff", "main")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            said = out
+            if odd:                                   # M120: left out, named at every sync and in status
+                limit = "problem: someone/alpha: " + mirror.NOT_TEXT.format(n=1, names="n??; " + mirror.SHOWN_CHANGED)
+                self.assertIn(limit, out)
+            # GitHub moves and deletes them: each kept line shows the name changed, and says so.
+            for b in ("d`x`", "d$(x)"):
+                w.gh.git(full, "update-ref", "-d", "refs/heads/" + b)
+            w.gh.git(full, "update-ref", "refs/tags/t$(y)", two)
+            w.gh.git(full, "update-ref", "-d", "refs/tags/t`z`")
+            w.gh.git(full, "update-ref", "-d", "refs/tags/f$(b)")
+            w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            said += out
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            for was, what in (("d?x?", "deleted"), ("d??x)", "deleted"), ("tags/t??y)", "moved"),
+                              ("tags/t?z?", "deleted")):
+                self.assertIn(f"{full}: {was} was {what} on GitHub; its old commit is kept as kept/{day}/{was}{note}",
+                              out)
+            self.assertIn(mirror.TAG_NOT_KEPT.format(full=full, short="tags/f??b)", what="deleted", at="a file")
+                          + note, out)
+            # Only the printed form changed: the forge holds every name as it is, each kept ref by its own name.
+            held = w.forge_refs("someone--alpha")
+            for r in ("refs/heads/kept/%s/d`x`", "refs/heads/kept/%s/d$(x)", "refs/heads/kept/%s/tags/t$(y)",
+                      "refs/heads/kept/%s/tags/t`z`"):
+                self.assertIn(r % day, held)
+            out = subprocess.run(["git", "--git-dir", os.path.join(w.gh.root, "someone", "alpha.git"), "for-each-ref",
+                                  "--format=%(refname)"], capture_output=True, check=True).stdout
+            gh = {os.fsdecode(r) for r in out.split(b"\n") if r}
+            gh = {r for r in gh if not mirror.written_not_text(r)}
+            self.assertEqual({r for r in held if not r.startswith("refs/heads/kept/")}, gh)
+            rc, out = quiet(mirror.main, ["status"])
+            said += out
+            if odd:
+                self.assertIn(limit, out)
+            # restore --check's difference line: a name taken out of the copy behind the tool's back.
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            subprocess.run(["git", "--git-dir", folder, "update-ref", "-d", "refs/heads/c$(q)"], check=True)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 1, out)
+            said += out
+            self.assertRegex(out, re.escape(f"{full}: refs/heads/c??q) is missing in the copy, ") + r"[0-9a-f]{12}"
+                             + re.escape(" when GitHub was last seen" + note))
+            # Two lines that need a world the guard alone makes (NOT_AS_LISTED, FORGE_NOT_AS_LISTED), read by their
+            # one builder; two names that show alike stay two.
+            for words in (mirror.NOT_AS_LISTED, mirror.FORGE_NOT_AS_LISTED):
+                line = mirror.not_as_listed_line([("refs/heads/a`b", "missing"), ("refs/heads/a$(b", "missing"),
+                                                  ("refs/tags/v`1", "at another commit")], words)
+                self.assertEqual(line, words.format(n=3, names="a?b: missing, a??b: missing, tag v?1: at another "
+                                                    "commit; " + mirror.SHOWN_CHANGED))
+                said += line + "\n"
+            self.assertEqual(mirror.shown_names(["x`1", "x\udcff1"]), "x?1, x?1; " + mirror.SHOWN_CHANGED)
+            self.assertEqual(forms(said), [], said)
+            # Inside double quotes a shell reads a dollar and a question mark as the last exit code: a shown name
+            # never holds that pair, so it never shows a digit that was never in it.
+            self.assertNotIn("$" + "?", said)
+            self.assertNotIn(mirror.SHOWN_CHANGED, mirror.shown_names(["plain", "x;y"]))
+        # git's and the forge's own words (M134's second part, the maintainer's word 11-25): they quote a name that
+        # somebody else chose. Each is read on the printed line (what the sync's service writes to its log) and in
+        # status, which reads the problem the sync wrote down; only the two forms change, the rest letter for letter.
+        bad = "e`x`$(y)"
+        for road in ("git", "forge"):
+            with World(self) as w:
+                full = "someone/beta"
+                w.gh.add_repo("someone", "beta")
+                one = w.gh.commit(full, {"a": b"1"})
+                w.gh.git(full, "branch", bad, one)
+                w.key_set()
+                rc, out = w.first_sync()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("refs/heads/" + bad, w.forge_refs("someone--beta"))          # the premise
+                w.gh.git(full, "update-ref", "refs/heads/" + bad, w.gh.commit(full, {"a": b"2"}))   # it moves too
+                w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"
+                folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--beta.git")
+                saved = mirror.forge_call
+                if road == "git":
+                    # The name taken out of the cache between the listing and the push: git itself says
+                    # "src refspec <the name> does not match any".
+                    def gone(forge, cache, *args, **kw):
+                        if args[:1] == ("push",):
+                            subprocess.run(["git", "--git-dir", cache, "update-ref", "-d", "refs/heads/" + bad],
+                                           check=True)
+                        return saved(forge, cache, *args, **kw)
+                    mirror.forge_call = gone
+                    words = "error: src refspec refs/heads/e?x???y) does not match any; " + mirror.SHOWN_CHANGED
+                else:
+                    # The forge refuses the push and names the ref in its own words: a hook in the copy's own folder,
+                    # run by Gitea's pre-receive and relayed by git as "remote: error: ...".
+                    hooks = os.path.join(folder, "hooks", "pre-receive.d")
+                    self.assertTrue(os.path.isdir(hooks), os.listdir(os.path.join(folder, "hooks")))
+                    hook = os.path.join(hooks, "zz-refuse")
+                    with open(hook, "w") as f:
+                        f.write("#!/bin/sh\nwhile read o n r; do case \"$r\" in *e?x?*) echo \"error: refusing $r\" >&2"
+                                ";; esac; done\nexit 1\n")
+                    os.chmod(hook, 0o755)
+                    words = ("refusing refs/heads/e?x???y); " + mirror.SHOWN_CHANGED + "; pre-receive hook declined")
+                try:
+                    rc, out = w.sync()
+                finally:
+                    mirror.forge_call = saved
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"{full}: the push into the forge failed, so nothing in its copy was moved (the push is "
+                              f"all or nothing): {words}", out)
+                said = out
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(words, out, road)
+                said += out
+                self.assertEqual(forms(said), [], (road, said))
+                self.assertIn("refs/heads/" + bad, w.forge_refs("someone--beta"))          # the name, as it is
+
+
 def bare_home(root, name, with_commit=False):
     path = os.path.join(root, name + ".git")
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", path], check=True)
@@ -3777,6 +4393,13 @@ def bare_home(root, name, with_commit=False):
                         "--allow-empty", "-m", "already here"], check=True)
         subprocess.run(["git", "-C", work, "push", "-q", path, "main"], check=True)
     return path
+
+
+def git_all_refs(path):
+    """Every ref a bare folder holds, as git holds it: {name: commit or tag object}."""
+    out = subprocess.run(["git", "--git-dir", path, "for-each-ref", "--format=%(objectname) %(refname)"],
+                         capture_output=True, text=True, check=True).stdout
+    return dict(reversed(l.split(" ", 1)) for l in out.splitlines())
 
 
 def lsremote(path):
@@ -3910,7 +4533,7 @@ class G7(unittest.TestCase):
                 rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
                 self.assertEqual(rc, 2, url)
                 self.assertIn("This skill never writes to GitHub", out)
-                self.assertIn("git push --mirror", out)
+                self.assertIn(" push --mirror ", out)                       # the line itself: G7.8
             self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
             self.assertEqual(w.gh.writes(), [])
             if mirror.has_git_lfs():
@@ -3919,6 +4542,276 @@ class G7(unittest.TestCase):
                 self.assertEqual(rc, 0, out)
                 self.assertTrue([f for d, _, fs in os.walk(os.path.join(lhome, "lfs", "objects")) for f in fs],
                                 "the large file did not reach the new home")
+
+    def test_G7_7_a_restore_never_leaves_a_name_out_unsaid(self):
+        """M128 (seen 2026-11-25 on 0.1.0's head with the guard and the tag cures): restore --to of a project whose
+        GitHub branches include kept/... exited 0 and left them out of the new home, without a word. Now each is
+        named, and each gets one whole line a person runs as it is printed (rule 31: a name we did not write never
+        reaches a shell raw); a name this tool does not print as it is (a character no one can see, a backtick, a
+        dollar-parenthesis: rule 31(B)) gets no line, the text says so, and no printed line carries either form."""
+        with World(self) as w:
+            plain = [f"kept/{x}" for x in ("a", "b", "c", "d", "e", "f")] + ["kept/2020-01-01/old"]
+            semi = "kept/x;id>m3"                                                 # runs a command if typed raw
+            hidden = {"kept/$(id>m1)": "kept/??id>m1)", "kept/`id>m2`": "kept/?id>m2?",   # rule 31(B): never printed
+                      "kept/zero\u200bwidth": "kept/zero?width"}                  # a character no one can see
+            names = plain + [semi] + sorted(hidden)
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                one = w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.gh.git(f"someone/{n}", "tag", "v1", one)
+                for b in names if n == "alpha" else ():
+                    w.gh.git("someone/alpha", "branch", b, one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            held = w.forge_refs("someone--alpha")
+            self.assertEqual(sorted(r for r in held if r.startswith("refs/heads/kept/")),
+                             sorted("refs/heads/" + b for b in names))           # the premise: the copy holds them
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "alpha")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"restored someone/alpha: 1 branch(es) and 1 tag(s) to {home}", out)
+            shown = [hidden.get(b, b) for b in sorted(names)]
+            said = mirror.RESTORE_LEFT_OUT.format(n=11, names=", ".join(shown[:5]) + " and 6 more; "
+                                                  + mirror.SHOWN_CHANGED)
+            self.assertIn(said, out)
+            # Rule 31(B): no line restore --to prints carries a backtick or a dollar-parenthesis.
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
+                                              if not r.startswith("refs/heads/kept/")})
+            # One line per name that can be shown, every one of them (not only the first five), none for the other.
+            lines = [l for l in out.splitlines() if l.startswith("  git ") and " push " in l]
+            self.assertEqual(len(lines), 8, out)
+            self.assertFalse([l for l in lines if "\u200b" in l], "a line for a name no one can read")
+            self.assertEqual(len([l for l in lines if shlex.quote("refs/heads/" + semi) in l]), 1, out)
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            self.assertTrue(os.path.isdir(folder), "stock Gitea keeps the copy elsewhere")
+            self.assertIn(mirror.RESTORE_HIDDEN.format(n=3) + f"\n  git --git-dir {shlex.quote(folder)} for-each-ref "
+                          "refs/heads/kept/\n", out)
+            listing = [l for l in out.splitlines() if l.startswith("  git ") and " for-each-ref " in l]
+            self.assertEqual(len(listing), 1, out)
+            listed = subprocess.run(["bash", "-c", listing[0].strip()],
+                                    capture_output=True, text=True, cwd=root, stdin=subprocess.DEVNULL)
+            for b in hidden:
+                self.assertIn("refs/heads/" + b, listed.stdout)                  # that line lists each, as git holds it
+            self.assertIn("Run each git line above as it stands, in a terminal", out)
+            # Every line run through a real shell exactly as printed, in a folder of its own, with nothing added
+            # (the text gives the person nothing to supply): no command inside a name runs, and the names arrive.
+            # (The listing line above was run in root, not here.)
+            here = tempfile.mkdtemp(prefix="wsm-shell-")
+            TEMPS.append(here)
+            for l in lines:
+                r = subprocess.run(["bash", "-c", l.strip()], cwd=here, capture_output=True, text=True,
+                                   env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), stdin=subprocess.DEVNULL)
+                self.assertEqual(r.returncode, 0, (l, r.stderr))
+            self.assertEqual(os.listdir(here), [], "a command inside a name ran")
+            self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
+                                              if r[len("refs/heads/"):] not in hidden})
+            # The road without the copy's folder ("open an issue with these lines"): the same left-out sentence in
+            # the shown form, no git line, and still no line with either form.
+            home = bare_home(root, "alpha-again")
+            real = mirror.forge_folder
+            mirror.forge_folder = lambda p, forge, name: ""
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
+            finally:
+                mirror.forge_folder = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn(said, out)
+            self.assertIn("open an issue with these lines", out)
+            self.assertNotIn("  git ", out)
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            # The control, a project without such a name: exit 0 and no such line.
+            home = bare_home(root, "beta")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/beta"])
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("not in the new home", out)
+            self.assertNotIn("  git ", out)
+            self.assertEqual(lsremote(home), w.gh_refs("someone/beta"))
+
+    def test_G7_9_restore_says_what_the_new_home_lacks_from_githubs_last_list(self):
+        """M135 (a reviewer's world 18, 2026-11-25): GitHub held a branch the copy did not (a name that is not text),
+        and restore --to said "restored ... 3 branch(es)" and exited 0, with no word of it. Now restore --to reads
+        GitHub's list as the sync last read it, as restore --check does, and says what the new home lacks of it: a
+        count, the names through the shown form, why where the record knows why; exit 1. A record without that list
+        is said as not read, never as none missing. What restore pushes does not change."""
+        with World(self) as w:
+            full = "someone/aa"
+            w.gh.add_repo("someone", "aa")
+            w.gh.add_repo("someone", "bb")
+            one = w.gh.commit(full, {"a": b"1"})
+            w.gh.git(full, "tag", "v1", one)
+            for b in ("b1", "c`x`", "d`y", "d\u200by"):           # the last two show alike: they stay two
+                w.gh.git(full, "branch", b, one)
+            w.gh.commit("someone/bb", {"a": b"1"})
+            odd = disk_holds(os.path.dirname(w.p["state"]), "a\udcffb")   # a Mac's disk cannot hold it
+            if odd:
+                w.gh.plant(full, "refs/heads/a\udcffb", "main")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            # Taken out of the copy behind the tool's back (the record does not know why), and kept by GitHub.
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--aa.git")
+            for b in ("b1", "c`x`", "d`y", "d\u200by"):
+                subprocess.run(["git", "--git-dir", folder, "update-ref", "-d", "refs/heads/" + b], check=True)
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "aa")
+            n = len(w.gh.log)
+            rc, out = quiet(mirror.main, ["restore", "--to", home, full])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"restored {full}: 1 branch(es) and 1 tag(s) to {home}; the kept refs stay in your forge\n",
+                          out)
+            names = (["a?b"] if odd else []) + ["b1", "c?x?", "d?y", "d?y"]
+            self.assertIn(mirror.RESTORE_LACKS.format(
+                n=len(names), names=", ".join(names) + "; " + mirror.SHOWN_CHANGED,
+                why="; 1 of them are not UTF-8 text, which the forge cannot hold" if odd else ""), out)
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            self.assertEqual(set(lsremote(home)), {"refs/heads/main", "refs/tags/v1"})   # what it pushes: as before
+            self.assertEqual(w.gh.log[n:], [], "restore asked GitHub")
+            # The control: a project the copy holds whole is restored with exit 0 and no such line.
+            home = bare_home(root, "bb")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("but ", out)
+            # A record without GitHub's list: said as not read, never as none missing; the exit is not 0.
+            st = mirror.load_json(w.p["state"], {})
+            rec = next(r for r in st["repos"].values() if r["full_name"] == "someone/bb")
+            rec.pop("seen_refs", None)
+            rec.pop("refs", None)
+            mirror.save_state(w.p, st)
+            home = bare_home(root, "bb-again")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(mirror.RESTORE_LIST_UNREAD.format(full="someone/bb"), out)
+            self.assertEqual(set(lsremote(home)), {"refs/heads/main"})
+
+    def test_G7_8_the_line_to_put_a_copy_back_on_github_runs_as_printed(self):
+        """M132 (a reviewer's read, 2026-11-25): restore --to refuses GitHub and said how to do it yourself with a
+        clone over the forge's address, which asks for a login the text never names, and "cd <that folder>". Now it
+        gives one line that runs as printed: git pushes the copy as a mirror from the copy's own folder in the forge
+        (on this computer, no login there) to the new, empty GitHub repository, each part through shlex.quote. It
+        sends what the old pair would have sent. Run here against a local bare folder standing in for the new home,
+        through git's own insteadOf, with no call to GitHub."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.git("someone/alpha", "tag", "v1", one)
+            w.gh.git("someone/alpha", "-c", "user.email=a@example.invalid", "-c", "user.name=a",
+                     "tag", "-a", "-m", "a note", "v2", one)
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "branch", "topic", one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.gh.git("someone/alpha", "update-ref", "refs/heads/main", one)   # main moved back: its old commit kept
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2002-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            held = git_all_refs(folder)
+            self.assertTrue([r for r in held if r.startswith("refs/heads/kept/")], held)   # the premise: kept refs
+            url = "https://github.com/someone/new.git"
+            n = len(w.gh.log)
+            rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+            self.assertEqual(rc, 2, out)
+            self.assertIn("This skill never writes to GitHub", out)
+            self.assertIn("make a new, empty repository there", out)
+            lines = [l for l in out.splitlines() if l.startswith("  ")]
+            self.assertEqual(lines, [f"  git --git-dir {shlex.quote(folder)} push --mirror {shlex.quote(url)}"], out)
+            self.assertNotIn("<", out)                                 # nothing for the person to fill in
+            self.assertNotIn("clone", out)
+            # Run as printed, in an empty folder, nothing added but git's own address rewrite to the stand-in home.
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "new")
+            here = tempfile.mkdtemp(prefix="wsm-shell-")
+            TEMPS.append(here)
+            road = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0=f"url.{home}.insteadOf", GIT_CONFIG_VALUE_0=url)
+            r = subprocess.run(["bash", "-c", lines[0].strip()], cwd=here, capture_output=True, text=True, env=road,
+                               stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.listdir(here), [])
+            self.assertEqual(git_all_refs(folder), held, "the line changed the copy")
+            self.assertEqual(git_all_refs(home), held)
+            # What the old pair would have sent: a mirror clone over the forge's address (with the tool's own login
+            # here, which a person did not have), then a mirror push into a second empty home.
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            old = os.path.join(root, "old.git")
+            subprocess.run(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "clone", "-q",
+                            "--mirror", f"http://127.0.0.1:{w.port}/mirror/someone--alpha.git", old],
+                           check=True, capture_output=True, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+            home2 = bare_home(root, "new2")
+            subprocess.run(["git", "--git-dir", old, "push", "-q", "--mirror", home2], check=True, capture_output=True)
+            self.assertEqual(git_all_refs(home), git_all_refs(home2))
+            self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
+            self.assertEqual(w.gh.writes(), [])
+            # No copy, or a folder this tool does not print as it is: no line, and what to do.
+            for repo, words in (("someone/nothere", "could not be found"),):
+                rc, out = quiet(mirror.main, ["restore", "--to", url, repo])
+                self.assertEqual(rc, 2, out)
+                self.assertIn(words, out)
+                self.assertNotIn("  git ", out)
+            real = mirror.forge_folder
+            mirror.forge_folder = lambda p, forge, name: folder + "$(id>m4)"
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+            finally:
+                mirror.forge_folder = real
+            self.assertEqual(rc, 2, out)
+            self.assertIn("does not print as it is", out)
+            self.assertNotIn("  git ", out)
+            # The --to value (a reviewer's world 20): typed by a person or their agent, and passed on. Each line is
+            # read both ways: a git line run as printed, and every line relayed inside double quotes, as an agent
+            # passes a tool's line on; a command inside the value never runs, and no line carries either form.
+            def relayed(out):
+                here = tempfile.mkdtemp(prefix="wsm-relay-")
+                TEMPS.append(here)
+                for l in out.splitlines():
+                    if l.startswith("  git "):
+                        subprocess.run(["bash", "-c", l.strip()], cwd=here, capture_output=True,
+                                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), stdin=subprocess.DEVNULL)
+                    subprocess.run(["bash", "-c", 'printf "%s\\n" "' + l.replace('"', '\\"') + '"'], cwd=here,
+                                   capture_output=True, stdin=subprocess.DEVNULL)
+                return os.listdir(here)
+            forms = lambda out: [l for l in out.splitlines() if "`" in l or "$(" in l or "$" + "?" in l]
+            for bad in ("https://github.com/someone/n$(touch m1).git", "https://github.com/someone/n`touch m2`.git",
+                        "git@github.com:someone/n$(touch m3).git"):
+                rc, out = quiet(mirror.main, ["restore", "--to", bad, "someone/alpha"])
+                self.assertEqual(rc, 2, out)
+                self.assertIn("This skill never writes to GitHub", out)
+                self.assertIn("The address given holds a character this tool does not print as it is", out)
+                self.assertIn(mirror.SHOWN_CHANGED, out)
+                self.assertNotIn("  git ", out)
+                self.assertEqual(forms(out), [], out)
+                self.assertEqual(relayed(out), [], (bad, out))
+            # A new home on this computer whose path holds such a character: the restore itself works (a person's
+            # folder name is theirs), and the line that names it shows it changed and says so.
+            w.gh.add_repo("someone", "beta")
+            w.gh.commit("someone/beta", {"a": b"1"})
+            w.gh.git("someone/alpha", "branch", "kept/x", one)            # M128's lines, with such a home
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2003-01-01T00:00:00Z"
+            self.assertEqual(w.sync()[0], 0)
+            odd = os.path.join(root, "h$(touch m4)`touch m5`")
+            os.makedirs(odd)
+            for repo, rc_want in (("someone/beta", 0), ("someone/alpha", 1)):
+                home = bare_home(odd, repo.split("/")[1])
+                rc, out = quiet(mirror.main, ["restore", "--to", home, repo])
+                self.assertEqual(rc, rc_want, out)
+                self.assertIn(f"restored {repo}: ", out)
+                self.assertIn(f" to {mirror.shown_as_is(home)}; the kept refs stay in your forge ({mirror.SHOWN_CHANGED})",
+                              out)
+                self.assertEqual({r: v for r, v in lsremote(home).items() if not r.endswith("^{}")},
+                                 {r: v for r, v in w.gh_refs(repo).items() if not r.startswith("refs/heads/kept/")})
+                self.assertEqual(forms(out), [], out)
+                self.assertEqual(relayed(out), [], (repo, out))
+                if repo == "someone/alpha":
+                    self.assertIn(mirror.RESTORE_TO_HIDDEN + f"\n  git --git-dir {shlex.quote(folder)} for-each-ref "
+                                  "refs/heads/kept/\n", out)
+                    self.assertFalse([l for l in out.splitlines() if l.startswith("  git ") and " push " in l], out)
+            self.assertNotIn("$(", out)
 
     def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):
         with World(self) as w:
@@ -6121,6 +7014,10 @@ class G9(unittest.TestCase):
             self.assertIn(f"  {lone}: the copy of the script setup was run from. It is yours; delete it when you want.", out)
             self.assertNotIn("the folder the skill was downloaded into", out)
             # The record deleted with the copies: what was downloaded is still named, with no place to guess at.
+            # The forge is stopped first: the stand-in service manager does not stop it on uninstall's disable --now
+            # (systemd does), and a folder removed under a running forge races its writes (seen once in CI).
+            stop_forge(w.home)
+            self.assertEqual([pr.poll() is None for pr in w.home.procs if pr.poll() is None], [])
             shutil.rmtree(p["data"])
             out = quiet(mirror.main, ["uninstall"])[1]
             self.assertIn("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
@@ -6993,7 +7890,8 @@ class G6Words(unittest.TestCase):
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
         data = {"SKILL_REPO", "GITEA_VERSION", "last_line", "lines_of", "shown_lines",  # facts in a line (git's words)
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
-                "own_command"}                                                   # (the command to run, as it runs)
+                "own_command",                                                   # (the command to run, as it runs)
+                "SHOWN_CHANGED"}                                                 # (what a ? stands for, M132)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
                                          "<other>", "door_line"},
                          set(),
@@ -7087,13 +7985,23 @@ def git_commit_of(root):
     return commit_of
 
 
+def rows_not_here(texts, ids):
+    """Each row number (M and digits, standing alone) that a text names and `ids` does not hold: [(number, where)]."""
+    out = []
+    for name in sorted(texts):
+        for m in re.finditer(r"(?<![A-Za-z0-9_])M(\d+)(?![A-Za-z0-9_])", texts[name]):
+            if "M" + m.group(1) not in ids:
+                out.append(("M" + m.group(1), f"{name}:{texts[name].count(chr(10), 0, m.start()) + 1}"))
+    return out
+
+
 def to_build_wrong(plan, rows, ver):
     """Each proof the plan marks *(to build)* that may not stand at version `ver` (the maintainer's ruling,
     2026-11-23): before the first release any may; after it, only one whose codon has a row due in a later version
     than `ver`, a row not marked built (no test named). Returns [(test, why)]."""
     wrong = []
     for line in plan.splitlines():
-        m = re.match(r"\| (G\d+\.\d+) \|", line)
+        m = re.match(r"\| (G\d+\.\d+|T\d+) \|", line)            # a T codon (the suite's own) as a G codon
         for t in re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", line):
             if ver == "0.0.0":
                 continue
@@ -7330,6 +8238,68 @@ class Strand(unittest.TestCase):
         self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
         self.assertEqual(codon_tests - named, set(), "tests with no codon in the plan")
 
+    def test_T8_every_row_number_a_text_names_is_a_row(self):
+        """The family's rule 34 (2026-11-25, M130): every row number this tree's README, plan, rows, scripts or tests
+        name is a row in this same tree's PROMISES.json (seen: M124 and M127 named here, and their rows only on the
+        rows branch). Seen red first on a planted number, here, every run."""
+        ids = {r["id"] for r in jload(os.path.join(ROOT, "PROMISES.json"))["rows"]}
+        planted = "M" + str(10 ** 6)                          # built here, so this file names no such row
+        self.assertEqual(rows_not_here({"planted.md": f"as row {planted} says; rows M93-M98"}, {"M93", "M98"}),
+                         [(planted, "planted.md:1")], "the reader misses a planted number")
+        texts = {}
+        for top, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for f in files:
+                path = os.path.join(top, f)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        texts[os.path.relpath(path, ROOT)] = fh.read()
+                except (UnicodeDecodeError, OSError):
+                    continue                                  # not a text (an image, a binary)
+        self.assertIn("README.md", texts)
+        self.assertIn(os.path.join("scripts", "mirror.py"), texts)
+        self.assertEqual(rows_not_here(texts, ids), [], "a text names a row this tree's PROMISES.json does not hold")
+
+    def test_T9_the_rule_3_gate_is_a_job_of_its_own_and_hides_nothing_else(self):
+        """M131 (a reviewer's read of CI, 2026-11-25): with the rule 3 gate red by design in every leg, a second red
+        in a leg (G9.8, once) stood behind it. The legs run the whole suite but that one test, and a job of its own
+        runs it; the flag sets apart that test only, and takes nothing else."""
+        me = sys.modules[__name__]
+        ids = lambda suite: {t.id().rsplit(".", 1)[-1] for t in iter_tests(suite)}
+        whole = ids(unittest.defaultTestLoader.loadTestsFromModule(me))
+        apart = ids(without(unittest.defaultTestLoader.loadTestsFromModule(me), RULE3_GATE))
+        self.assertIn(RULE3_GATE, whole)
+        self.assertEqual(whole - apart, {RULE3_GATE}, "the flag sets apart another test, or none")
+        self.assertIn(RULE3_GATE, plan_proofs() | row_tests())
+        # The flag takes nothing else: no name, no --gate-only beside it.
+        for extra in (["G1"], ["--gate-only", "test_T3_a_commits_checks_run_once"]):
+            r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), APART_FLAG, *extra],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120,
+                               env={k: v for k, v in os.environ.items() if k != "WSM_TEST_REPORT"})
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr[-800:])
+        # The join leaves it out only when every report says it was set apart.
+        with tempfile.TemporaryDirectory(prefix="wsm-join-") as d:
+            proofs = sorted((plan_proofs() | row_tests()) - {RULE3_GATE})
+            def report(n, apart_):
+                path = os.path.join(d, f"r{n}.json")
+                with open(path, "w") as f:
+                    json.dump({"passed": proofs, "refused": [], "apart": apart_}, f)
+                return path
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(join_reports([report(1, [RULE3_GATE]), report(2, [RULE3_GATE])], 2), 0)
+                self.assertEqual(join_reports([report(3, [RULE3_GATE]), report(4, [])], 2), 1)
+            self.assertIn(f"GATE: {RULE3_GATE} passed on none", out.getvalue())
+        # The workflow: every leg sets it apart, one job of its own runs it, the join waits on the legs.
+        wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
+        jobs = re.split(r"^  (?=[a-z0-9-]+:\n)", wf.split("\njobs:\n", 1)[1], flags=re.M)
+        job = {j.split(":", 1)[0]: j for j in jobs if j.strip()}
+        for leg in ("test", "test-mac"):
+            self.assertIn(f"run: python -I tests/test_mirror.py -v {APART_FLAG}\n", job[leg])
+        self.assertIn(f"run: python -I tests/test_mirror.py -v --gate-only {RULE3_GATE}\n", job["rule-3-gate"])
+        self.assertNotIn("needs:", job["rule-3-gate"])
+        self.assertEqual(wf.count(APART_FLAG), 2)
+
     def test_T3_a_commits_checks_run_once(self):
         """M43 (the family's rule 17, 2026-11-23): one stack of pull requests queued 17 runs, each commit twice,
         because the workflow ran on every push and every pull request. It runs on pull requests, and on pushes
@@ -7564,9 +8534,17 @@ def row_tests():
     return {r["test"] for r in rows if r.get("test")}
 
 
+# T9 (M131): the family's rule 3 gate runs in a job of its own, so the legs' colour says the suite and that job's
+# colour says the proofs on real machines. Only this one test can be set apart, and only with this flag.
+RULE3_GATE = "test_PROMISES_a_row_with_a_stand_in_is_proven_before_its_tag"
+APART_FLAG = "--without-rule3-gate"
+
+
 def join_reports(paths, expect):
     reports = [jload(p) for p in paths]
     proofs = plan_proofs() | row_tests()
+    if reports and all(r.get("apart") == [RULE3_GATE] for r in reports):
+        proofs -= {RULE3_GATE}                        # judged in its own job, never by the legs
     passed = set().union(*(set(r["passed"]) for r in reports)) if reports else set()
     refused = [x for r in reports for x in r["refused"]]
     if len(reports) != expect:
@@ -7578,6 +8556,25 @@ def join_reports(paths, expect):
     return 1 if refused else 0
 
 
+def iter_tests(suite):
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            yield from iter_tests(t)
+        else:
+            yield t
+
+
+def without(suite, name):
+    """The suite with every test of that one name taken out (none when name is None)."""
+    out = unittest.TestSuite()
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            out.addTest(without(t, name))
+        elif name is None or t.id().rsplit(".", 1)[-1] != name:
+            out.addTest(t)
+    return out
+
+
 def main(argv):
     verbosity = 2 if "-v" in argv else 1
     args = [a for a in argv if a != "-v"]
@@ -7586,6 +8583,11 @@ def main(argv):
         files = [a for i, a in enumerate(args[1:], 1) if a != "--expect" and args[i - 1] != "--expect"]
         return join_reports(files, expect)
     me = sys.modules[__name__]
+    apart = APART_FLAG in args
+    if apart and args != [APART_FLAG]:
+        print(f"{APART_FLAG} runs the whole suite but one test, and takes nothing else.", file=sys.stderr)
+        return 2
+    args = [] if apart else args
     gate_only = args[1] if args[:1] == ["--gate-only"] and len(args) > 1 else None
     tests = collected_tests()
     if gate_only:
@@ -7593,13 +8595,14 @@ def main(argv):
     elif args:
         suite = unittest.defaultTestLoader.loadTestsFromNames(args, me)
     else:
-        suite = unittest.defaultTestLoader.loadTestsFromModule(me)
+        suite = without(unittest.defaultTestLoader.loadTestsFromModule(me), RULE3_GATE if apart else None)
     result = unittest.TextTestRunner(verbosity=verbosity, resultclass=Recorder, stream=sys.stderr).run(suite)
     if args and not gate_only:
         print("A part of the suite was run, so the gate was not applied.", file=sys.stderr)
         return 0 if result.wasSuccessful() else 1
     problems = shape_problems(os.path.abspath(__file__))
-    refused, not_here = gate(result.outcome, {gate_only} if gate_only else plan_proofs() | row_tests())
+    refused, not_here = gate(result.outcome, {gate_only} if gate_only else
+                             (plan_proofs() | row_tests()) - ({RULE3_GATE} if apart else set()))
     refused = problems + refused
     for x in refused:
         print("GATE:", x)
@@ -7610,7 +8613,8 @@ def main(argv):
         with open(report, "w", encoding="utf-8") as f:
             json.dump({"system": "/".join(mirror.system()), "python": sys.version.split()[0],
                        "passed": sorted(n for n, o in result.outcome.items() if o == "passed"),
-                       "not_run_here": not_here, "refused": refused}, f, indent=1)
+                       "not_run_here": not_here, "refused": refused, "apart": [RULE3_GATE] if apart else []},
+                      f, indent=1)
     return 0 if result.wasSuccessful() and not refused else 1
 
 
