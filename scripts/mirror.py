@@ -1113,6 +1113,9 @@ NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub
                  "moved; it stays as it was until a sync shows every name at GitHub's commit")
 FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
                        "({names}), so it is not called whole; the next sync tries again")
+KEPT_CLASH = ("GitHub holds {n} branch(es) named kept/... ({names}), the name this version gives the copy's own kept "
+              "refs, so it copies such a project once and cannot refresh it; nothing in its copy was changed. To have "
+              "it refreshed again, give that branch another name on GitHub; the copy as it was stays in your forge")
 RESTORE_HIDDEN = ("{n} of those name(s) hold a character that cannot be shown as it is (each such character is put as "
                   "a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
                   "holds it:")
@@ -2390,6 +2393,15 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     if out is None or out.returncode != 0:
         return "what the copy holds now could not be read from the forge" + (
             "" if out is None else ": " + last_line(out.stderr))
+    # M127 (due 0.1.1): a GitHub branch named kept/... shares its name with a kept ref of the copy once the copy holds
+    # it, and git refuses a push with two sources for one name. Said in plain words, before anything is pushed.
+    there = refs_under(cache, "refs/forge/heads")                 # the copy's names, as just read from the forge
+    clash = sorted(r for r in refs_under(cache, "refs/heads")
+                   if r.startswith("refs/heads/kept/") and "refs/forge/heads/" + r[len("refs/heads/"):] in there)
+    if clash:
+        return KEPT_CLASH.format(n=len(clash), names=", ".join(shown_as_is(written(r)[len("refs/heads/"):])
+                                                                for r in clash[:5])
+                                 + (f" and {len(clash) - 5} more" if len(clash) > 5 else ""))
     kept = keep_before_moving(cache, report, full)
     if kept is None:
         return "an old commit could not be kept, so the copy was not moved"

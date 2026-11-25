@@ -3712,6 +3712,42 @@ class G5(unittest.TestCase):
             self.assertEqual(tags(refs), tags(w.gh_refs(full)))
             self.assertEqual(refs[f"refs/heads/kept/{day}/tags/tam-2"], two)
 
+    def test_G5_9_a_github_branch_named_kept_is_said_in_plain_words(self):
+        """M129 (a reviewer's world 16, 2026-11-25): with a branch named kept/... on GitHub, every sync after something
+        changed there ended on git's own "dst ref ... receives from more than one src", with no next step, and the
+        copy's main stayed behind GitHub's. Now the sync says what it is, before anything is pushed, and its one next
+        step, run, gives a sync that is good again. The cure is row M127, due 0.1.1."""
+        with World(self) as w:
+            for n, b in (("alpha", "kept/foo"), ("beta", "kept/2020-01-01/old"), ("gamma", None)):
+                w.gh.add_repo("someone", n)
+                one = w.gh.commit(f"someone/{n}", {"a": b"1"})
+                if b:
+                    w.gh.git(f"someone/{n}", "branch", b, one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)                       # this version copies such a project once
+            before = {n: w.forge_refs(f"someone--{n}") for n in ("alpha", "beta")}
+            for n in ("alpha", "beta", "gamma"):                         # then something changes on GitHub
+                w.gh.commit(f"someone/{n}", {"a": b"2"})
+                w.gh.repos[f"someone/{n}"]["pushed_at"] = "2002-01-01T00:00:00Z"
+            for _ in (1, 2):                                             # every sync after that, not by timing
+                rc, out = w.sync()
+                self.assertEqual(rc, 1, out)
+                for n, b in (("alpha", "kept/foo"), ("beta", "kept/2020-01-01/old")):
+                    self.assertIn(f"problem: someone/{n}: " + mirror.KEPT_CLASH.format(n=1, names=b), out)
+                    self.assertEqual(w.forge_refs(f"someone--{n}"), before[n], "the copy moved")
+                self.assertNotIn("receives from more than one src", out)
+                self.assertEqual(w.forge_refs("someone--gamma")["refs/heads/main"],
+                                 w.gh_refs("someone/gamma")["refs/heads/main"])     # the control follows
+            rc, out = status()
+            self.assertIn("cannot refresh: " + mirror.KEPT_CLASH.format(n=1, names="kept/foo"), out)
+            # The one next step, taken: the branch gets another name on GitHub, and the next sync is good.
+            w.gh.git("someone/alpha", "branch", "-m", "kept/foo", "foo")
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2003-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertNotIn("problem: someone/alpha", out)
+            refs, gh = w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha")
+            self.assertEqual({r: v for r, v in refs.items() if not r.startswith("refs/heads/kept/")}, gh)
+
 
 def status():
     return quiet(mirror.main, ["status"])
