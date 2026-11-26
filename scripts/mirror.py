@@ -3710,7 +3710,8 @@ def kept_step(p, e):
     folder, by the person, and what it held is chosen again or found again; never written over by the tool."""
     blocked = blocked_folder(e.path)
     if blocked:
-        return f"{blocked} cannot be entered ({folder_step(blocked)[0]}); {folder_step(blocked)[1]}"
+        why, step = folder_step(blocked)
+        return f"{blocked} cannot be entered ({why}); {step}; then run the same command again"
     d = os.path.dirname(e.path)
     move = f"move that file out of {d} (into a folder of your own, to keep it)"
     if e.path == p["settings"]:
@@ -3747,7 +3748,8 @@ def kept_step(p, e):
 def folder_step(d):
     """(why, the one step) for a folder of the skill's that this account cannot read, write and enter: it is given
     back to the person by its owner. Never a move of a file inside it (the person cannot reach one), never a write by
-    the tool. A command is printed only for a path the tool prints as it is."""
+    the tool. A command is printed only for a path the tool prints as it is. Each caller ends the step with "then run
+    the same command again" in its own words (G6.8 reads them there)."""
     try:
         theirs = os.stat(d).st_uid != os.getuid()
     except OSError:
@@ -3756,12 +3758,10 @@ def folder_step(d):
         cmd = f"sudo chown -R {shlex.quote(getpass.getuser())} {shlex.quote(d)}"
         return ("another account owns it, as one run of the skill with sudo leaves it",
                 "give it back to your account, as an administrator of this computer"
-                + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)")
-                + "; then run the same command again")
+                + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
     cmd = f"chmod u+rwx {shlex.quote(d)}"
     return ("it is yours, and its mode does not let you",
-            "give it back its mode" + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)")
-            + "; then run the same command again")
+            "give it back its mode" + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
 
 
 def link_left_line(link, unit, said):
@@ -3803,7 +3803,7 @@ def folders_floor(p, cmd):
         why, step = folder_step(d)
         return (f"Stopped: {d} is a folder of the skill's that this account cannot read, write and enter ({why}), "
                 f"so {cmd} cannot read what is kept there, and changes nothing: nothing was copied, written or taken "
-                f"away. The one next step: {step}.")
+                f"away. The one next step: {step}; then run the same command again.")
     return None
 
 
