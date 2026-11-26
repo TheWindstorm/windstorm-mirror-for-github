@@ -164,7 +164,7 @@ def json_kind(v):
 
 def blocked_folder(path):
     """The first folder on a path's road that this account may not enter (search), or None. Named in a failed read's
-    why, so a folder at mode 000, or one another account owns (left by a run with sudo), is said as that."""
+    why, so a folder at mode 000, or one another account owns, is said as that."""
     road, d = [], os.path.dirname(os.path.abspath(path))
     while True:
         road.append(d)
@@ -371,6 +371,16 @@ def home_fresh(p):
     return True
 
 
+class Why(str):
+    """A failed read's words, with its answer handed on as a value ("not there" or "could not be read"), so a
+    decision is never made from how a sentence ends (found 2026-11-26 in a read of the code: a link to a file that is
+    not there ends in the same words as an absence)."""
+    def __new__(cls, text, answer):
+        s = super().__new__(cls, text)
+        s.answer = answer
+        return s
+
+
 def read_made(p):
     """(record, None) or (None, why): what the skill wrote in its own folders, path to kind ("file", "dir",
     "tree:<forge|git|other>", "service:<SHA-256>", or "set-aside record"). M158 (G6.25): the file has three answers;
@@ -382,14 +392,15 @@ def read_made(p):
     if answer == "not there":
         if (_made_start["fresh"] is False and not _made_start["use"]
                 and _made_start["data"] == os.path.abspath(p["data"])):
-            return None, f"{f} is not there"
+            return None, Why(f"{f} is not there", "not there")
         return {}, None
     if answer != "read":
-        return None, f"{f} could not be read: {got}"
+        return None, Why(f"{f} could not be read: {got}", "could not be read")
     made = got.get("made") or {}
     if got.get("written_by") != "windstorm-mirror" or not isinstance(made, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in made.items()):
-        return None, f"{f} could not be read: it is not the record the skill writes (its 'written_by' or 'made' entry)"
+        return None, Why(f"{f} could not be read: it is not the record the skill writes (its 'written_by' or 'made' "
+                         "entry)", "could not be read")
     return dict(made), None
 
 
@@ -1002,7 +1013,7 @@ def home_is_not_ours(p, use=False, dry=False):
             # in its folders is named by its path, as one the skill did not make, and a record that is there but
             # could not be read is named with them (it is moved out with them; nothing is deleted or written over)
             rec = {}
-            if not why.endswith(" is not there"):
+            if getattr(why, "answer", None) != "not there":
                 record_unread = [why.replace(" could not be read: ", " (could not be read: ", 1) + ")"]
     states = {f: service_file_state(p, rec, f) for f in service_files(p) if os.path.lexists(f)}
     unread = [(f, w) for f, (a, w) in states.items() if a == "could not be read"]
@@ -1038,7 +1049,7 @@ def home_is_not_ours(p, use=False, dry=False):
                                          if second else "move those out of it (into a folder of your own, to keep "
                                          "them)") + ", and run setup again.")
     if taken_on and not dry:
-        _take_on_pending[:] = [(p, lost, rec)]     # taken on at setup's first write, after its last stop (walk 11-26)
+        _take_on_pending[:] = [(p, lost, rec)]     # taken on at setup's first write, after its last stop (a stock Ubuntu 24.04 guest, 2026-11-26)
     return None
 
 
@@ -2271,27 +2282,27 @@ def systemd_off(p, only=None):
     del SYSTEMD_LINK_LEFT[:]
     if told:
         off = run(["systemctl", "--user", "disable", "--now", *told])
-        if off.returncode == 0:
-            # RECORDED on systemd 255 (walk7b, a stock Ubuntu 24.04 guest, 2026-11-26): with the forge's unit masked
-            # (a link to /dev/null in its place), disable --now ends with code 0, says "Unit <its file> is masked,
-            # ignoring.", stops it, and leaves its link from setup; the timer's link it takes. A link still there
-            # is named, in systemctl's own line for that unit.
-            for u in told:
-                if os.path.lexists(wants_link(p, u)):
-                    said = [x.strip() for x in shown_lines((off.stderr or "") + "\n" + (off.stdout or ""))]
-                    mine = [x for x in said if (u if u.endswith(".timer") else u + ".service") in x]
-                    SYSTEMD_LINK_LEFT.append((u, (mine or said or ["code 0, and no word of it"])[0]))
-        else:
+        answered = {u: off for u in told}
+        if off.returncode != 0:
             # Seen 2026-11-26 on systemd 255 (a stock Ubuntu 24.04 guest, the forge's unit file at mode 000 while
             # systemd held it loaded): disable refuses the whole call ("Failed to disable unit: Unit file ... does
             # not exist.", code 1) and stops nothing, the timer in the same call too; stop needs no file. So each
             # unit is told off alone, and one whose disable is refused is stopped, its refusal kept in its own words.
             for u in told:
                 one = run(["systemctl", "--user", "disable", "--now", u]) if len(told) > 1 else off
+                answered[u] = one
                 if one.returncode != 0:
-                    said = [x.strip() for x in shown_lines(one.stderr or one.stdout)]
-                    SYSTEMD_LINK_LEFT.append((u, said[0] if said else f"code {one.returncode}"))
                     run(["systemctl", "--user", "stop", u])
+        # A link setup's enable made that is still there is named, in systemctl's own line for that unit, whichever
+        # call told it off. RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): with the forge's unit
+        # masked (a link to /dev/null in its place), disable --now ends with code 0, says "Unit <its file> is
+        # masked, ignoring.", stops it, and leaves its link; the timer's link it takes.
+        for u in told:
+            one = answered[u]
+            if one.returncode != 0 or os.path.lexists(wants_link(p, u)):
+                said = [x.strip() for x in shown_lines((one.stderr or "") + "\n" + (one.stdout or ""))]
+                mine = [x for x in said if (u if u.endswith(".timer") else u + ".service") in x]
+                SYSTEMD_LINK_LEFT.append((u, (mine or said or [f"code {one.returncode}, and no word of it"])[0]))
     seen = []
     for suffix, words in pick:
         unit = SERVICE if suffix is None else SYNC_UNIT + suffix
@@ -3710,8 +3721,9 @@ def kept_step(p, e):
     folder, by the person, and what it held is chosen again or found again; never written over by the tool."""
     blocked = blocked_folder(e.path)
     if blocked:
-        why, step = folder_step(blocked)
-        return f"{blocked} cannot be entered ({why}); {step}; then run the same command again"
+        ours, why, step = folder_words(p, blocked)
+        return (f"{blocked}" + ("" if ours else ", a folder above the skill's own,") + f" cannot be entered ({why}); "
+                f"{step}; then run the same command again")
     d = os.path.dirname(e.path)
     move = f"move that file out of {d} (into a folder of your own, to keep it)"
     if e.path == p["settings"]:
@@ -3745,27 +3757,89 @@ def kept_step(p, e):
     return f"{move}, then run the same command again"
 
 
-def folder_step(d):
-    """(why, the one step) for a folder of the skill's that this account cannot read, write and enter: it is given
-    back to the person by its owner. Never a move of a file inside it (the person cannot reach one), never a write by
-    the tool. A command is printed only for a path the tool prints as it is. Each caller ends the step with "then run
-    the same command again" in its own words (G6.8 reads them there)."""
+def chown_name():
+    """The name a line that changes owners as an administrator gives for this account: taken from the account's
+    number (never from USER or LOGNAME, which the environment can set to anyone), else the number itself."""
     try:
-        theirs = os.stat(d).st_uid != os.getuid()
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return str(os.getuid())
+
+
+def owner_words(uid):
+    """Whose a folder is, by its number, with the name where the system has one."""
+    name = account_name(uid)
+    return f"account {uid}" + ("" if name == f"number {uid}" else f" ({name})")
+
+
+def folder_words(p, d):
+    """M167 (G6.29): (ours, why, the one step) for a folder on the road to the skill's own that this account cannot
+    read, write and enter. A line that changes a folder's mode or owner is printed only for a folder of the skill's
+    own (WSM_HOME's, the data and settings folders, and what is in them), and only for a path the tool prints as it
+    is; a folder above them is named with whose it is, and no line. The mode is named as the cause only where its own
+    bits lack what is asked. Never a move of a file inside it (the person cannot reach one), never a write by the
+    tool. Each caller ends the step with "then run the same command again" in its own words (G6.8 reads them there)."""
+    d = os.path.abspath(d)
+    ours = any(d == r or inside(d, r) for r in own_roots(p))
+    try:
+        st_ = os.stat(d)
     except OSError:
-        theirs = False
-    if theirs:
-        cmd = f"sudo chown -R {shlex.quote(getpass.getuser())} {shlex.quote(d)}"
-        return ("another account owns it, as one run of the skill with sudo leaves it",
-                "give it back to your account, as an administrator of this computer"
-                + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
-    cmd = f"chmod u+rwx {shlex.quote(d)}"
-    return ("it is yours, and its mode does not let you",
+        st_ = None
+    if not ours:
+        if st_ is None:
+            return False, "its owner could not be read, and it is not the skill's", (
+                "it is not the skill's, so the tool gives no line that changes it: this computer's administrator "
+                "lets this account into it")
+        if st_.st_uid == os.getuid():
+            return False, "it is yours, and not the skill's", (
+                "it is not the skill's, so the tool gives no line that changes it: let this account into it again, "
+                "as you choose")
+        return False, f"it belongs to {owner_words(st_.st_uid)}, and not to the skill", (
+            "it is not the skill's, so the tool gives no line that changes it: only its owner or this computer's "
+            "administrator can let this account into it")
+    if st_ is None:
+        return True, "its owner and its mode could not be read", (
+            "this computer's administrator finds why it cannot be read; the tool gives no line for it")
+    if st_.st_uid != os.getuid():
+        cmd = f"sudo chown -R {shlex.quote(chown_name())} {shlex.quote(d)}"
+        return True, f"another account owns it, {owner_words(st_.st_uid)}", (
+            "give it back to your account, as an administrator of this computer"
+            + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
+    if st_.st_mode & 0o700 != 0o700:
+        cmd = f"chmod u+rwx {shlex.quote(d)}"
+        return True, "it is yours, and its mode does not let you", (
             "give it back its mode" + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
+    return True, ("it is yours, and its mode lets you, and this computer still refuses it, as a disk mounted "
+                  "read-only refuses writing"), (
+        "the cause is not the folder's mode, so the tool gives no line that changes it: this computer's "
+        "administrator finds why")
+
+
+def still_running(p):
+    """M167, at uninstall's stop on a folder it cannot enter: what of the skill's the service manager shows still
+    running, read without the skill's folders; or that it could not be read."""
+    if system()[0] == "darwin":
+        held = [(w, launchd_held(lab)) for w, lab in (("the forge's job", LAUNCHD_LABEL), ("the sync's job", SYNC_LABEL))]
+        if any(h is None for _, h in held):
+            return "What launchd holds of the skill's could not be read, so it may still run."
+        on = [w for w, h in held if h != "absent"]
+        return ("launchd still holds " + " and ".join(on) + " of the skill's loaded, and they go on running until "
+                "uninstall can go on." if on else "launchd holds no job of the skill's.")
+    on = []
+    for u, w in ((SERVICE, "the forge's service"), (SYNC_UNIT + ".timer", "the sync's timer")):
+        out = run(["systemctl", "--user", "show", u, "-p", "ActiveState"])
+        state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
+        if out.returncode != 0 or not state:
+            return "What systemd runs of the skill's could not be read, so it may still run."
+        if state not in ("inactive", "failed"):
+            on.append(f"{w} ({state})")
+    return ("systemd still shows " + " and ".join(on) + " of the skill's, and they go on running until uninstall "
+            "can go on." if on else "systemd shows nothing of the skill's running.")
 
 
 def link_left_line(link, unit, said):
-    """M163 (walk6 and walk7b, 2026-11-26): the link systemctl made at setup and did not take off (its disable
+    """M163 and M153 (seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26): the link systemctl made at setup and did not take off (its disable
     refused, or the unit masked), named with its step. The rm line is printed only for a path the tool prints as it
     is (no backtick, no dollar-parenthesis, no character that cannot be seen), each part through shlex.quote, so the
     line runs nothing else when pasted."""
@@ -3796,14 +3870,25 @@ def folders_floor(p, cmd):
         except NotADirectoryError:
             continue                  # a file where a folder goes: said by the step that reads that place
         except OSError:
-            d = blocked_folder(os.path.join(d, "x")) or d
+            above = blocked_folder(os.path.join(d, "x"))
+            if above and above != d:
+                ours, why, step = folder_words(p, above)
+                if not ours:          # M167: a folder above is never "the skill's"
+                    return (f"Stopped: {above} is a folder above the skill's folder {d}, and this account cannot enter "
+                            f"it ({why}), so {cmd} cannot read what is kept there, and changes nothing: nothing was "
+                            f"copied, written or taken away. The one next step: {step}; then run the same command "
+                            "again." + (f" {still_running(p)}" if cmd == "uninstall" else ""))
+                d = above
         else:
             if not stat.S_ISDIR(st_.st_mode) or os.access(d, os.R_OK | os.W_OK | os.X_OK):
                 continue
-        why, step = folder_step(d)
+        ours, why, step = folder_words(p, d)
         return (f"Stopped: {d} is a folder of the skill's that this account cannot read, write and enter ({why}), "
                 f"so {cmd} cannot read what is kept there, and changes nothing: nothing was copied, written or taken "
-                f"away. The one next step: {step}; then run the same command again.")
+                f"away. The one next step: {step}; then run the same command again."
+                # M167: uninstall stops here too (with a folder it cannot enter it cannot read what it made), and
+                # says what of the skill's still runs; row M176 (G9.20, due 0.1.1) has it switch that off
+                + (f" {still_running(p)}" if cmd == "uninstall" else ""))
     return None
 
 
@@ -6022,7 +6107,7 @@ def cmd_uninstall(args):
                     if unit_is_ours(p, which, held[which][0]):
                         only += list(suffixes)
                     else:
-                        # walk7 (A), 2026-11-26, systemd 255: uninstall run again after one that took the sync's
+                        # seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26: uninstall run again after one that took the sync's
                         # files named them as left, though they were gone. Each file is named only where it is; a
                         # unit that runs nothing and has no file left is nothing to leave, and is not named.
                         there = [x for x in ([f] + ([os.path.join(base, SYNC_UNIT + ".timer")] if which == "sync"
@@ -6325,7 +6410,7 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
                 (f"the forge's binary ({p['bin']})", os.path.lexists(p["bin"])),
                 (f"the copies' caches ({p['cache']})", os.path.lexists(p["cache"])),
                 (f"the settings ({p['settings']})", os.path.lexists(p["settings"]))) if there]
-                        or ["the other files in those folders"])    # each named only where it is (walk6 (C), 11-26)
+                        or ["the other files in those folders"])    # each named only where it is (seen on a stock guest 11-26)
             + ("; and, kept because that record cannot show them to be the skill's to take: " + "; ".join(held)
                if held else "") + ". Nothing of the skill's runs. They are yours, to keep or delete after you look "
             "at them.")

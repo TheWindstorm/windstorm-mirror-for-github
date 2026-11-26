@@ -451,7 +451,7 @@ class Home:
             except OSError:
                 # M150: a unit file the manager cannot open is answered as one with no start line, never a raise; what
                 # systemd answers for a unit file of mode 000 that it has not loaded is NOT SEEN BY US. RECORDED on
-                # systemd 255 (walk6, 2026-11-26): one it loaded before the file became unreadable is held as loaded,
+                # systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): one it loaded before the file became unreadable is held as loaded,
                 # its start line too, until a daemon-reload (bus_loaded: the unit's text as loaded)
                 text = self.bus_loaded.get(self.bus_objs[cmd[5]], "")
             starts, env = sd_standin_unit(text, self.env["HOME"])
@@ -501,7 +501,7 @@ class Home:
                     return subprocess.CompletedProcess(cmd, 1, "", self.no_bus_words + "\n")
                 verb = [c for c in cmd[2:] if not c.startswith("-")]
                 if verb[:1] in (["enable"], ["disable"]):
-                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26, walk6b): a unit whose file in
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): a unit whose file in
                     # this account's unit folder cannot be read refuses the WHOLE call, in these words, code 1, and
                     # with --now nothing in that call is started or stopped; `stop` alone needs no file.
                     base = os.path.dirname(mirror.paths()["unit"])
@@ -512,10 +512,10 @@ class Home:
                             return subprocess.CompletedProcess(
                                 cmd, 1, "", f"Failed to {verb[0]} unit: Unit file {name} does not exist.\n")
                 if verb[:1] == ["disable"]:
-                    # RECORDED on systemd 255 (walk7b, a stock Ubuntu 24.04 guest, 2026-11-26): a unit masked (its
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): a unit masked (its
                     # file a link to /dev/null) is "masked, ignoring", code 0, stopped with --now, and its link from
                     # setup stays; another unit's link is taken. (Which of the two streams each line goes to is NOT
-                    # SEEN BY US: the walk read them together; the stand-in gives both on stderr.)
+                    # SEEN BY US: they were read together there; the stand-in gives both on stderr.)
                     base, said = os.path.dirname(mirror.paths()["unit"]), []
                     for u in verb[1:]:
                         name = u if u.endswith((".service", ".timer")) else u + ".service"
@@ -534,7 +534,7 @@ class Home:
                             self.units_up.discard(u)
                         return subprocess.CompletedProcess(cmd, 0, "", "\n".join(said) + "\n")
                 if verb[:1] == ["daemon-reload"]:
-                    # RECORDED on systemd 255 (walk7 (A), a stock Ubuntu 24.04 guest, 2026-11-26): after uninstall's
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): after uninstall's
                     # daemon-reload, a unit whose file is of mode 000 is no longer held (load=not-found)
                     self.bus_loaded.clear()
                 if verb[:1] in (["enable"], ["start"]) and ("--now" in cmd or verb[0] == "start"):
@@ -6024,7 +6024,7 @@ class G6(unittest.TestCase):
                           out)
             self.assertTrue(out.strip().split("\n")[-2].startswith(f"tell the person 1 of 2: {mirror.USE_FOLDER_STEP}"))
             self.assertFalse(os.path.lexists(os.path.join(p["data"], mirror.MADE_RECORD)))
-            # uninstall names only what is there (walk6 (C), 2026-11-26: it named a settings file that was not)
+            # uninstall names only what is there (a stock Ubuntu 24.04 guest, 2026-11-26: it named a settings file that was not)
             rc, out = quiet(mirror.main, ["uninstall"])
             self.assertEqual(rc, 0, out)
             line = next(x for x in out.split("\n") if x.startswith("Not taken: "))
@@ -6133,8 +6133,8 @@ class G6(unittest.TestCase):
         class and the folder that could not be entered. Each folder of the skill's (WSM_HOME's, data, settings, keys)
         at mode 000: every command stops first, exit 2, naming the folder, and nothing in the made home changes; the
         step as printed (a chmod line) is run in a shell, and the command then goes on. The readers' own answers, by
-        name. A folder another account owns (as a run with sudo leaves it) gives a chown line, the account's number stood
-        in for here (NOT SEEN BY US here; seen on a stock Ubuntu guest, the walk's world 3)."""
+        name. A folder another account owns gives a chown line (only for a folder of the skill's own), the account's number stood
+        in for here (NOT SEEN BY US here; seen on a stock Ubuntu 24.04 guest, 2026-11-26)."""
         if os.geteuid() == 0:
             self.skipTest("root enters every folder whatever its mode")
         with World(self) as w:
@@ -6175,11 +6175,12 @@ class G6(unittest.TestCase):
                                              f"you), so {name} cannot read what is kept there, and changes nothing: "
                                              "nothing was copied, written or taken away. The one next step: give it "
                                              f"back its mode: chmod u+rwx {shlex.quote(folder)}; then run the same "
-                                             "command again.")
+                                             "command again." + (" " + mirror.still_running(p) if name == "uninstall"
+                                                                 else ""))
                             for never in ("Run setup first", "Traceback", "not there", "has not run"):
                                 self.assertNotIn(never, out)
                 finally:
-                    step = last.split("give it back its mode: ", 1)[1].split("; then run", 1)[0]
+                    step = last.split("give it back its mode: ", 1)[1].split("; then run", 1)[0]   # as printed
                     ran = subprocess.run(step, shell=True, capture_output=True, text=True)   # the step, as printed
                     if ran.returncode:
                         os.chmod(folder, mode)
@@ -6215,18 +6216,129 @@ class G6(unittest.TestCase):
             self.assertEqual(str(e.exception), f"{p['mirror_key']} is not there")
             rc, out = quiet(mirror.main, ["status"])           # (status says it as setup not finished: its step)
             self.assertEqual(out.strip().split("\n")[-1], "Run setup first.")
-        real = os.getuid
-        try:                                           # another account owns it: the uid stood in for
-            mirror.os.getuid = lambda: real() + 1
-            why, step = mirror.folder_step(os.path.dirname(SCRIPT))
+
+    def test_G6_29_only_the_skills_own_folders_get_a_line_and_the_cause_is_read_not_assumed(self):
+        """M167 (G6.29), found 2026-11-26 in a read of the cure (trials of its functions in made homes):
+        (1) with a folder ABOVE the skill's own shut, the floor called it "a folder of the skill's" and printed chmod
+        on it, or, owned by another account, "sudo chown -R" over a folder that is not the skill's. Now such a folder
+        is named as what it is, with whose it is by number, and no line. (2) The mode is named as the cause only where
+        its own bits lack what is asked: a folder of mode 0700 that the system still refuses (as a disk mounted
+        read-only refuses writing; stood in here) gets no chmod line, which would change nothing. (3) The name in the
+        chown line comes from the account's number, never USER or LOGNAME; a number with no name gives the number.
+        (4) Uninstall's stop says what of the skill's still runs, or that it could not be read. (5) A record that is
+        a link to a file that is not there is "could not be read", handed on as a value: setup's stop in a folder
+        with no mirror names it so, never as an absence."""
+        if os.geteuid() == 0:
+            self.skipTest("root enters every folder whatever its mode")
+        saved_sys, saved_env = mirror.system, dict(os.environ)
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            with Home() as h:
+                # (1) a folder above the skill's own
+                outer = os.path.join(h.tmp, "outer")
+                wsm = os.path.join(outer, "wsm")
+                os.makedirs(wsm)
+                os.environ["WSM_HOME"] = wsm
+                p = mirror.paths()
+                os.makedirs(p["data"])
+                os.chmod(outer, 0)
+                try:
+                    stop = mirror.folders_floor(p, "status")
+                    unread = mirror.KeptUnread(p["state"], "it could not be opened (PermissionError)")
+                    kept = mirror.kept_step(p, unread)
+                    real = os.getuid
+                    mirror.os.getuid = lambda: real() + 1
+                    try:
+                        theirs = mirror.folder_words(p, outer)
+                    finally:
+                        mirror.os.getuid = real
+                finally:
+                    os.chmod(outer, 0o700)
+                self.assertEqual(stop, f"Stopped: {outer} is a folder above the skill's folder {wsm}, and this account "
+                                 "cannot enter it (it is yours, and not the skill's), so status cannot read what is "
+                                 "kept there, and changes nothing: nothing was copied, written or taken away. The one "
+                                 "next step: it is not the skill's, so the tool gives no line that changes it: let "
+                                 "this account into it again, as you choose; then run the same command again.")
+                self.assertIn(f"{outer}, a folder above the skill's own, cannot be entered", kept)
+                self.assertEqual(theirs[:2], (False, f"it belongs to {mirror.owner_words(real())}, and not to the "
+                                              "skill"))
+                for words in (stop, kept, theirs[2]):
+                    for never in ("chmod", "chown", "sudo"):
+                        self.assertNotIn(never, words)
+                # (2) the mode is read, not assumed: 0700 and still refused, then 0500
+                os.environ["WSM_HOME"] = wsm
+                p = mirror.paths()
+                data = os.path.abspath(p["data"])
+                real_access = os.access
+                mirror.os.access = lambda path, mode, *a, **k: (
+                    False if os.path.abspath(path) == data and mode & os.W_OK else real_access(path, mode, *a, **k))
+                try:
+                    os.chmod(data, 0o700)
+                    refused = mirror.folders_floor(p, "status")
+                finally:
+                    mirror.os.access = real_access
+                self.assertIn(f"Stopped: {data} is a folder of the skill's that this account cannot read, write and "
+                              "enter (it is yours, and its mode lets you, and this computer still refuses it, as a disk mounted "
+                              "read-only refuses writing), so status", refused)
+                self.assertNotIn("chmod", refused)
+                os.chmod(data, 0o500)
+                try:
+                    lacking = mirror.folders_floor(p, "status")
+                finally:
+                    os.chmod(data, 0o700)
+                self.assertIn(f"(it is yours, and its mode does not let you), so status cannot read", lacking)
+                self.assertIn(f"chmod u+rwx {shlex.quote(data)}; then run the same command again.", lacking)
+                # (3) the chown line's name, from the number
+                import pwd
+                os.environ["USER"] = os.environ["LOGNAME"] = "someone-else"
+                self.assertEqual(mirror.chown_name(), pwd.getpwuid(os.getuid()).pw_name)
+                nobody = next(n for n in range(2 ** 31 - 9, 2 ** 31 - 99, -1) if not
+                              any(e.pw_uid == n for e in pwd.getpwall()))
+                real = os.getuid
+                mirror.os.getuid = lambda: nobody
+                try:
+                    self.assertEqual(mirror.chown_name(), str(nobody))
+                    ours, why, step = mirror.folder_words(p, data)
+                finally:
+                    mirror.os.getuid = real
+                self.assertEqual((ours, why), (True, f"another account owns it, {mirror.owner_words(real())}"))
+                self.assertIn(f"sudo chown -R {nobody} {shlex.quote(data)}", step)
+                self.assertNotIn("someone-else", step)
+                os.environ["USER"], os.environ["LOGNAME"] = saved_env.get("USER", ""), saved_env.get("LOGNAME", "")
+                # (4) uninstall's stop says what still runs
+                h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                os.chmod(data, 0)
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    h.user_bus = False
+                    rc2, out2 = quiet(mirror.main, ["uninstall"])
+                    h.user_bus = True
+                finally:
+                    os.chmod(data, 0o700)
+                self.assertEqual(rc, 2, out)
+                self.assertTrue(out.strip().endswith(
+                    "then run the same command again. systemd still shows the forge's service (active) and the sync's "
+                    "timer (active) of the skill's, and they go on running until uninstall can go on."), out)
+                self.assertEqual(rc2, 2, out2)
+                self.assertTrue(out2.strip().endswith("What systemd runs of the skill's could not be read, so it may "
+                                                      "still run."), out2)
+                # (5) a record that is a link to a file that is not there, in a folder with no mirror
+                record = os.path.join(p["data"], mirror.MADE_RECORD)
+                os.symlink(os.path.join(h.tmp, "nowhere"), record)
+                mirror.write_file(os.path.join(p["data"], "my-notes.txt"), "mine\n")
+                rec, why = mirror.read_made(p)
+                self.assertEqual((rec, why.answer), (None, "could not be read"))
+                stop = mirror.home_is_not_ours(p)
+                self.assertIn(f"{record} (could not be read: it is a link to a file that is not there)", stop)
+                self.assertIn(os.path.join(p["data"], "my-notes.txt"), stop)
         finally:
-            mirror.os.getuid = real
-        self.assertEqual(why, "another account owns it, as one run of the skill with sudo leaves it")
-        self.assertTrue(step.startswith("give it back to your account, as an administrator of this computer: sudo "
-                                        f"chown -R {shlex.quote(mirror.getpass.getuser())} "), step)
+            mirror.system = saved_sys
+            mirror.os.access = os.access
+            os.environ.clear()
+            os.environ.update(saved_env)
 
     def test_G6_25_the_way_back_is_taken_only_once_no_stop_of_setups_is_left(self):
-        """M158 (G6.25; seen 2026-11-26 on a stock Ubuntu 24.04 guest, real systemd 255, walk6 (C)): setup
+        """M158 (G6.25; seen 2026-11-26 on a stock Ubuntu 24.04 guest, real systemd 255): setup
         --use-this-folder set the record aside and wrote a new one, then stopped on lingering not yet chosen with
         "Nothing was changed". The take-on is made only once no stop of setup's is left before its first write: with
         lingering not chosen, and with a sync holding the lock while the forge's settings file is to be written new,
@@ -9288,9 +9400,9 @@ class G9(unittest.TestCase):
         person masked, a link to /dev/null as systemctl mask leaves it (L2), a file the person emptied (L3). Setup's
         dry run and uninstall stopped (exit 2) with "read that file, and run uninstall with the copy it names": the
         file names no copy, so the step led back to the stop. A unit systemd was read for that shows no start line
-        runs nothing, so it is no other install. SEEN on systemd 255 (walk7 (B), a stock Ubuntu 24.04 guest,
+        runs nothing, so it is no other install. SEEN on systemd 255 (a stock Ubuntu 24.04 guest,
         2026-11-26), a masked unit: setup's dry run stops with the step to move it out, and uninstall goes to its end.
-        RECORDED there (walk7b): disable --now answers "Unit <its file> is masked, ignoring.", code 0, stops it, and
+        RECORDED there: disable --now answers "Unit <its file> is masked, ignoring.", code 0, stops it, and
         leaves its link from setup, which uninstall now names with the rm line, taken as printed. L4 (this home's own
         unit with one comment line) is the control."""
         saved = mirror.system
@@ -9318,7 +9430,7 @@ class G9(unittest.TestCase):
                     link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
                     tlink = os.path.join(os.path.dirname(forge), "timers.target.wants", os.path.basename(files[2]))
                     if world.startswith("L2"):
-                        # walk7 (B) and walk7b, systemd 255, 2026-11-26: the links setup's enable made stay while the
+                        # seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26: the links setup's enable made stay while the
                         # person masks the unit; disable --now answers "masked, ignoring" (code 0) and leaves the
                         # forge's link, which uninstall did not name
                         for ln, to in ((link, forge), (tlink, files[2])):
@@ -9377,7 +9489,7 @@ class G9(unittest.TestCase):
         other = "/srv/another-home"
         try:
             for world in ("Q another home's sync", "P this home's sync", "U systemd does not answer",
-                          "R systemd holds the forge as loaded"):
+                          "R systemd holds the forge as loaded", "M the forge unreadable, the timer masked"):
                 with Home() as h, self.subTest(world=world):
                     p = mirror.paths()
                     forge, sync_unit, timer = mirror.service_files(p)
@@ -9386,7 +9498,7 @@ class G9(unittest.TestCase):
                         self.assertIn(os.environ["WSM_HOME"], text)
                         text = text.replace(os.environ["WSM_HOME"], other)
                     os.makedirs(os.path.dirname(forge), exist_ok=True)
-                    if world.startswith("R"):    # as on the guest (walk7 (A)): the sync's two files are setup's own
+                    if world.startswith("R"):    # as on the guest (2026-11-26): the sync's two files are setup's own
                         mirror.write_file(sync_unit, text)
                         mirror.write_file(timer, mirror.sync_timer_text(15))
                     else:
@@ -9408,12 +9520,21 @@ class G9(unittest.TestCase):
                         h.bus_answer = (1, "")
                     link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
                     if world.startswith("R"):
-                        # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, walk6 and walk6b, 2026-11-26): the
+                        # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): the
                         # unit loaded before its file became mode 000 is held with its start line; disable refuses
                         # the whole call ("Unit file ... does not exist.", code 1) and stops nothing; stop works
                         h.bus_loaded[os.path.basename(forge)] = mirror.unit_text(p)
                         os.makedirs(os.path.dirname(link), exist_ok=True)
                         os.symlink(forge, link)
+                    tlink = os.path.join(os.path.dirname(forge), "timers.target.wants", os.path.basename(timer))
+                    if world.startswith("M"):
+                        # found in a read of the code: the joint call refused (the forge's file at mode 000), then the
+                        # timer's own call ends 0, masked (as recorded on systemd 255), and leaves its link
+                        h.bus_loaded[os.path.basename(forge)] = mirror.unit_text(p)
+                        os.remove(timer)
+                        os.symlink("/dev/null", timer)
+                        os.makedirs(os.path.dirname(tlink), exist_ok=True)
+                        os.symlink(timer, tlink)
                     try:
                         n = len(h.calls)
                         rc, out = quiet(mirror.main, ["uninstall"])
@@ -9435,6 +9556,10 @@ class G9(unittest.TestCase):
                             continue
                         self.assertEqual(rc, 0, out)
                         timer_off = any(mirror.SYNC_UNIT + ".timer" in c for c in offs)
+                        if world.startswith("M") and os.geteuid() != 0:
+                            said = [x for x in out.split("\n") if x.startswith(f"Not taken: {tlink}")]
+                            self.assertEqual(len(said), 1, out)
+                            self.assertIn(f"(it answered: Unit {timer} is masked, ignoring.)", said[0])
                         if world.startswith("R") and os.geteuid() != 0:
                             self.assertNotIn("Not now", out)
                             self.assertIn(["systemctl", "--user", "stop", mirror.SERVICE], offs)
@@ -9455,7 +9580,7 @@ class G9(unittest.TestCase):
                             self.assertFalse(os.path.lexists(link))
                             rc2, out2 = quiet(mirror.main, ["uninstall"])
                             self.assertNotIn("default.target.wants", out2)
-                            # walk7 (A), systemd 255, 2026-11-26: that second uninstall named the sync's two files
+                            # seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26: that second uninstall named the sync's two files
                             # as left as they are, though the first had taken them; a file is named only where it is
                             self.assertEqual(rc2, 0, out2)
                             for f in (sync_unit, timer):
@@ -10656,7 +10781,7 @@ class G6Words(unittest.TestCase):
             self.assertTrue(re.search(r"\. (Run setup|Run status again|The mirror needs that read to run; the README)",
                                       line), line)
         for fn in ("other_install_stop", "home_is_not_ours", "bus_floor",  # G9.12, G1.24: each stop it returns
-                   "kept_step"):                                           # the three answers (M151, M154-M159)
+                   "kept_step", "folders_floor"):                          # the three answers (M151, M154-M159), M167
             for r in ast.walk(funcs[fn]):
                 if isinstance(r, ast.Return) and r.value is not None and words(r.value):
                     self.assertTrue(self.NEXT.search(words(r.value)), (fn, words(r.value)[:90]))
