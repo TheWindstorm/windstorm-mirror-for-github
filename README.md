@@ -98,7 +98,11 @@ pre-push hook of yours does not check that push.
 - **Only what it made.** The skill keeps a record of every file and folder it writes in its folders. Uninstall
   takes only what that record holds, a folder only once it is empty. Anything else it finds in its folders when it
   runs stays where it is: uninstall names it as yours, with each folder that stayed because of it, and still goes
-  to its end for everything that is the skill's.
+  to its end for everything that is the skill's. If that record is lost (it could not be read, or is not there)
+  while the folder holds your mirror, setup and uninstall say so and take nothing; setup names the way back,
+  `setup --use-this-folder`, which is yours to type. It takes as the skill's the files under the skill's own names
+  in its own folders (the forge's program only with the pinned sum, a key file only under a name the skill gives
+  and in the form it writes), names each file it took and each it did not, and what it took goes with uninstall.
 - **The folders above it.** A file is only as closed as the folders above it. Setup reads every folder from your
   home down to what the skill runs (its service files, its own copy, the forge's program) and to what decides what
   runs (the forge's settings, the skill's settings and state, the Python its service names). A folder of the skill's

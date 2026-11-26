@@ -15,6 +15,8 @@ if sys.version_info < (3, 9):
         "3.13.\n" % (sys.version_info[0], sys.version_info[1], sys.version_info[2], sys.executable or "python3"))
     sys.exit(3)
 import argparse
+import contextlib
+import fcntl
 import base64
 import calendar
 import fnmatch
@@ -145,26 +147,130 @@ def load_json(path, default):
         return default
 
 
+class KeptUnread(Exception):
+    """A file the tool keeps that is there and could not be read (its third answer): the command stops before it
+    changes anything, naming the file, where the read stopped, and one step a person can take (rule 6)."""
+
+    def __init__(self, path, why):
+        super().__init__(f"{path} could not be read: {why}")
+        self.path, self.why = path, why
+
+
+def json_kind(v):
+    return {list: "list", str: "string", bool: "true or false", type(None): "null"}.get(type(v), "number")
+
+
+def kept_read(path):
+    """M151, M154, M157 (G3.19, G6.21, G6.24): a kept JSON file's three answers: ('read', the object), ('not
+    there', None), or ('could not be read', why). Never taken as empty, never written over on that answer. The why
+    names the error's class or where the parser stopped (line, column), never a byte or a value of the file."""
+    if not os.path.lexists(path):
+        return "not there", None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    if not data.strip():
+        return "could not be read", "it is empty (0 bytes)" if not data else "it holds only blank space"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "could not be read", "it is not text (UnicodeDecodeError)"
+    try:
+        v = json.loads(text)
+    except ValueError as e:
+        return "could not be read", ("it is not well-formed JSON (cut short, or changed by hand; the read stopped at "
+                                     f"line {getattr(e, 'lineno', '?')}, column {getattr(e, 'colno', '?')})")
+    if not isinstance(v, dict):
+        return "could not be read", f"its top is a JSON {json_kind(v)}, where the tool keeps an object"
+    return "read", v
+
+
+def load_kept(path, check=None):
+    """The object a kept JSON file holds; {} when it is not there; KeptUnread when it could not be read, or when
+    `check` finds an entry of a kind the tool never writes there (its name only, never its value)."""
+    answer, got = kept_read(path)
+    if answer == "not there":
+        return {}
+    if answer == "could not be read":
+        raise KeptUnread(path, got)
+    wrong = check(got) if check else None
+    if wrong:
+        raise KeptUnread(path, f"its {wrong} is not of the kind the tool writes there")
+    return got
+
+
+def settings_wrong(s):
+    owners = s.get("owners")
+    if owners is not None and not (isinstance(owners, dict) and all(isinstance(v, dict) for v in owners.values())):
+        return "'owners' entry"
+    for k in ("include", "exclude"):
+        v = s.get(k)
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            return f"'{k}' entry"
+    return None
+
+
+def state_wrong(st):
+    for k in ("repos",):
+        v = st.get(k)
+        if v is not None and not (isinstance(v, dict) and all(isinstance(x, dict) for x in v.values())):
+            return f"'{k}' entry"
+    return None
+
+
+def load_settings(p):
+    return load_kept(p["settings"], settings_wrong)
+
+
+def load_state(p):
+    return load_kept(p["state"], state_wrong)
+
+
 def write_private(path, text):
     """A file only the person can read: made 0600 before anything is written into it."""
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     write_file(path, text, 0o600)
 
 
-def write_file(path, text, mode=0o644):
-    """Written whole, then put in place. Rule 28: the file is made with its own mode by name, before a byte is
-    written, whatever the umask; a .tmp left by an earlier run is never reused (its mode could be wider)."""
+def put_whole(path, text, mode):
+    """M161 (G4.10): written whole under a temporary name of this write's own, then put in place, so two writes of
+    one file at once never meet in one temporary file: the file holds one writer's bytes, whole. Rule 28: the
+    temporary file is made new (never one left by an earlier run) with its own mode, before a byte is written,
+    whatever the umask."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
-        os.remove(tmp)
-    except FileNotFoundError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        os.fchmod(f.fileno(), mode)
-        f.write(text)
-    os.replace(tmp, path)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+
+
+def copy_whole(src, path, mode=0o644):
+    """M161 (G4.10): the skill's own copy put in place as put_whole does it: copied under a temporary name of this
+    copy's own, then renamed whole, so two setups at once never meet in one temporary file; noted in the record."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        os.fchmod(fd, mode)
+        os.close(fd)
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+    claim(path)
+
+
+def write_file(path, text, mode=0o644):
+    """Written whole, then put in place (put_whole), and noted in the skill's record."""
+    put_whole(path, text, mode)
     claim(path)
 
 
@@ -195,20 +301,216 @@ def inside(path, folder):
     return (path + os.sep).startswith(folder + os.sep) and path != folder
 
 
+# M158 (G6.25): read once as a command starts, before it writes anything: whether the skill's own folders hold
+# nothing yet. Only then may a command start a record where none is; else only setup --use-this-folder makes one.
+_made_start = {"data": None, "fresh": None, "use": False}
+
+
+def home_fresh(p):
+    """The skill's own folders hold nothing yet (each is not there, or holds only another of them and the suite's
+    marker), and there is no record."""
+    roots = own_roots(p)
+    if os.path.lexists(os.path.join(p["data"], MADE_RECORD)):
+        return False
+    for r in roots:
+        try:
+            names = os.listdir(r)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        for n in names:
+            e = os.path.join(r, n)
+            if n == SUITE_MARKER or (e in roots and os.path.isdir(e) and not os.path.islink(e)):
+                continue
+            return False
+    return True
+
+
 def read_made(p):
-    """(record, None) or (None, why): what the skill wrote in its own folders, path to kind ("file", "dir", or
-    "tree:<forge|git|other>"). No record is an empty one; a record that cannot be read is never taken as empty."""
+    """(record, None) or (None, why): what the skill wrote in its own folders, path to kind ("file", "dir",
+    "tree:<forge|git|other>", "service:<SHA-256>", or "set-aside record"). M158 (G6.25): the file has three answers;
+    "not there" is an empty record only in folders that held nothing as the command started (or once setup
+    --use-this-folder made a new one); a record that could not be read is never taken as empty, and its why names
+    where the read stopped, never a byte of it."""
     f = os.path.join(p["data"], MADE_RECORD)
-    if not os.path.exists(f):
+    if not os.path.lexists(f):
+        if (_made_start["fresh"] is False and not _made_start["use"]
+                and _made_start["data"] == os.path.abspath(p["data"])):
+            return None, f"{f} is not there"
         return {}, None
+    answer, got = kept_read(f)
+    if answer != "read":
+        return None, f"{f} could not be read: {got}"
+    made = got.get("made") or {}
+    if got.get("written_by") != "windstorm-mirror" or not isinstance(made, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in made.items()):
+        return None, f"{f} could not be read: it is not the record the skill writes (its 'written_by' or 'made' entry)"
+    return dict(made), None
+
+
+def holds_mirror(p):
+    """M158: by paths, the skill's data folder holds a mirror: the forge's own settings file, or its data folder
+    (where the copies are)."""
+    return os.path.lexists(p["app_ini"]) or os.path.isdir(os.path.join(p["forge"], "data"))
+
+
+CACHE_REPO = re.compile(r"[0-9]+\.git")
+
+
+def service_expected(p):
+    """Each service file this home's setup writes, and the text it writes there now (None for one whose text needs a
+    setting that could not be read)."""
     try:
-        with open(f, encoding="utf-8") as fh:
-            rec = json.load(fh)
-        if not isinstance(rec, dict) or rec.get("written_by") != "windstorm-mirror":
-            return None, f"{f} is not the skill's record"
-        return dict(rec.get("made") or {}), None
-    except (OSError, ValueError) as e:
-        return None, f"{f} could not be read ({e})"
+        minutes = int(setting(load_settings(p), "interval_min"))
+    except (KeptUnread, TypeError, ValueError):
+        minutes = None
+    if system()[0] == "darwin":
+        return {p["plist"]: plist_text(p), os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"):
+                sync_plist_text(p, minutes) if minutes else None}
+    base = os.path.dirname(p["unit"])
+    return {p["unit"]: unit_text(p), os.path.join(base, SYNC_UNIT + ".service"): sync_unit_text(p),
+            os.path.join(base, SYNC_UNIT + ".timer"): sync_timer_text(minutes) if minutes else None}
+
+
+def service_as_written(p, f):
+    """True when the service file is byte for byte what this home's setup writes there now (so it runs this home's
+    own copy, and is the skill's), False when it is not, None when its bytes could not be read."""
+    want = service_expected(p).get(f)
+    if want is None or os.path.islink(f) or not os.path.isfile(f):
+        return False
+    try:
+        with open(f, "rb") as fh:
+            return fh.read() == want.encode("utf-8")
+    except OSError:
+        return None
+
+
+def made_by_place(p):
+    """M158 (G6.25), on the person's own word (setup --use-this-folder): a record built anew from what stands at the
+    skill's own places in the form the skill writes there: a file by its path (a plain file, never a link), a folder
+    a real one, the forge's tree and each cache's git tree by their top-level names, and a service file only while
+    it is byte for byte what setup writes there now. Anything else is left off it, and so is named, never taken.
+    Never by a name alone (the owner's ruling, 11-26): the forge's program only under the pinned version's name and
+    with the pin's own SHA-256; a key file only under a name the skill gives (each owner's in the settings, the
+    'mirror' account's key, the password), mode 0600, one line of text (and the forge's key in the form the forge
+    gives); none of it read out or printed."""
+    rec = {}
+
+    def key_(x, form=None):
+        try:
+            mode = stat.S_IMODE(os.lstat(x).st_mode)
+        except OSError:
+            return
+        if (os.path.isfile(x) and not os.path.islink(x) and mode == 0o600
+                and key_file_read(x, form)[0] == "read"):
+            rec[os.path.abspath(x)] = "file"
+
+    def file_(x):
+        if os.path.isfile(x) and not os.path.islink(x):
+            rec[os.path.abspath(x)] = "file"
+
+    def dir_(x):
+        ok = os.path.isdir(x) and not os.path.islink(x)
+        if ok:
+            rec[os.path.abspath(x)] = "dir"
+        return ok
+
+    def names(x):
+        try:
+            return sorted(os.listdir(x))
+        except OSError:
+            return []
+    if dir_(p["data"]):
+        for x in (p["script"], p["state"], p["first_copy_list"], os.path.join(p["data"], SERVICE_MEANT),
+                  os.path.join(p["data"], "sync.lock")):
+            file_(x)
+        if dir_(os.path.dirname(p["bin"])) and os.path.isfile(p["bin"]) and not os.path.islink(p["bin"]):
+            try:
+                if sha256_of(p["bin"]) == pin_for_this_system()[1]:
+                    file_(p["bin"])
+            except (OSError, SystemExit):
+                pass
+        if os.path.isdir(p["forge"]) and not os.path.islink(p["forge"]) and set(names(p["forge"])) & FORGE_NAMES:
+            rec[os.path.abspath(p["forge"])] = "tree:forge"
+        if dir_(p["cache"]):
+            for n in names(p["cache"]):
+                c = os.path.join(p["cache"], n)
+                inner = names(c)
+                if (CACHE_REPO.fullmatch(n) and os.path.isdir(c) and not os.path.islink(c) and "HEAD" in inner
+                        and all(x in GIT_NAMES or x.endswith(".lock") for x in inner)):
+                    rec[os.path.abspath(c)] = "tree:git"
+        for n in ("backups", "upgrade-rollback"):
+            c = os.path.join(p["data"], n)
+            if os.path.isdir(c) and not os.path.islink(c):
+                rec[os.path.abspath(c)] = "tree:other"
+    if dir_(p["conf"]):
+        file_(p["settings"])
+        key_(p["mirror_key"], FORGE_KEY_FORM)
+        key_(p["password"])
+        if dir_(p["keys"]):
+            try:
+                owners = load_settings(p).get("owners") or {}
+            except KeptUnread:
+                owners = {}
+            for owner in owners:
+                key_(key_path(p, owner))
+    for f in service_files(p):
+        if service_as_written(p, f):
+            rec[f] = "service:" + sha256_of(f)
+    return rec
+
+
+def setup_writes(p):
+    """Every place in the skill's own folders that setup, sync, key set or config writes a file of its own at."""
+    owners = []
+    with contextlib.suppress(KeptUnread):
+        owners = list(load_settings(p).get("owners") or {})
+    return {os.path.abspath(x) for x in (
+        p["bin"], p["script"], p["state"], p["first_copy_list"], os.path.join(p["data"], SERVICE_MEANT),
+        os.path.join(p["data"], "sync.lock"), os.path.join(p["data"], "backups"),
+        os.path.join(p["data"], "upgrade-rollback"), p["settings"], p["mirror_key"], p["password"],
+        os.path.join(p["data"], MADE_RECORD), *[key_path(p, o) for o in owners])}
+
+
+def writes_there(p, x):
+    """An entry at a place the skill writes: one of setup_writes, a cache in the form the sync names one, or the
+    forge's own folders (a name Gitea writes there)."""
+    x = os.path.abspath(x.split(" (could not be read", 1)[0])
+    return (x in setup_writes(p) or (os.path.dirname(x) == os.path.abspath(p["cache"])
+                                     and CACHE_REPO.fullmatch(os.path.basename(x)) is not None)
+            or (os.path.dirname(x) == os.path.abspath(p["forge"]) and os.path.basename(x) in FORGE_NAMES)
+            or x in (os.path.abspath(p["data"]), os.path.abspath(p["conf"]), os.path.abspath(p["keys"]),
+                     os.path.abspath(p["cache"]), os.path.abspath(p["forge"]), os.path.dirname(os.path.abspath(p["bin"]))))
+
+
+def take_folder_on(p, lost, rec):
+    """setup --use-this-folder on a folder that holds a mirror whose record is lost, once every check before setup's
+    first write has passed against `rec` (made_by_place's): the record that could not be read is set aside under a
+    name of its own (kept, never deleted or written over), and `rec` is written as the new record, with the
+    set-aside one on it as its own kind. Says what it did."""
+    f = os.path.join(p["data"], MADE_RECORD)
+    with made_lock(p):
+        aside = None
+        if os.path.lexists(f):
+            aside = f + ".could-not-be-read-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            os.rename(f, aside)
+            rec[aside] = "set-aside record"
+        _made_start["use"] = True
+        write_made(p, rec)
+    say(f"Taken on again, on your word (--use-this-folder): {lost}. "
+        + (f"It is set aside, as it was, as {aside}. " if aside else "")
+        + "A new record holds what setup can show by its place and its form to be the skill's own here. Nothing was "
+        "deleted or written over.")
+    took = sorted(k for k, v in rec.items() if v != "dir" and v != "set-aside record")
+    left = not_ours(p, rec)
+    say(f"Taken on as the skill's ({len(took)}), by name; each goes with uninstall as the skill's own:")
+    for k in took:
+        say(f"  {k}" + (" (the forge's own folder, with the copies)" if rec[k] == "tree:forge" else
+                        " (a cache of one copy)" if rec[k] == "tree:git" else ""))
+    say(f"Not taken ({len(left)}): " + ("none." if not left else "they stay where they are, as yours:"))
+    for k in left:
+        say(f"  {k}")
 
 
 def service_files(p):
@@ -240,9 +542,44 @@ def service_file_ours(p, rec, f):
 def write_made(p, rec):
     f = os.path.join(p["data"], MADE_RECORD)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
-    with open(f + ".tmp", "w", encoding="utf-8") as fh:
-        json.dump({"written_by": "windstorm-mirror", "made": rec}, fh, indent=1)
-    os.replace(f + ".tmp", f)
+    put_whole(f, json.dumps({"written_by": "windstorm-mirror", "made": rec}, indent=1), 0o600)
+
+
+_made_held = [0]
+
+
+@contextlib.contextmanager
+def made_lock(p, make=True):
+    """M162 (G4.11): the record is read and written under one lock, so an entry one command notes is never lost to
+    another's write (a key set while the first sync runs, the day a person sets up). The lock is the data folder's
+    own (flock on the folder itself: no file is added); it is held once per process (a claim inside a write takes
+    no second lock), and only while the record is read and written. With no data folder and make False, there is
+    no record to keep, and nothing is locked."""
+    if _made_held[0]:
+        _made_held[0] += 1
+        try:
+            yield
+        finally:
+            _made_held[0] -= 1
+        return
+    if make:
+        os.makedirs(p["data"], mode=0o700, exist_ok=True)
+    try:
+        fd = os.open(p["data"], os.O_RDONLY)
+    except FileNotFoundError:
+        if make:
+            raise
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _made_held[0] = 1
+        try:
+            yield
+        finally:
+            _made_held[0] = 0
+    finally:
+        os.close(fd)
 
 
 def claim(path, kind="file"):
@@ -253,13 +590,20 @@ def claim(path, kind="file"):
     path = os.path.abspath(path)
     roots = own_roots(p)
     if path in service_files(p):
-        rec, why = read_made(p)
-        if rec is not None:
-            rec[path] = "service:" + sha256_of(path)
-            write_made(p, rec)
+        with made_lock(p):
+            rec, why = read_made(p)
+            if rec is not None:
+                rec[path] = "service:" + sha256_of(path)
+                write_made(p, rec)
         return
     if not any(inside(path, r) for r in roots) or os.path.basename(path) == MADE_RECORD:
         return
+    with made_lock(p):
+        claim_noted(p, path, kind, roots)
+
+
+def claim_noted(p, path, kind, roots):
+    """claim's own read and write of the record, under made_lock."""
     rec, why = read_made(p)
     if rec is None:
         return                       # never written over: an unreadable record stays as it is, and is said
@@ -277,19 +621,23 @@ def claim(path, kind="file"):
 
 
 def unclaim(p, gone):
-    rec, why = read_made(p)
-    if rec is None or not any(g in rec for g in gone):
-        return
-    for g in gone:
-        rec.pop(g, None)
-    if os.path.exists(p["data"]):
-        write_made(p, rec)
+    with made_lock(p, make=False):
+        rec, why = read_made(p)
+        if rec is None or not any(g in rec for g in gone):
+            return
+        for g in gone:
+            rec.pop(g, None)
+        if os.path.exists(p["data"]):
+            write_made(p, rec)
 
 
-def not_ours(p):
+def not_ours(p, rec=None):
     """Every entry in the skill's own folders that its record does not hold (at most 50), or [why] when the record
-    cannot be read. Checked at the moment a command runs: a person's file may have arrived since setup."""
-    rec, why = read_made(p)
+    cannot be read. Checked at the moment a command runs: a person's file may have arrived since setup. `rec`: a
+    record to read the folders against (setup --use-this-folder --dry-run's own, never written)."""
+    why = None
+    if rec is None:
+        rec, why = read_made(p)
     if rec is None:
         return [why]
     found = []
@@ -540,8 +888,25 @@ def service_value_stop(p):
     return None
 
 
-def home_is_not_ours(p):
-    """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it."""
+USE_FOLDER_STEP = "If this folder is your mirror and you want to go on with it, the one next step is yours to take: "
+
+
+def lost_record_stop(p, lost):
+    """M158 (G6.25): setup's stop on a folder that holds a mirror whose record is lost: the record named with why,
+    then the need-you block, printed last, with the one step that is the person's own."""
+    return (f"Stopped: {lost}, and {p['data']} holds a mirror (the forge's own files, and the copies in them). So "
+            "setup cannot tell which files there are the skill's own, and changes nothing: nothing was copied, written "
+            "or taken away, and the copies, the forge's settings and your keys are still there as they were.\n"
+            "Needs you: going on with this folder is the person's own word.\n"
+            f"tell the person 1 of 2: {USE_FOLDER_STEP}{own_command(p, 'setup', '--use-this-folder')}\n"
+            "tell the person 2 of 2: It keeps that record, set aside under a name of its own, and makes a new one of "
+            "what setup can show by its place and its form to be the skill's own; anything else in these folders "
+            "stays where it is, off that record, and is named. Nothing is deleted or written over.")
+
+
+def home_is_not_ours(p, use=False, dry=False):
+    """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it.
+    `use`: the person's --use-this-folder (M158)."""
     stop = service_value_stop(p)
     if stop:
         return stop
@@ -564,7 +929,28 @@ def home_is_not_ours(p):
                     "could change them. Nothing was changed. The one next step: "
                     + ("set WSM_HOME to a folder of your own that does not exist yet" if h else
                        f"make {d} yours alone (run chmod go-w {shlex.quote(d)} as its owner)") + ", and run setup again.")
-    rec, why = read_made(p)
+    lost = read_made(p)[1]
+    rec, taken_on = None, False
+    if lost and holds_mirror(p):
+        if not use:
+            return lost_record_stop(p, lost)
+        rec = made_by_place(p)        # written only once every check below has passed
+        if dry:
+            say(f"With --use-this-folder, setup would set {os.path.join(p['data'], MADE_RECORD)} aside (kept, as it "
+                f"is) and make a new record of {len(rec)} entries, of what it can show by its place and its form to "
+                "be the skill's own; nothing would be deleted or written over.")
+        taken_on = True
+    elif use:
+        here = os.path.lexists(os.path.join(p["data"], MADE_RECORD))
+        say("--use-this-folder changes nothing here: " + (
+            f"the record of what the skill made, {os.path.join(p['data'], MADE_RECORD)}, was read whole, so setup goes "
+            "on from it as it always does." if not lost and here else
+            "the skill's folders held nothing yet, so there is nothing of a mirror's to go on with; setup goes on as "
+            "it would without it." if not lost else
+            f"{p['data']} holds no mirror (no forge settings file at {p['app_ini']}, and no forge data folder), so "
+            "there is nothing of a mirror's to go on with; setup goes on as it would without it."))
+    if rec is None:
+        rec, why = read_made(p)
     states = {f: service_file_state(p, rec, f) for f in service_files(p) if os.path.lexists(f)}
     unread = [(f, w) for f, (a, w) in states.items() if a == "could not be read"]
     if unread:
@@ -577,17 +963,29 @@ def home_is_not_ours(p):
                 f"(into a folder of your own, to keep it), then run {own_command(p, 'setup')}")
     changed = [f for f, (a, _) in states.items() if a == "no"]
     if changed:
-        return ("Stopped: this computer already has " + ", ".join(changed) + ", and not as the skill wrote it (it "
-                "was changed since, or something else wrote it), so setup does not write over it. Nothing was "
-                "changed. The one next step: move it out of that folder, and run setup again.")
-    others = not_ours(p)
+        return ("Stopped: this computer already has " + ", ".join(changed) + (
+                    ", and not what setup writes there now, so setup cannot show it is the skill's own (the record "
+                    "of what the skill wrote was not read)" if taken_on else
+                    ", and not as the skill wrote it (it was changed since, or something else wrote it)")
+                + ", so setup does not write over it. Nothing was changed. The one next step: move it out of that "
+                "folder, and run setup again.")
+    others = not_ours(p, rec)
+    if taken_on:
+        # M158 (the owner's ruling, 11-26): on the way back, what setup does not take on stays where it is and is
+        # named as the person's; only an entry at a place setup itself writes stops it (never written over)
+        others = [x for x in others if writes_there(p, x)]
     if others:
         where = h or p["data"]
+        # M158: a folder that holds a mirror is never left for a second home: what is in it is moved out of it
+        second = h and not holds_mirror(p)
         return (f"Stopped: {where} already holds things the skill did not make: " + ", ".join(others[:8])
                 + (f" and {len(others) - 8} more" if len(others) > 8 else "") + ". The skill writes only into "
                 "folders that are its own, so nothing of yours is written over or taken away. Nothing was changed. "
                 "The one next step: " + ("set WSM_HOME to a folder that does not exist yet, or is empty"
-                                         if h else "move those out of it") + ", and run setup again.")
+                                         if second else "move those out of it (into a folder of your own, to keep "
+                                         "them)") + ", and run setup again.")
+    if taken_on and not dry:
+        take_folder_on(p, lost, rec)
     return None
 
 
@@ -759,6 +1157,37 @@ ROOT_PATH = {f}/log
 """
 
 
+# M159 (G6.26): what the forge itself needs from its settings file to start as an installed forge, by section and
+# name (Gitea 28.4.0 stopped at its start, in a stand-in trial, 2026-11-26, without [security] INSTALL_LOCK).
+FORGE_INI_NEEDS = (("server", "HTTP_PORT"), ("database", "DB_TYPE"), ("database", "PATH"), ("security", "INSTALL_LOCK"))
+
+
+def forge_ini_read(p):
+    """M159 (G6.26): the forge's settings file's three answers: ('read', None), ('not there', None) or ('could not
+    be read', why); the why names the error's class or the setting that is missing, never a value of the file."""
+    f = p["app_ini"]
+    if not os.path.lexists(f):
+        return "not there", None
+    try:
+        with open(f, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "could not be read", "it is not text (UnicodeDecodeError)"
+    if not data.strip():
+        return "could not be read", "it is empty (0 bytes)" if not data else "it holds only blank space"
+    for sec, key in FORGE_INI_NEEDS:
+        if not ini_value(f, sec, key):
+            return "could not be read", (f"it holds no {key} in its [{sec}] part, which the forge needs to start (cut "
+                                         "short, or changed by hand)")
+    if not ini_value(f, "server", "HTTP_PORT").isdigit():
+        return "could not be read", "its HTTP_PORT in its [server] part is not a number"
+    return "read", None
+
+
 def ini_value(path, section, key):
     """Read one setting by its name; a config file is never printed whole (G6.4)."""
     cur = ""
@@ -772,7 +1201,7 @@ def ini_value(path, section, key):
                     k, _, v = s.partition("=")
                     if k.strip() == key:
                         return v.strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return None
 
@@ -1761,16 +2190,20 @@ NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
 SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
 
 
-def systemd_off(p):
+def systemd_off(p, only=None):
     """G1.18 (M107, seen 2026-11-24 on a stock Ubuntu 24.04: uninstall run from a shell with no user bus, after
     `su -` from root and with XDG_RUNTIME_DIR unset, said "Gone now" and ended 0 while systemd still ran the forge
     from its removed program): tell systemd to stop the skill's units, then read each stopped. Per unit (its words,
     'stopped' | 'running' | 'unread', seconds waited, what systemctl answered): 'stopped' when its ActiveState reads
     inactive or failed; 'running' when it still reads active (or on its way) at SYSTEMD_WAIT; 'unread' at once when
-    systemctl --user does not answer (no user bus in this shell) or answers no state."""
-    run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
+    systemctl --user does not answer (no user bus in this shell) or answers no state. M163: `only`, when given, is
+    the units (SYSTEMD_UNITS' suffixes) uninstall showed to be this home's; no other is told off or read."""
+    pick = [(x, w) for x, w in SYSTEMD_UNITS if only is None or x in only]
+    told = [SERVICE if x is None else SYNC_UNIT + x for x, _ in pick if x != ".service"]
+    if told:
+        run(["systemctl", "--user", "disable", "--now", *told])
     seen = []
-    for suffix, words in SYSTEMD_UNITS:
+    for suffix, words in pick:
         unit = SERVICE if suffix is None else SYNC_UNIT + suffix
         start = time.monotonic()
         while True:
@@ -1791,9 +2224,19 @@ def systemd_off(p):
     return seen
 
 
-def install_service(p):
+_setup_held = [False]           # M159: setup holds the sync's lock (main lets it go when setup ends)
+
+
+def install_service(p, restart=False):
     record_meant(p, "forge", forge_argv(p))
     if system()[0] == "darwin":
+        if restart:             # M159 limit (2): the loaded job is read as this home's own before it is replaced
+            got = launchd_held(LAUNCHD_LABEL)
+            if got is None or (got != "absent" and not job_is_ours(p, LAUNCHD_LABEL, got[0])):
+                return False, (f"its settings file {p['app_ini']} is written new, and the forge was not started "
+                               f"again with it: what launchd holds for the forge's job ({LAUNCHD_LABEL}) "
+                               + ("could not be read" if got is None else "is not this home's own copy")
+                               + ", so setup takes nothing off. Run setup again; if it stops here again, run status")
         write_file(p["plist"], plist_text(p))
         uid = str(os.getuid())
         # G1.16 (M58): a launch agent loads only into a login session at the screen. Over ssh into an account that
@@ -1812,6 +2255,17 @@ def install_service(p):
     back, _, parts = service_read(p, "forge")          # G1.24: read back before anything is started
     if back != "equal":
         return False, read_back_words("forge", back, "it was not started", parts=parts)
+    if restart:                 # M159: a forge still running from the settings file as it was reads the new one
+        # the owner's limit (2), 11-26: only the skill's own forge service, read as this home's (M163's read) just
+        # before; any other is never stopped, and that is said
+        held = systemd_parsed(SERVICE + ".service")
+        if held is None or not unit_is_ours(p, "forge", held[0]):
+            return False, (f"its settings file {p['app_ini']} is written new, and the forge was not started again "
+                           "with it: what systemd runs for the forge's service ("
+                           + (f"{SERVICE}.service) could not be read" if held is None else
+                              f"{SERVICE}.service) is not this home's own copy") + ", so setup stops nothing. Run "
+                           "setup again; if it stops here again, run status")
+        run(["systemctl", "--user", "stop", SERVICE])
     out = run(["systemctl", "--user", "enable", "--now", SERVICE])
     return out.returncode == 0, last_line(out.stderr)
 
@@ -1944,6 +2398,40 @@ def stamp_of(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
+# M156 (G6.23): the form of the key the pinned Gitea gives the mirror account (seen 2026-11-26 on Gitea 28.4.0 in a
+# made home: 40 lowercase hexadecimal characters, one line); a kept key of another form was cut short or changed.
+FORGE_KEY_FORM = re.compile(r"^[0-9a-f]{40}$")
+
+
+def key_file_read(path, form=None):
+    """M155, M156 (G6.22, G6.23): a kept key file's three answers: ('read', the key), ('not there', None), or ('could
+    not be read', why). The why names the error's class or what is wrong with its form, never a byte of it."""
+    if not os.path.lexists(path):
+        return "not there", None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    try:
+        key = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return "could not be read", "it is not text (UnicodeDecodeError)"
+    if not key:
+        return "could not be read", "it is empty"
+    if any(c.isspace() for c in key):
+        return "could not be read", "it is not one line"
+    if form is not None and not form.match(key):
+        return "could not be read", "it is not a key of the form the forge gives (cut short, or changed by hand)"
+    return "read", secret(key)
+
+
+def key_unread_line(p, owner, kp, why):
+    return (f"{owner}: its key file {kp} could not be read: {why}, so nothing of {owner}'s was asked of GitHub. The "
+            f"one next step: run key set {owner} again, pasting the key when it asks: "
+            f"{own_command(p, 'key', 'set', owner)}")
+
+
 def key_path(p, owner):
     return os.path.join(p["keys"], owner.lower() + ".key")
 
@@ -1997,7 +2485,7 @@ def cmd_key_set(args):
     if not OWNER_RE.match(owner):
         say(f"'{owner}' is not a GitHub account or organisation name.")
         return 2
-    if not load_json(p["state"], {}).get("port"):
+    if not load_state(p).get("port"):
         # G2.6: setup comes first, so every key lands where uninstall and the key scan already look. Nothing is read.
         # G10.7: it names the one next step and whose it is.
         say(f"Setup comes first, and it has not run on this computer: setup is your agent's step (or run setup "
@@ -2012,13 +2500,24 @@ def cmd_key_set(args):
     if not kind:
         say(why.replace(key, "<the key>"))
         return 1
-    write_private(key_path(p, owner), key + "\n")
-    s = load_json(p["settings"], {})
+    kp = key_path(p, owner)
+    if os.path.isdir(kp) and not os.path.islink(kp):
+        # M155 (seen 2026-11-26 in a stand-in trial: a traceback, and a file of its own left beside it): a folder
+        # where the key file belongs is never written into or removed; it is said, with its step
+        say(f"Stopped: {kp} is a folder, where the key file for {owner} belongs, so the key cannot be kept there. "
+            f"Nothing was changed. The one next step: move that folder out of {os.path.dirname(kp)} (into a folder "
+            f"of your own, to keep it), then run key set {owner} again: {own_command(p, 'key', 'set', owner)}")
+        return 2
+    old_answer, old_why = key_file_read(kp)
+    write_private(kp, key + "\n")
+    if old_answer == "could not be read":       # M155: the person's own typed key replaces it, and that is said
+        say(f"The key file it replaced could not be read ({old_why}); it holds the key you typed now.")
+    s = load_settings(p)
     s.setdefault("owners", {})[owner] = {"kind": kind}
     write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
     say(f"The key for {owner} ({'your account' if kind == 'user' else 'organisation'}) is kept in "
         f"{key_path(p, owner)}, readable by you only. It is used for {owner}'s repositories and nothing else.")
-    if not load_json(p["state"], {}).get("go"):
+    if not load_state(p).get("go"):
         say("Once a key is kept for every owner to copy, the go for the first copy is yours, here in this window: run "
             f"{own_command(p, 'go')}. It shows what will be copied and waits for your Enter.")
     return 0
@@ -2450,8 +2949,10 @@ class Forge:
     def __init__(self, p, st):
         self.p, self.port = p, int(st["port"])
         self.base = f"http://127.0.0.1:{st['port']}"
-        with open(p["mirror_key"], encoding="utf-8") as f:
-            self.key = secret(f.read().strip())
+        answer, got = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
+        if answer != "read":                    # M155, M156: said as that, with its one step; never "does not answer"
+            raise KeptUnread(p["mirror_key"], got or "it is not there")
+        self.key = got
         self.user = st.get("mirror_user", MIRROR_USER)
 
     def call(self, method, path, body=None):
@@ -3028,7 +3529,7 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
 
 def cmd_config(args):
     p = paths()
-    s = load_json(p["settings"], {})
+    s = load_settings(p)
     if args.clear:
         s.pop(args.what, None)
     else:
@@ -3118,9 +3619,49 @@ def cmd_sync(args):
         drop_lock(p)
 
 
+def kept_step(p, e):
+    """Rule 6's one step for a kept JSON file that could not be read (KeptUnread): the file is moved out of its
+    folder, by the person, and what it held is chosen again or found again; never written over by the tool."""
+    d = os.path.dirname(e.path)
+    move = f"move that file out of {d} (into a folder of your own, to keep it)"
+    if e.path == p["settings"]:
+        owners = sorted(f[:-4] for f in (os.listdir(p["keys"]) if os.path.isdir(p["keys"]) else [])
+                        if f.endswith(".key") and OWNER_RE.match(f[:-4]))
+        keys = "; ".join(own_command(p, "key", "set", o) for o in owners)
+        return (f"{move}; then, if you had chosen what is copied, choose it again ({own_command(p, 'config', 'include')} "
+                f"or {own_command(p, 'config', 'exclude')}), and run key set again for each owner whose key is kept "
+                "here, pasting the key when it asks" + (f": {keys}" if keys else "") + ". Until then nothing is copied")
+    if e.path == p["app_ini"]:
+        st = load_json(p["state"], {})
+        port = st.get("port") if isinstance(st, dict) else None
+        where = (f"the forge keeps its address, http://127.0.0.1:{port}/, while that port is free or the forge's "
+                 "own, and is given a new one otherwise, which setup then says" if port else
+                 "setup gives the forge its address and says it")
+        return (f"{move}: it is the forge's own settings as they were, yours to keep. Then run setup again: "
+                f"{own_command(p, 'setup')}. Setup writes the forge a new settings file and starts the forge with it; "
+                f"{where}; every copy and both Gitea accounts are kept")
+    if e.path == p["mirror_key"]:
+        return (f"run setup again: {own_command(p, 'setup')}. It gives the '{MIRROR_USER}' account a new key, kept in "
+                "that file, and keeps every copy")
+    if e.path == p["state"]:
+        # M157 (G6.24), 0.1.0's road as seen in a stand-in trial (2026-11-26): what follows is said, never a rebuild
+        return (f"{move}, then run setup again: {own_command(p, 'setup')}. What follows: setup finds the forge and "
+                "your Gitea accounts from before; the go for the first copy is asked again; each copy is then made "
+                "again from GitHub beside its old one, and the old one, with its kept history, stays on the forge "
+                "under a new name; so the disk the copies take doubles. Nothing is deleted")
+    return f"{move}, then run the same command again"
+
+
+def kept_stop_words(p, e, cmd):
+    what = {p["settings"]: "what you chose to copy", p["state"]: "what this computer's mirror holds"}.get(
+        e.path, "what that file holds")
+    return (f"Stopped: {e.path} could not be read: {e.why}. So {cmd} cannot tell {what}, and changes nothing: "
+            f"nothing was copied, written or taken away. The one next step: {kept_step(p, e)}.")
+
+
 def door_stopped(p, e):
     """G8.7: the sync's own record says why it stopped, as its line does."""
-    st = load_json(p["state"], {})
+    st = load_state(p)
     st["last_sync"] = {"at": now_utc(), "calls": 0, "copied": 0, "problems": 1,
                        "stopped": "another program holds the forge's port" if e.kind == "other" else
                        "who holds the forge's port could not be read"}
@@ -3256,7 +3797,7 @@ def cmd_left_out(args):
     """G3.11: the names of what the include list and the exclude patterns leave out, asked for by the person. It
     reads GitHub's lists with the kept keys, and copies and changes nothing."""
     p = paths()
-    st, s = load_json(p["state"], {}), load_json(p["settings"], {})
+    st, s = load_state(p), load_settings(p)
     owners = s.get("owners") or {}
     if not owners:
         say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
@@ -3267,11 +3808,13 @@ def cmd_left_out(args):
     names, problems = [], []
     for owner, meta in owners.items():
         kp = key_path(p, owner)
-        if not os.path.exists(kp):
+        answer, key = key_file_read(kp)
+        if answer == "not there":
             problems.append(f"{owner}: no key is kept for it; run key set {owner}")
             continue
-        with open(kp, encoding="utf-8") as f:
-            key = secret(f.read().strip())
+        if answer != "read":                    # M155: this owner is said, and the others go on
+            problems.append(key_unread_line(p, owner, kp, key))
+            continue
         repos, why, _ = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), {})
         if repos is None:
             problems.append(f"{owner}: {why}")
@@ -3300,8 +3843,8 @@ def spent_line(st):
 
 
 def sync(p, args):
-    st = load_json(p["state"], {})
-    s = load_json(p["settings"], {})
+    st = load_state(p)
+    s = load_settings(p)
     owners = s.get("owners") or {}
     if getattr(args, "from_timer", False) and not st.get("go"):
         say("waiting for the person's go: nothing is copied until they give it in a terminal of their own (go) and "
@@ -3341,11 +3884,13 @@ def sync(p, args):
     complete = set()
     for owner, meta in owners.items():
         kp = key_path(p, owner)
-        if not os.path.exists(kp):
+        answer, key = key_file_read(kp)
+        if answer == "not there":
             problems.append(f"{owner}: no key is kept for it")
             continue
-        with open(kp, encoding="utf-8") as f:
-            key = secret(f.read().strip())
+        if answer != "read":                    # M155: this owner is said, and the others go on
+            problems.append(key_unread_line(p, owner, kp, key))
+            continue
         info = {}
         repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), info)
         if info.get("spent_until"):
@@ -3624,6 +4169,13 @@ def launchd_held(label):
     return got
 
 
+def unit_is_ours(p, which, starts):
+    """M163 (G9.18), the Linux twin of job_is_ours: a unit systemd shows running this home's own copy of the skill,
+    one of its start lines word for word after the interpreter (forge_argv, sync_argv, in the form the bus holds)."""
+    want = sd_parsed_form(forge_argv(p) if which == "forge" else sync_argv(p))
+    return any(isinstance(x, list) and x[2:] == want[2:] for x in starts or [])
+
+
 def job_is_ours(p, label, args):
     """M150: a loaded job launchd shows running this home's own copy of the skill, argument by argument after the
     interpreter (forge_argv, sync_argv)."""
@@ -3899,22 +4451,30 @@ def cmd_setup(args):
     if floor:
         say(floor + " Setup made nothing.")
         return 2
+    if os.path.isdir(p["mirror_key"]) and not os.path.islink(p["mirror_key"]):
+        # M156 (G6.23): a folder where the forge's key belongs is never written into or removed by setup
+        say(f"Stopped: {p['mirror_key']} is a folder, where the '{MIRROR_USER}' account's key file belongs, so setup "
+            f"cannot keep its key there. Nothing was changed. The one next step: move that folder out of "
+            f"{os.path.dirname(p['mirror_key'])} (into a folder of your own, to keep it), then run setup again: "
+            f"{own_command(p, 'setup')}")
+        return 2
     bus = bus_floor(p)                              # G1.24: the read-back's road, before the first write
     if bus:
         say(bus)
         return 2
-    other = other_install_stop(p, "setup") or home_is_not_ours(p)
+    other = other_install_stop(p, "setup") or home_is_not_ours(p, getattr(args, "use_this_folder", False),
+                                                                args.dry_run)
     if other:
         say(other)
         return 2
     if getattr(args, "from_file", None):
         return setup_from(p, args)
-    have = load_json(p["state"], {}).get("gitea")
+    have = load_state(p).get("gitea")
     if have and have != GITEA_VERSION:
         say(f"This forge runs Gitea {have}, and this release of the skill pins {GITEA_VERSION}. Setup does not move "
             "the forge: run upgrade-forge, which makes a backup first. Nothing was changed.")
         return 2
-    st = load_json(p["state"], {})
+    st = load_state(p)
     allow = not getattr(args, "no_linger", False)
     if not shutil.which("git"):
         say(git_missing_sentence() + " Nothing was changed.")
@@ -3936,6 +4496,16 @@ def cmd_setup(args):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
         say(LINGER_CHOICE)
         return 2
+    if not os.path.exists(p["app_ini"]) and st.get("port"):
+        # M159 (the owner's limit (3), 11-26): the forge's settings file is written new and the forge started again
+        # only while no sync uses the forge: setup holds the sync's own lock across the write and the start again
+        ok, _ = take_lock(p)
+        if not ok:
+            say(f"Not now: a sync is running (process {lock_holder(p)}), and setup writes the forge's settings file "
+                "new and starts the forge again with it only while no sync is using the forge. Nothing was changed. "
+                f"The one next step: run setup again when the sync has ended: {own_command(p, 'setup')}")
+            return 3
+        _setup_held[0] = True
     made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
@@ -3946,9 +4516,18 @@ def cmd_setup(args):
     else:
         say(f"Gitea {GITEA_VERSION} already here; checksum matches the pin.")
     claim(p["forge"], "tree:forge")
-    if not os.path.exists(p["app_ini"]):
-        port = free_port()
+    fresh_ini = not os.path.exists(p["app_ini"])
+    if fresh_ini:
+        # M159 (G6.26): a settings file written anew keeps the forge's address where its port is free or the forge's
+        # own (a forge still running from the file as it was), and the line says which
+        old = st.get("port") if isinstance(st.get("port"), int) and PORT_FLOOR <= st.get("port") < 65536 else None
+        keep = old and (port_is_free(old) or door(p, old) == "mine")
+        port = old if keep else free_port()
         write_file(p["app_ini"], app_ini(p, port), 0o600)
+        if old:
+            say(f"The forge's settings file {p['app_ini']} is written new; the forge "
+                + (f"keeps its address, http://127.0.0.1:{port}/." if keep else
+                   f"has a new address, http://127.0.0.1:{port}/, since {old} is taken now."))
         st["port"] = port
     st.setdefault("port", int(ini_value(p["app_ini"], "server", "HTTP_PORT") or 0))
     try:
@@ -3979,7 +4558,12 @@ def cmd_setup(args):
         say(f"Your Gitea account '{st['person']}' is there from before: setup did not change it or its password.")
     # M84: the key is made whenever its file is missing (after an uninstall that kept the copies, or a cut one), under
     # a name of its own, since Gitea refuses a key name the account already holds.
-    if not st.get("mirror_user") or not os.path.exists(p["mirror_key"]):
+    key_answer, key_why = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
+    if not st.get("mirror_user") or key_answer != "read":
+        # M156 (G6.23): a kept key that could not be read is made whole again from the forge, and said
+        if key_answer == "could not be read":
+            say(f"The '{MIRROR_USER}' account's key file {p['mirror_key']} could not be read: {key_why}. Setup gives "
+                "the account a new key in its place.")
         had = MIRROR_USER in users
         if not had:
             create_user(p, MIRROR_USER, admin=False)
@@ -3995,9 +4579,7 @@ def cmd_setup(args):
             f" in {p['mirror_key']}.")
     here = os.path.abspath(__file__)
     if os.path.abspath(p["script"]) != here:
-        shutil.copyfile(here, p["script"] + ".tmp")
-        os.replace(p["script"] + ".tmp", p["script"])
-        claim(p["script"])
+        copy_whole(here, p["script"])
     if os.path.abspath(p["script"]) != here:
         # G9.8 (M63): where the skill was downloaded to, so that uninstall can name it as still here. Setup run again
         # from its own copy keeps the record. G9.14 (the family's rule 29 (e)): Claude Code's plugin is kept by
@@ -4019,8 +4601,8 @@ def cmd_setup(args):
         say(f"Setup did not finish: {missing} is not in place, so the other commands would say \"Run setup first.\" "
             "Nothing was started. Run setup again; if it stops here again, open an issue with this line.")
         return 1
-    ok, why = install_service(p)
-    timer_why = install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min")))[1] if ok else ""
+    ok, why = install_service(p, restart=fresh_ini)
+    timer_why = install_timer(p, int(setting(load_settings(p), "interval_min")))[1] if ok else ""
     shut = None
     if ok:
         try:
@@ -4098,11 +4680,9 @@ def key_scan(p, st):
     equal to one the skill holds. Returns (files read, [paths where one was found]). The key files are skipped."""
     known = set(SECRETS)
     for path in [p["mirror_key"]] + [os.path.join(p["keys"], f) for f in (os.listdir(p["keys"]) if os.path.isdir(p["keys"]) else [])]:
-        try:
-            with open(path, encoding="utf-8") as f:
-                known.add(secret(f.read().strip()))
-        except OSError:
-            pass
+        answer, key = key_file_read(path)       # M155: a key file that could not be read is said by status itself
+        if answer == "read":
+            known.add(key)
     known.discard("")
     skip = {os.path.realpath(p["mirror_key"]), os.path.realpath(p["password"])}
     if os.path.isdir(p["keys"]):
@@ -4239,13 +4819,34 @@ def cmd_expose(args):
 def cmd_status(args):
     """G6: one line per problem, then the count of copies, then the forge, the keys, the disk and the syncs."""
     p = paths()
-    st = load_json(p["state"], {})
-    s = load_json(p["settings"], {})
+    try:
+        st = load_state(p)
+        s = load_settings(p)
+    except KeptUnread as e:          # M151, M154, M157: a problem line, with its one step; nothing else is read
+        say(f"problem: {e.path} could not be read: {e.why}. The one next step: {kept_step(p, e)}.")
+        return 1
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
-    forge = Forge(p, st)
+    try:
+        answer, why = forge_ini_read(p)
+        if answer == "could not be read":
+            raise KeptUnread(p["app_ini"], why)
+        forge = Forge(p, st)
+    except KeptUnread as e:          # M155, M156, M159: the forge's key or settings, said with its one step
+        say(f"problem: {e.path} could not be read: {e.why}. The one next step: {kept_step(p, e)}.")
+        return 1
     problems, notes = [], []
+    lost = read_made(p)[1]
+    if lost:                    # M158 (G6.25): said as that, never as another's files
+        problems.append(f"{lost}, so the tool cannot tell which files in its folders it made: setup and uninstall "
+                        "take nothing from them while it is so. The one next step: run "
+                        f"{own_command(p, 'setup')}, which says what this means and what is yours to choose")
+    for owner in sorted((s.get("owners") or {})):
+        kp = key_path(p, owner)
+        answer, why = key_file_read(kp)
+        if answer == "could not be read":
+            problems.append(key_unread_line(p, owner, kp, why))
     if not shutil.which("git"):
         problems.append("git is not installed on this computer, so no copy can refresh until it is")
     problems += open_folders(p)                     # rule 28: said again each time, until it is closed
@@ -4438,7 +5039,7 @@ def clone_copy(forge, name, into):
 
 def cmd_restore(args):
     p = paths()
-    st = load_json(p["state"], {})
+    st = load_state(p)
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
@@ -4703,7 +5304,7 @@ def cmd_backup(args):
     """G7.4: the forge's own dump, plus the skill's state and settings (never its keys), in one file only the
     person can read."""
     p = paths()
-    st = load_json(p["state"], {})
+    st = load_state(p)
     if not st.get("port"):
         say("Run setup first.")
         return 2
@@ -4774,7 +5375,7 @@ def make_backup(p, st, folder):
 
 def setup_from(p, args):
     """G7.4: a new computer with only the backup file and the skill gets back every copy."""
-    if load_json(p["state"], {}).get("port"):
+    if load_state(p).get("port"):
         say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed. "
             "Run setup --from on the new computer; this one keeps its own forge.")
         return 2
@@ -4844,11 +5445,9 @@ def setup_from(p, args):
     save_state(p, st)
     here = os.path.abspath(__file__)
     if os.path.abspath(p["script"]) != here:
-        shutil.copyfile(here, p["script"] + ".tmp")
-        os.replace(p["script"] + ".tmp", p["script"])
-        claim(p["script"])
+        copy_whole(here, p["script"])
     ok, why = install_service(p)
-    timer_why = install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min")))[1] if ok else ""
+    timer_why = install_timer(p, int(setting(load_settings(p), "interval_min")))[1] if ok else ""
     # M88 (G7.4, rule 24): what restore says is what it read. The person acts on these lines after losing a
     # computer, so "back" and "runs" are said only when the forge itself answered and held the copies.
     shut = None
@@ -4858,7 +5457,7 @@ def setup_from(p, args):
         up, shut = False, e
     ids = [r["forge_id"] for r in (st.get("repos") or {}).values() if r.get("forge_id")]
     n = len(ids)
-    owners = ", ".join(sorted((load_json(p["settings"], {}).get("owners") or {}))) or "(none)"
+    owners = ", ".join(sorted((load_settings(p).get("owners") or {}))) or "(none)"
     name = os.path.basename(src)
     held = unread = 0
     if up:
@@ -4898,7 +5497,7 @@ def setup_from(p, args):
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
-        st = load_json(p["state"], {})
+        st = load_state(p)
         st.pop("linger_by_setup", None)              # the old computer's record means nothing here
         back, note = linger_step(st, allow=not getattr(args, "no_linger", False))
         save_state(p, st)
@@ -4979,7 +5578,7 @@ def cmd_upgrade_forge(args):
     """G9.1: only to the version this release pins; a backup first; the binary checksum-checked; started and
     checked; on any failure the old binary and the database as it was are put back."""
     p = paths()
-    st = load_json(p["state"], {})
+    st = load_state(p)
     if not st.get("port"):
         say("Run setup first.")
         return 2
@@ -5146,7 +5745,7 @@ def cmd_self_update(args):
         drop_lock(p)
     say(f"self-update: {VERSION} to {tag}, replaced whole at {target}. The forge was not changed.")
     pin = re.search(r'^GITEA_VERSION = "([\d.]+)"', data.decode("utf-8", "replace"), re.M)
-    if pin and vt(pin.group(1)) > vt(load_json(p["state"], {}).get("gitea") or GITEA_VERSION):
+    if pin and vt(pin.group(1)) > vt(load_state(p).get("gitea") or GITEA_VERSION):
         say(f"{tag} pins Gitea {pin.group(1)}: run upgrade-forge when you choose (it makes a backup first).")
     return 0
 
@@ -5173,6 +5772,9 @@ def cmd_uninstall(args):
     raw = load_json(p["state"], None) if os.path.exists(p["state"]) else None
     record = "read" if isinstance(raw, dict) else ("unreadable" if os.path.exists(p["state"]) else "none")
     st = raw if record == "read" else {}
+    # M158 (G6.25): while the record of what the skill made is lost, nothing in the skill's folders is written,
+    # removed or made (the state file too), and no new record is started
+    lost = read_made(p)[1] if os.path.exists(p["data"]) or os.path.exists(p["conf"]) else None
     # Rule 8: a sync that is running is a wait, said with what holds it, never a refusal of a person who wants to
     # leave. With no folder of the skill's left, nothing can be running, and no folder is made again.
     if os.path.exists(p["data"]):
@@ -5240,7 +5842,38 @@ def cmd_uninstall(args):
         else:
             # G1.18 and the family's rule 30: every unit is told to stop and read stopped first; while one is not,
             # nothing at all is removed (a unit systemd still runs would go on running a program taken from it).
-            units = systemd_off(p)
+            # M163 (G9.18): while the forge's unit could not be read, a unit is told off only when systemd's own start
+            # line for it names this home's copy (the timer with the sync's service); one that names another copy, or
+            # none, is named and left as it is, its file with it; one systemd could not answer for is a "Not now".
+            only, kept_files, base = None, set(), os.path.dirname(p["unit"])
+            if limit:
+                both = (("forge", SERVICE + ".service", p["unit"], "the forge's service", (None,)),
+                        ("sync", SYNC_UNIT + ".service", os.path.join(base, SYNC_UNIT + ".service"),
+                         "the sync's service", (".service", ".timer")))
+                held = {which: systemd_parsed(unit) for which, unit, _, _, _ in both}
+                unread_units = [f"{words} ({unit})" for which, unit, _, words, _ in both if held[which] is None]
+                if unread_units:
+                    again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                    say("Not now: what systemd runs for " + " and ".join(unread_units) + " could not be read, and "
+                        f"{limit[1]} could not be read either ({limit[2]}), so uninstall cannot show what is this "
+                        f"home's. Nothing was removed and nothing was taken off. The one next step: move {limit[1]} "
+                        f"out of {os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run "
+                        f"uninstall again: {again}")
+                    return 3
+                only = []
+                for which, unit, f, words, suffixes in both:
+                    if unit_is_ours(p, which, held[which][0]):
+                        only += list(suffixes)
+                    else:
+                        runs = ("which systemd runs another copy than this home's" if held[which][0] else
+                                "for which systemd shows no start line, so it runs nothing")
+                        timer = (f", with the sync's timer ({SYNC_UNIT}.timer) and its file "
+                                 f"{os.path.join(base, SYNC_UNIT + '.timer')}" if which == "sync" else "")
+                        kept.append(f"{words} ({unit}), {runs}, and its file {f}{timer}")
+                        kept_files.add(f)
+                        if which == "sync":
+                            kept_files.add(os.path.join(base, SYNC_UNIT + ".timer"))
+            units = systemd_off(p, only) if only is None or only else []
             if any(answer != "stopped" for _, answer, _, _ in units):
                 said, no_bus = [], False
                 for words, answer, waited, what in units:
@@ -5259,10 +5892,9 @@ def cmd_uninstall(args):
                     if no_bus else f"Run uninstall again in a minute: {again}"))
                 return 3
             told += [words for words, _, _, _ in units]
-            base = os.path.dirname(p["unit"])
             for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
-                if limit and f == limit[1]:
-                    continue                    # M150: named on its own below, and left byte for byte
+                if limit and f == limit[1] or f in kept_files:
+                    continue                    # M150: named on its own below, and left byte for byte; M163: named
                 take_service_file(p, f, removed, left_service)
             run(["systemctl", "--user", "daemon-reload"])
             if st.get("linger_by_setup"):
@@ -5274,7 +5906,7 @@ def cmd_uninstall(args):
             elif st.get("linger_by_setup") is False:
                 linger_said = "Lingering was already on before setup, so it is left on."
             st.pop("linger_by_setup", None)
-            if record == "read" and os.path.exists(p["state"]):
+            if record == "read" and os.path.exists(p["state"]) and not lost:
                 save_state(p, st)
         # Rule 23: what the skill made, by its record, read now (a person's file may have arrived since setup).
         # Rule 8: a person who wants to leave is never refused because of the state of their own data: what the
@@ -5290,8 +5922,10 @@ def cmd_uninstall(args):
     rc = 0
     copies_here = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)
     if args.delete_copies and os.path.exists(p["data"]) and unreadable:
-        say(f"The copies were not deleted: {unreadable}, so the skill cannot tell what in {p['data']} it made, and "
-            "nothing was taken from it.")
+        # M158 (G6.25): the number is not asked; nothing in the skill's folders goes; the folder is the person's now
+        say(f"The copies were not deleted: {unreadable}, so the skill cannot tell which files in {p['data']} it "
+            f"made, and deletes none of them. That folder, with every copy in it, is still at {p['data']}, and it is "
+            "yours now, as it is.")
         rc = 1
     elif args.delete_copies and copies_here:
         say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds. Only "
@@ -5312,6 +5946,8 @@ def cmd_uninstall(args):
         take_made_folders(st, removed)
     uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
                      unread_service=limit, kept_jobs=kept, told_off=told)
+    if unreadable and holds_mirror(p):     # M158: the way to go on, named once, last
+        say(USE_FOLDER_STEP + own_command(p, "setup", "--use-this-folder"))
     return rc
 
 
@@ -5342,15 +5978,24 @@ def take_service_file(p, f, removed, left):
         return
     rec, why = read_made(p)
     state, unread = service_file_state(p, rec, f)
+    if state == "no" and rec is None:
+        # M158 (G6.25): the record is lost, so the file is read against what this home's setup writes there now
+        mine = service_as_written(p, f)
+        if mine:
+            os.remove(f)
+            removed.append(f"{f} (byte for byte what setup writes there for this home)")
+        else:
+            left.append(f"{f} (" + ("it could not be read" if mine is None else "it is not what setup writes there "
+                        "now") + ", and the record of what the skill wrote was not read, so the tool cannot tell "
+                        "whose it is; left as it is)")
+        return
     if state == "could not be read":
         left.append(f"{f} (it could not be read: {unread}, so the tool could not tell whether it is as the skill "
                     "wrote it; left byte for byte)")
     elif state == "yes":
         os.remove(f)
         removed.append(f)
-        if rec is not None and os.path.exists(p["data"]):
-            rec.pop(f, None)
-            write_made(p, rec)
+        unclaim(p, [f])
     else:
         left.append(f"{f} (not as the skill wrote it: changed since, or written by something else)")
 
@@ -5407,10 +6052,11 @@ def remove_made(p, targets, removed):
         removed.append(f"{p['cache']}: {caches} cache repositories the skill made")
     unclaim(p, gone)
     if as_dir:
-        rec, why = read_made(p)
-        if rec is not None:
-            rec.update({k: "dir" for k in as_dir})
-            write_made(p, rec)
+        with made_lock(p, make=False):
+            rec, why = read_made(p)
+            if rec is not None:
+                rec.update({k: "dir" for k in as_dir})
+                write_made(p, rec)
 
 
 def downloaded_from(here):
@@ -5500,10 +6146,22 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         for r in removed:
             say(f"  {r}")
     if unreadable:
-        say(f"Not taken: {unreadable}, so the skill cannot tell what in its folders it made, and nothing was "
-            f"removed from them: the forge's binary, the copies' caches, the settings and your keys ({p['keys']}), "
-            "and the folder of copies are still there. Nothing of the skill's runs. They are yours, to keep or "
-            "delete after you look at them.")
+        # M158 (G6.25): said as that; each kept key named, with why it stayed
+        keys = []
+        try:
+            keys = sorted(n for n in os.listdir(p["keys"]) if n.endswith(".key"))
+        except OSError:
+            pass
+        held = ([f"the GitHub key for {n[:-4]} ({os.path.join(p['keys'], n)})" for n in keys]
+                + [f"the forge's key for its '{MIRROR_USER}' account ({p['mirror_key']})"] * os.path.lexists(p["mirror_key"])
+                + [f"the password of your Gitea account ({p['password']})"] * os.path.lexists(p["password"]))
+        say(f"Not taken: {unreadable}, so uninstall cannot tell which files in its folders the skill made, and took "
+            "nothing from them; nothing there was deleted or written over. Still there, each as it was: "
+            + (f"the folder of copies, {p['data']}, with the forge and its copies; " if holds_mirror(p) else "")
+            + f"the forge's binary, the copies' caches and the settings ({p['settings']})"
+            + ("; and, kept because that record cannot show them to be the skill's to take: " + "; ".join(held)
+               if held else "") + ". Nothing of the skill's runs. They are yours, to keep or delete after you look "
+            "at them.")
     if foreign:
         say("Not the skill's, so left where they are (yours, or put there since setup):")
         for x in foreign:
@@ -5533,6 +6191,11 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
     if linger_said:
         say(linger_said)
     record_here = os.path.exists(os.path.join(p["data"], MADE_RECORD))
+    rec_kept = read_made(p)[0] or {}
+    for x in sorted(k for k, v in rec_kept.items() if v == "set-aside record" and os.path.lexists(k)):
+        # M158 (G6.25): the record setup --use-this-folder set aside is the person's, and named among what is kept
+        say(f"Kept: {x}, the record of what the skill made that could not be read, set aside by setup "
+            "--use-this-folder as it was. It is yours.")
     if unreadable:
         pass
     elif os.path.exists(p["forge"]) and record_here and set(os.listdir(p["forge"])) & FORGE_NAMES:
@@ -5596,6 +6259,9 @@ def main(argv=None):
     s.add_argument("--linger", action="store_true",
                    help="on Linux: the person said yes to lingering, so the mirror runs after a restart with no one "
                         "logged in")
+    s.add_argument("--use-this-folder", action="store_true",
+                   help="the person's own word: go on with a folder that holds a mirror whose record of what the "
+                        "skill made is lost (its stop names it)")
     s.add_argument("--no-linger", action="store_true",
                    help="on Linux: do not switch on lingering; the mirror then syncs only while you are logged in")
     s.set_defaults(fn=cmd_setup)
@@ -5641,6 +6307,7 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
+    _made_start.update(data=os.path.abspath(paths()["data"]), fresh=home_fresh(paths()), use=False)    # M158: read before the command writes anything
     lines, stop = settings_lines()
     for line in lines:
         say(line)
@@ -5656,10 +6323,26 @@ def main(argv=None):
                "setup."))
         return 3
     try:
+        if a.cmd not in ("uninstall", "status", "run-forge", "expose"):
+            # Rule 6 (M151, M154, M157): the kept files are read first, so a command that cannot read one stops
+            # before it changes anything. Uninstall never stops on them (rule 8); status says them in its lines.
+            load_state(paths())
+            load_settings(paths())
+        if a.cmd in ("setup", "sync", "go", "restore", "backup", "upgrade-forge"):
+            answer, why = forge_ini_read(paths())   # M159: never a new settings file over one in its place
+            if answer == "could not be read":
+                raise KeptUnread(paths()["app_ini"], why)
         return a.fn(a)
     except DoorShut as e:
         say(str(e))
         return 1
+    except KeptUnread as e:          # rule 6: a kept file that could not be read stops the command before any change
+        say(kept_stop_words(paths(), e, a.cmd))
+        return 2
+    finally:
+        if _setup_held[0]:
+            _setup_held[0] = False
+            drop_lock(paths())
 
 
 if __name__ == "__main__":
