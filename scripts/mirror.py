@@ -2248,7 +2248,14 @@ SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told 
 # variables themselves, not from words.)
 NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
 SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
-SYSTEMD_REFUSED = []    # (unit, systemctl's first line) for each unit whose disable systemd refused at uninstall
+SYSTEMD_LINK_LEFT = []  # (unit, systemctl's own line) for each unit whose link systemctl did not take off at uninstall
+
+
+def wants_link(p, unit):
+    """The link systemctl makes at setup (enable) so that a unit starts by itself."""
+    timer = unit.endswith(".timer")
+    return os.path.join(os.path.dirname(p["unit"]), "timers.target.wants" if timer else "default.target.wants",
+                        unit if timer else unit + ".service")
 
 
 def systemd_off(p, only=None):
@@ -2261,10 +2268,20 @@ def systemd_off(p, only=None):
     the units (SYSTEMD_UNITS' suffixes) uninstall showed to be this home's; no other is told off or read."""
     pick = [(x, w) for x, w in SYSTEMD_UNITS if only is None or x in only]
     told = [SERVICE if x is None else SYNC_UNIT + x for x, _ in pick if x != ".service"]
-    del SYSTEMD_REFUSED[:]
+    del SYSTEMD_LINK_LEFT[:]
     if told:
         off = run(["systemctl", "--user", "disable", "--now", *told])
-        if off.returncode != 0:
+        if off.returncode == 0:
+            # RECORDED on systemd 255 (walk7b, a stock Ubuntu 24.04 guest, 2026-11-26): with the forge's unit masked
+            # (a link to /dev/null in its place), disable --now ends with code 0, says "Unit <its file> is masked,
+            # ignoring.", stops it, and leaves its link from setup; the timer's link it takes. A link still there
+            # is named, in systemctl's own line for that unit.
+            for u in told:
+                if os.path.lexists(wants_link(p, u)):
+                    said = [x.strip() for x in shown_lines((off.stderr or "") + "\n" + (off.stdout or ""))]
+                    mine = [x for x in said if (u if u.endswith(".timer") else u + ".service") in x]
+                    SYSTEMD_LINK_LEFT.append((u, (mine or said or ["code 0, and no word of it"])[0]))
+        else:
             # Seen 2026-11-26 on systemd 255 (a stock Ubuntu 24.04 guest, the forge's unit file at mode 000 while
             # systemd held it loaded): disable refuses the whole call ("Failed to disable unit: Unit file ... does
             # not exist.", code 1) and stops nothing, the timer in the same call too; stop needs no file. So each
@@ -2273,7 +2290,7 @@ def systemd_off(p, only=None):
                 one = run(["systemctl", "--user", "disable", "--now", u]) if len(told) > 1 else off
                 if one.returncode != 0:
                     said = [x.strip() for x in shown_lines(one.stderr or one.stdout)]
-                    SYSTEMD_REFUSED.append((u, said[0] if said else f"code {one.returncode}"))
+                    SYSTEMD_LINK_LEFT.append((u, said[0] if said else f"code {one.returncode}"))
                     run(["systemctl", "--user", "stop", u])
     seen = []
     for suffix, words in pick:
@@ -3748,12 +3765,13 @@ def folder_step(d):
 
 
 def link_left_line(link, unit, said):
-    """M163 (walk6, 2026-11-26): the link systemctl made at setup and did not take off, named with its step. The rm
-    line is printed only for a path the tool prints as it is (no backtick, no dollar-parenthesis, no character that
-    cannot be seen), each part through shlex.quote, so the line runs nothing else when pasted."""
+    """M163 (walk6 and walk7b, 2026-11-26): the link systemctl made at setup and did not take off (its disable
+    refused, or the unit masked), named with its step. The rm line is printed only for a path the tool prints as it
+    is (no backtick, no dollar-parenthesis, no character that cannot be seen), each part through shlex.quote, so the
+    line runs nothing else when pasted."""
     return (f"Not taken: {shown_as_is(link)}, the link systemctl made at setup so that {unit} starts by itself. "
-            f"systemctl did not take it off (it answered: {said}), so uninstall stopped the service instead, and read "
-            "it stopped; the link stays where systemctl made it. With the service's program gone it starts nothing; "
+            f"systemctl did not take it off (it answered: {said}); the service was told to stop, and read stopped; "
+            "the link stays where systemctl made it. With the service's program gone it starts nothing; "
             "delete it as you delete any file, when you want" + (
                 f": rm {shlex.quote(link)}" if shows_as_is(link) else
                 f" ({SHOWN_CHANGED} in its path, so no line is given)"))
@@ -6004,14 +6022,20 @@ def cmd_uninstall(args):
                     if unit_is_ours(p, which, held[which][0]):
                         only += list(suffixes)
                     else:
+                        # walk7 (A), 2026-11-26, systemd 255: uninstall run again after one that took the sync's
+                        # files named them as left, though they were gone. Each file is named only where it is; a
+                        # unit that runs nothing and has no file left is nothing to leave, and is not named.
+                        there = [x for x in ([f] + ([os.path.join(base, SYNC_UNIT + ".timer")] if which == "sync"
+                                                    else [])) if os.path.lexists(x)]
+                        if not held[which][0] and not there:
+                            continue
                         runs = ("which systemd runs another copy than this home's" if held[which][0] else
                                 "for which systemd shows no start line, so it runs nothing")
-                        timer = (f", with the sync's timer ({SYNC_UNIT}.timer) and its file "
-                                 f"{os.path.join(base, SYNC_UNIT + '.timer')}" if which == "sync" else "")
-                        kept.append(f"{words} ({unit}), {runs}, and its file {f}{timer}")
-                        kept_files.add(f)
-                        if which == "sync":
-                            kept_files.add(os.path.join(base, SYNC_UNIT + ".timer"))
+                        timer = f", with the sync's timer ({SYNC_UNIT}.timer)" if which == "sync" else ""
+                        kept.append(f"{words} ({unit}), {runs}{timer}" + (
+                            f", and {'its file' if len(there) == 1 else 'their files'} " + " and ".join(there)
+                            if there else ", with no file of it left"))
+                        kept_files.update(there)
             units = systemd_off(p, only) if only is None or only else []
             if any(answer != "stopped" for _, answer, _, _ in units):
                 said, no_bus = [], False
@@ -6316,9 +6340,8 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
                 say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
     if (left_service or unread_service) and told_off:
         say("Switched off first, and read off before anything was removed: " + "; ".join(told_off) + ".")
-    for unit, said in SYSTEMD_REFUSED:
-        link = os.path.join(os.path.dirname(p["unit"]), "timers.target.wants" if unit.endswith(".timer")
-                            else "default.target.wants", unit if unit.endswith(".timer") else unit + ".service")
+    for unit, said in SYSTEMD_LINK_LEFT:
+        link = wants_link(p, unit)
         if os.path.lexists(link):
             say(link_left_line(link, unit, said))
     if left_service:

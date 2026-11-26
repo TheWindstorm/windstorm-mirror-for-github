@@ -511,6 +511,32 @@ class Home:
                         if os.path.lexists(f) and not os.path.islink(f) and not os.access(f, os.R_OK):
                             return subprocess.CompletedProcess(
                                 cmd, 1, "", f"Failed to {verb[0]} unit: Unit file {name} does not exist.\n")
+                if verb[:1] == ["disable"]:
+                    # RECORDED on systemd 255 (walk7b, a stock Ubuntu 24.04 guest, 2026-11-26): a unit masked (its
+                    # file a link to /dev/null) is "masked, ignoring", code 0, stopped with --now, and its link from
+                    # setup stays; another unit's link is taken. (Which of the two streams each line goes to is NOT
+                    # SEEN BY US: the walk read them together; the stand-in gives both on stderr.)
+                    base, said = os.path.dirname(mirror.paths()["unit"]), []
+                    for u in verb[1:]:
+                        name = u if u.endswith((".service", ".timer")) else u + ".service"
+                        f = os.path.join(base, name)
+                        link = os.path.join(base, "timers.target.wants" if name.endswith(".timer")
+                                            else "default.target.wants", name)
+                        if os.path.islink(f) and os.readlink(f) == "/dev/null":
+                            said.append(f"Unit {f} is masked, ignoring.")
+                        elif os.path.lexists(link):
+                            os.remove(link)
+                            said.append(f'Removed "{link}".')
+                    if said:
+                        for u in verb[1:] if "--now" in cmd else []:     # as the plain disable --now below
+                            if u in self.units_up and self.stop_reads:
+                                self.stopping[u] = self.stop_reads
+                            self.units_up.discard(u)
+                        return subprocess.CompletedProcess(cmd, 0, "", "\n".join(said) + "\n")
+                if verb[:1] == ["daemon-reload"]:
+                    # RECORDED on systemd 255 (walk7 (A), a stock Ubuntu 24.04 guest, 2026-11-26): after uninstall's
+                    # daemon-reload, a unit whose file is of mode 000 is no longer held (load=not-found)
+                    self.bus_loaded.clear()
                 if verb[:1] in (["enable"], ["start"]) and ("--now" in cmd or verb[0] == "start"):
                     self.units_up |= set(verb[1:])
                 elif verb[:1] in (["disable"], ["stop"]) and ("--now" in cmd or verb[0] == "stop"):
@@ -9262,9 +9288,11 @@ class G9(unittest.TestCase):
         person masked, a link to /dev/null as systemctl mask leaves it (L2), a file the person emptied (L3). Setup's
         dry run and uninstall stopped (exit 2) with "read that file, and run uninstall with the copy it names": the
         file names no copy, so the step led back to the stop. A unit systemd was read for that shows no start line
-        runs nothing, so it is no other install. NOT SEEN BY US: what systemd itself answers for a masked unit (the
-        stand-in reads the path's text, which for /dev/null is nothing). L4 (this home's own unit with one comment
-        line) is the control."""
+        runs nothing, so it is no other install. SEEN on systemd 255 (walk7 (B), a stock Ubuntu 24.04 guest,
+        2026-11-26), a masked unit: setup's dry run stops with the step to move it out, and uninstall goes to its end.
+        RECORDED there (walk7b): disable --now answers "Unit <its file> is masked, ignoring.", code 0, stops it, and
+        leaves its link from setup, which uninstall now names with the rm line, taken as printed. L4 (this home's own
+        unit with one comment line) is the control."""
         saved = mirror.system
         saved_doors = doors_the_hosts_way(saved, always=True)
         mirror.system = lambda: ("linux", "x86_64")
@@ -9287,13 +9315,37 @@ class G9(unittest.TestCase):
                         with open(forge, "w") as fh:
                             fh.write({"L1": "[Service]\n", "L3": "", "L4": text + "# the person's own line\n"}[world[:2]])
                     planted = os.readlink(forge) if world.startswith("L2") else fread_bytes(forge)
+                    link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
+                    tlink = os.path.join(os.path.dirname(forge), "timers.target.wants", os.path.basename(files[2]))
+                    if world.startswith("L2"):
+                        # walk7 (B) and walk7b, systemd 255, 2026-11-26: the links setup's enable made stay while the
+                        # person masks the unit; disable --now answers "masked, ignoring" (code 0) and leaves the
+                        # forge's link, which uninstall did not name
+                        for ln, to in ((link, forge), (tlink, files[2])):
+                            os.makedirs(os.path.dirname(ln), exist_ok=True)
+                            os.symlink(to, ln)
+                        h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
                     rc, out = quiet(mirror.main, ["setup", "--dry-run"])
                     self.assertEqual(rc, 2, out)
                     self.assertNotIn("read that file", out)
                     self.assertIn("move it out of that folder", out)
-                    for _ in range(2):                         # twice running: never the same stop again
+                    for i in range(2):                         # twice running: never the same stop again
                         rc, out = quiet(mirror.main, ["uninstall"])
                         self.assertEqual(rc, 0, out)
+                        if world.startswith("L2") and i == 0:
+                            said = [x for x in out.split("\n") if x.startswith(f"Not taken: {link}")]
+                            self.assertEqual(len(said), 1, out)
+                            self.assertIn(f"(it answered: Unit {forge} is masked, ignoring.)", said[0])
+                            self.assertTrue(said[0].endswith(f"rm {shlex.quote(link)}"), said[0])
+                            self.assertFalse(os.path.lexists(tlink), out)      # the timer's link: taken
+                            self.assertEqual(h.units_up, set(), out)
+                            # the line exactly as printed, run as a person pastes it into a shell
+                            ran = subprocess.run(said[0].rsplit("when you want: ", 1)[1], shell=True,
+                                                 capture_output=True, text=True)
+                            self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+                            self.assertFalse(os.path.lexists(link))
+                        else:
+                            self.assertNotIn("default.target.wants", out)
                         self.assertNotIn("read that file", out)
                         self.assertIn(forge, out)
                         self.assertIn("not as the skill wrote it", out)
@@ -9334,10 +9386,14 @@ class G9(unittest.TestCase):
                         self.assertIn(os.environ["WSM_HOME"], text)
                         text = text.replace(os.environ["WSM_HOME"], other)
                     os.makedirs(os.path.dirname(forge), exist_ok=True)
-                    with open(sync_unit, "w") as fh:
-                        fh.write(text)
-                    with open(timer, "w") as fh:
-                        fh.write(mirror.sync_timer_text(15))
+                    if world.startswith("R"):    # as on the guest (walk7 (A)): the sync's two files are setup's own
+                        mirror.write_file(sync_unit, text)
+                        mirror.write_file(timer, mirror.sync_timer_text(15))
+                    else:
+                        with open(sync_unit, "w") as fh:
+                            fh.write(text)
+                        with open(timer, "w") as fh:
+                            fh.write(mirror.sync_timer_text(15))
                     mirror.write_file(forge, mirror.unit_text(p))
                     os.makedirs(os.path.dirname(p["script"]), exist_ok=True)
                     mirror.write_file(p["script"], "# the installed copy\n")
@@ -9399,6 +9455,13 @@ class G9(unittest.TestCase):
                             self.assertFalse(os.path.lexists(link))
                             rc2, out2 = quiet(mirror.main, ["uninstall"])
                             self.assertNotIn("default.target.wants", out2)
+                            # walk7 (A), systemd 255, 2026-11-26: that second uninstall named the sync's two files
+                            # as left as they are, though the first had taken them; a file is named only where it is
+                            self.assertEqual(rc2, 0, out2)
+                            for f in (sync_unit, timer):
+                                self.assertFalse(os.path.lexists(f), out2)
+                                self.assertNotIn(f, out2)
+                            self.assertNotIn("the sync's service (", out2)
                             # a path holding a backtick or a dollar-parenthesis gets no line to run
                             for odd in ("a" + chr(96) + "b", "a$" + chr(40) + "b)"):
                                 bad = os.path.join(h.tmp, odd, "default.target.wants", os.path.basename(forge))
