@@ -6337,6 +6337,80 @@ class G6(unittest.TestCase):
             os.environ.clear()
             os.environ.update(saved_env)
 
+    def test_G6_35_a_command_started_as_root_in_another_accounts_mirror_stops_at_the_door(self):
+        """M177 (G6.35), seen on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): with sudo -E, which keeps the
+        person's home, status wrote the state file and sync the record of what the skill made as root's, at mode
+        600; the person's own status, sync and setup then stopped on a file they could not read, with a step that
+        doubles the disk the copies take. Now every command started as root whose folders are another account's, or
+        started by sudo where root has no mirror of its own, stops before it reads or writes anything, names whose
+        mirror it is by number, and gives the command to run as that account. Root's own mirror runs as before. The
+        administrator's number is moved here to stand for root: the suite does not run as root."""
+        me = os.getuid()
+        saved_root, saved_euid, saved_env = mirror.ROOT_UID, os.geteuid, dict(os.environ)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = mirror.main(list(argv))
+            return rc, said(out.getvalue())
+
+        def tree(top):
+            return sorted((os.path.relpath(os.path.join(r, n), top), os.lstat(os.path.join(r, n)).st_mtime_ns)
+                          for r, ds, fs in os.walk(top) for n in ds + fs)
+        try:
+            with Home() as h:
+                self.assertEqual(h.setup("--no-linger")[0], 0)
+                p = mirror.paths()
+                before = tree(h.tmp)
+                # the person's folders, and this command as root (account number 0 moved away from the suite's own)
+                mirror.ROOT_UID = me + 1
+                mirror.os.geteuid = lambda: me + 1
+                os.environ.pop("SUDO_UID", None)
+                who = mirror.owner_words(me)
+                for argv in (["status"], ["sync"], ["setup", "--dry-run"], ["setup"], ["uninstall"], ["go"],
+                             ["config", "include", "someone/a"], ["left-out"], ["restore", "--check"],
+                             ["key", "set", "someone"], ["run-forge"]):
+                    rc, out = run(*argv)
+                    cmd = " ".join(argv[:2]) if argv[0] == "key" else argv[0]
+                    self.assertEqual(rc, 2, (argv, out))
+                    self.assertEqual(out, (
+                        f"Stopped: {cmd} runs here as root (account 0), and the skill runs as the account whose "
+                        f"mirror it is, {who}: a run as root would leave files in that account's folders that it "
+                        f"cannot read. So {cmd} reads nothing and changes nothing: nothing was copied, written or "
+                        f"taken away. The one next step: run the same command again as {who}, without sudo, with the "
+                        f"same options: {mirror.own_command(p, cmd)}"), argv)
+                    self.assertNotIn("Traceback", out)
+                self.assertEqual(tree(h.tmp), before, "a command started as root changed a file")
+                # started by sudo: the account it came from is named, by number
+                os.environ["SUDO_UID"] = str(me)
+                rc, out = run("status")
+                self.assertEqual(rc, 2)
+                self.assertIn(f"Stopped: status runs here as root (account 0), started by sudo from {who}, and", out)
+                # root's own mirror, in root's own home: runs as before (here: the suite's own number stands for root)
+                mirror.ROOT_UID = me
+                mirror.os.geteuid = lambda: me
+                self.assertIsNone(mirror.root_door(p, "status"))
+            with Home() as h:
+                # sudo with no mirror of root's own: the mirror it means is the account's it came from
+                os.environ["WSM_HOME"] = os.path.join(h.tmp, "roots-home-has-none")
+                mirror.ROOT_UID = me + 1
+                mirror.os.geteuid = lambda: me + 1
+                os.environ["SUDO_UID"] = str(me)
+                rc, out = run("status")
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"started by sudo from {mirror.owner_words(me)}, and the skill runs as the account "
+                              f"whose mirror it is, {mirror.owner_words(me)}: a run as root looks for a mirror in "
+                              "root's own home, where there is none, and would make one there. So status reads "
+                              "nothing", out)
+                self.assertFalse(os.path.exists(mirror.paths()["data"]))
+                # root with no sudo and no mirror: as before ("Run setup first.")
+                os.environ.pop("SUDO_UID", None)
+                self.assertIsNone(mirror.root_door(mirror.paths(), "status"))
+        finally:
+            mirror.ROOT_UID, mirror.os.geteuid = saved_root, saved_euid
+            os.environ.clear()
+            os.environ.update(saved_env)
+
     def test_G6_25_the_way_back_is_taken_only_once_no_stop_of_setups_is_left(self):
         """M158 (G6.25; seen 2026-11-26 on a stock Ubuntu 24.04 guest, real systemd 255): setup
         --use-this-folder set the record aside and wrote a new one, then stopped on lingering not yet chosen with
@@ -10781,7 +10855,7 @@ class G6Words(unittest.TestCase):
             self.assertTrue(re.search(r"\. (Run setup|Run status again|The mirror needs that read to run; the README)",
                                       line), line)
         for fn in ("other_install_stop", "home_is_not_ours", "bus_floor",  # G9.12, G1.24: each stop it returns
-                   "kept_step", "folders_floor"):                          # the three answers (M151, M154-M159), M167
+                   "kept_step", "folders_floor", "root_door"):             # the three answers (M151, M154-M159), M167, M177
             for r in ast.walk(funcs[fn]):
                 if isinstance(r, ast.Return) and r.value is not None and words(r.value):
                     self.assertTrue(self.NEXT.search(words(r.value)), (fn, words(r.value)[:90]))

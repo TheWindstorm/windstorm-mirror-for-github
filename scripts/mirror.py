@@ -3851,6 +3851,42 @@ def link_left_line(link, unit, said):
                 f" ({SHOWN_CHANGED} in its path, so no line is given)"))
 
 
+ROOT_UID = 0                        # the administrator's account number (the suite moves it to its own)
+
+
+def root_door(p, cmd):
+    """M177 (G6.35): a command started as root (account 0) whose folders, or whose sudo, are another account's
+    stops at the door, before it reads or writes anything (root started by sudo with no mirror of its own is
+    stopped too: the mirror it means is that account's). Seen on a stock Ubuntu 24.04 guest, 2026-11-26: with
+    sudo -E (the person's home kept) status and sync wrote the state file and the record of what the skill made as
+    root's, at mode 600, so the person's own commands could no longer read them. Root's own mirror, in root's own
+    home (a computer where root is the only account), runs as before. None, or the stop."""
+    if not hasattr(os, "geteuid") or os.geteuid() != ROOT_UID:
+        return None
+    theirs, roots = None, False
+    for d in [os.environ.get("WSM_HOME"), p["data"], p["conf"], p["keys"]]:
+        try:
+            uid = os.stat(d).st_uid if d else None
+        except OSError:
+            continue
+        if uid not in (ROOT_UID, None):
+            theirs = uid
+            break
+        roots = roots or uid == ROOT_UID
+    by = os.environ.get("SUDO_UID", "")
+    by = int(by) if by.isdigit() and int(by) != ROOT_UID else None
+    if theirs is None and (roots or by is None):
+        return None                 # root's own mirror (its folders root's), or root with no sudo and no mirror
+    who = owner_words(theirs if theirs is not None else by)
+    return (f"Stopped: {cmd} runs here as root (account 0)" + (f", started by sudo from {owner_words(by)}"
+            if by is not None else "") + ", and the skill runs as the account whose mirror it is, "
+            f"{who}: " + ("a run as root would leave files in that account's folders that it cannot read" if theirs
+                          is not None else "a run as root looks for a mirror in root's own home, where there is "
+                          "none, and would make one there") + f". So {cmd} reads "
+            "nothing and changes nothing: nothing was copied, written or taken away. The one next step: run the "
+            f"same command again as {who}, without sudo, with the same options: {own_command(p, cmd)}")
+
+
 def folders_floor(p, cmd):
     """M167 (G6.29): before any command reads or writes a kept file, each folder of the
     skill's own that is there (WSM_HOME's, the data and settings folders, the keys folder) is one this account can
@@ -6563,6 +6599,10 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
+    floor = root_door(paths(), a.cmd + (f" {a.key_cmd}" if a.cmd == "key" else ""))    # M177: before any read
+    if floor:
+        say(floor)
+        return 2
     _made_start.update(data=os.path.abspath(paths()["data"]), fresh=home_fresh(paths()), use=False)    # M158: read before the command writes anything
     lines, stop = settings_lines()
     for line in lines:
