@@ -6777,9 +6777,13 @@ def still_here(p, st, record="read"):
                      "or Claude Code's for a plugin; nothing runs from it now.")
     made = [d for d in (st.get("made_folders") or []) if os.path.isdir(d)]
     holds = [d for d in made if os.path.exists(p["data"]) and (p["data"] + os.sep).startswith(d + os.sep)]
-    if holds:
+    if holds and os.path.exists(p["state"]):
         lines.append(", ".join(holds) + ": folders setup made to hold the folder of copies. They stay while it "
                      "stays, and go with it once they are empty.")
+    elif holds:        # M181 (seen 2026-11-26): their only record, the state file, went in this run
+        lines.append(", ".join(holds) + ": folders setup made to hold the folder of copies. They stay: the skill "
+                     "keeps no record of them after this run, so no later run of it removes them; an empty one does "
+                     "no harm.")
     for d in made:
         if d not in holds:
             lines.append(f"{d}: a folder setup made, left because other files are in it now. It is yours.")

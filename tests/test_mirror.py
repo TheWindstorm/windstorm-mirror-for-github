@@ -10845,6 +10845,68 @@ class G9(unittest.TestCase):
                     self.assertIn(f"  {u}: whose it is could not be read (PermissionError)\n", out)
                     self.assertTrue(out.rstrip("\n").split("\n")[-2].startswith("The copies are deleted"), out)
 
+    def test_G9_23_the_folders_setup_made_are_said_to_go_later_only_while_their_record_stays(self):
+        """M181 (seen 2026-11-26 on a stock Ubuntu 24.04 guest: a delete that left the folder of copies, because
+        another account's folder was in it, said the folders setup made to hold it "go with it once they are empty",
+        and took the state file, their only record, in the same run; run again, it said no record of them is left).
+        Chosen by the state file's presence after the run, never by the command's name: while it stays, that
+        sentence stays word for word; once it has gone, the line says they stay, that the skill keeps no record of
+        them after this run so no later run of it removes them, and that an empty one does no harm, with no command.
+        The folder setup made to hold the folder of copies is the suite's stand-in in the record (in the suite's home
+        the suite makes that folder itself; on the guest setup made ~/.local and ~/.local/share)."""
+        def delete(typed):
+            saved, sys.stdin = sys.stdin, AtTerminal(typed)
+            try:
+                return quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+
+        def plain(p):
+            return quiet(mirror.main, ["uninstall"])
+
+        def left(p):                               # only a file of the person's own stays: the leave, exit 0
+            with open(os.path.join(p["data"], "mine.txt"), "w") as f:
+                f.write("x")
+            self.assertEqual(quiet(mirror.main, ["uninstall"])[0], 0)
+            return delete("2\n")
+
+        def wrong(p):                              # another number typed: nothing deleted
+            return delete("7\n")
+
+        def stopped(p):                            # the system refuses part-way: the stop, exit 1
+            d = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
+            os.chmod(d, 0o500)
+            try:
+                return delete("2\n")
+            finally:
+                os.path.exists(d) and os.chmod(d, 0o700)
+        for world, run, state_after in (("plain", plain, True), ("left", left, False), ("wrong", wrong, True),
+                                        ("stopped", stopped, True)):
+            with self.subTest(world=world), World(self) as w:
+                for n in ("alpha", "beta"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+                p = w.p
+                holder = os.path.abspath(os.path.dirname(p["data"]))
+                st = mirror.load_json(p["state"], {})
+                st["made_folders"] = sorted(set(st.get("made_folders") or []) | {holder})
+                mirror.save_state(p, st)
+                rc, out = run(p)
+                self.assertEqual(os.path.exists(p["state"]), state_after, out)
+                said = f"  {holder}: folders setup made to hold the folder of copies. "
+                kept = said + "They stay while it stays, and go with it once they are empty.\n"
+                gone = (said + "They stay: the skill keeps no record of them after this run, so no later run of it "
+                        "removes them; an empty one does no harm.\n")
+                if os.path.exists(p["state"]):
+                    self.assertIn(kept, out)
+                    self.assertNotIn(gone, out)
+                else:
+                    self.assertIn(gone, out)
+                    self.assertNotIn(kept, out)
+                self.assertTrue(os.path.isdir(holder), out)
+
     def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):
         """Rule 8 (the family's): a person who wants to leave is never refused. A running sync is a wait that says
         what holds it and the one next step; the last thing printed says what is gone and what is kept; run twice,
