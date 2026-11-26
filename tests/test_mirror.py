@@ -376,7 +376,17 @@ class Home:
                     del self.tearing[label]
                     self.gone.add(label)
                 return done(0, "state = running\n")
-            if label in self.gone:
+            given = self.launchd_args
+            told = given is not None and (not isinstance(given, dict) or label in given)
+            plist = os.path.join(os.path.dirname(mirror.paths()["plist"]), label + ".plist")
+            if label in self.gone or (label not in self.loaded and self.launchd_form is None and not told
+                                      and not os.path.lexists(plist)):
+                # a job launchd does not hold: 113. RECORDED in the gui domain, a session at the screen, macOS 27.2.1
+                # (2026-11-26), for a job never loaded: 113, nothing on stdout, these two lines on stderr word for
+                # word. For a job taken off, in the same domain (macOS 27, 2026-11-24 to 11-26): 113, the code only,
+                # so there the words are the stand-in's own. In the user domain with no session at the screen
+                # (macOS 13.7.8, 2026-11-24 and 11-25): 113, its words ending "in domain for uid: N". Seen on CI's
+                # Mac legs (2026-11-26): the stand-in had answered 0, with no blocks, for a job never loaded.
                 return done(113, "", f"Bad request.\nCould not find service \"{label}\" in domain for user gui: "
                                      f"{os.getuid()}\n")
         return None
@@ -1855,6 +1865,35 @@ class G1(unittest.TestCase):
         """What systemd's bus holds for a start line meant as argv: the program, then argv, an argument's $ as $$
         (it is expanded at start; seen 2026-11-25 on systemd 255, where the started program got each word whole)."""
         return [argv[0], argv[0]] + [w.replace("$", "$$") for w in argv[1:]]
+
+    def test_G1_24_a_job_launchd_does_not_hold_is_read_as_not_there(self):
+        """Seen 2026-11-26 on every Mac leg of CI: a first setup in the suite's home ended 1, "what launchd holds for
+        the forge's job ... could not be read", because the suite's stand-in answered a print of a job never loaded
+        with code 0 and no blocks. launchd answers such a print with 113: RECORDED in the gui domain, a session at
+        the screen, macOS 27.2.1 (2026-11-26), for a job never loaded, 113, nothing on stdout, and "Bad request." and
+        "Could not find service ... in domain for user gui: N" on stderr, the stand-in's words; the tool reads 113 as
+        no such job. (For a job taken off, macOS 27 gave 113, the code only; the user domain on macOS 13.7.8 gave
+        113 and words ending "in domain for uid: N".) On every leg:
+        the Mac's road, through the stand-in. Then the job setup loads is held and read (the control)."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", saved()[1])
+        try:
+            with Home(linger="yes") as h:
+                p = mirror.paths()
+                dom = f"gui/{os.getuid()}"
+                self.assertFalse(os.path.exists(p["plist"]))
+                out = mirror.run(["launchctl", "print", f"{dom}/{mirror.LAUNCHD_LABEL}"])
+                self.assertEqual(out.returncode, 113, out)
+                self.assertIn(f'Could not find service "{mirror.LAUNCHD_LABEL}"', out.stderr)
+                self.assertEqual(mirror.launchd_held(mirror.LAUNCHD_LABEL), "absent")
+                ok, why = mirror.install_service(p, restart=True)
+                self.assertNotIn("could not be read", why or "", why)
+                self.assertTrue(ok, why)
+                got = mirror.launchd_held(mirror.LAUNCHD_LABEL)
+                self.assertIsInstance(got, tuple, got)
+                self.assertTrue(mirror.job_is_ours(p, mirror.LAUNCHD_LABEL, got[0]), got)
+        finally:
+            mirror.system = saved
 
     def test_G1_24_each_value_in_a_service_file_is_one_whole_value(self):
         """M148 (seen 2026-11-25 on two stock Ubuntu 24.04 guests, systemd 255, and the issue's own case): with the
