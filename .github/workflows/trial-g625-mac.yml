@@ -1,0 +1,28 @@
+# A trial, on this branch only: the three G6.25 tests, by name, on GitHub's macOS 26 image, so their Mac halves are
+# read on a Mac before the release branch's whole run. No secret is used; no action from outside is run but the two
+# the suite's own jobs use (checkout and setup-python).
+name: trial-g625-mac
+on:
+  push:
+    branches: [trial-g625-mac]
+permissions:
+  contents: read
+jobs:
+  g625-mac:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: The three G6.25 tests by name, with the real pinned Gitea (downloaded and checked against its pin)
+        env:
+          WSM_REQUIRE_GITEA: "1"
+          WSM_TEST_CACHE: ${{ runner.temp }}/wsm-cache
+          WSM_OTHER_ACCOUNT: nobody
+        run: >-
+          python -I tests/test_mirror.py -v
+          G6.test_G6_25_a_record_that_cannot_be_read_is_said_as_that_and_the_way_back_goes_on_from_the_folder
+          G6.test_G6_25_the_way_back_is_taken_only_once_no_stop_of_setups_is_left
+          G6.test_G6_25_a_service_file_not_as_setup_writes_it_is_never_written_over_whatever_the_kept_files_say
