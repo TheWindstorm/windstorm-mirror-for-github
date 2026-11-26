@@ -3677,6 +3677,10 @@ class G3(unittest.TestCase):
             kept = os.path.join(w.home.tmp, "kept-by-the-person")
             os.makedirs(kept)
             os.rename(p["settings"], os.path.join(kept, "settings.json"))         # the step, as printed
+            rc, out = run_printed(w, inc)                                          # the line exactly as printed
+            self.assertEqual((rc, out.strip().split("\n")[-1]), (0, "include: (none)"), out)
+            # "choose it again": the patterns are the person's own choice, so the person types theirs after the
+            # line, as the step asks; this one is the choice made before the file was damaged
             self.assertEqual(run_printed(w, inc + " someone/a")[0], 0)
             rc, out = run_printed(w, ks, stdin=w.gh.key + "\n")
             self.assertEqual(rc, 0, out)
@@ -4024,7 +4028,7 @@ def git_calls(gh, full=None):
     return [x for x in gh.log if ".git/" in x[1] and (full is None or x[1].startswith(f"/{full}.git/"))]
 
 
-# Rule 6 (M151, M154, M157): each damaged form of a kept JSON file, planted alone; "cannot be opened" only where the
+# M151, M154, M157: each damaged form of a kept JSON file, planted alone; "cannot be opened" only where the
 # account is not root (root reads mode 000), and a folder by the file's name stands in for it there too.
 KEPT_FORMS = ("cannot be opened", "0 bytes", "blank space", "cut short", "not JSON", "not text", "a JSON list",
               "a folder", "an entry of the wrong kind")
@@ -5939,7 +5943,7 @@ class G6(unittest.TestCase):
                 self.assertNotIn("goes on from it", out)
                 self.assertEqual([x for x in out.strip().split("\n") if x.strip()][-1], mirror.USE_FOLDER_STEP + step)
                 self.assertEqual(os.path.lexists(made), form != "not there")     # no new record by uninstall
-                rc, out = run_printed(w, step + " --linger")                     # the step, as printed
+                rc, out = run_printed(w, step)                                   # the step, exactly as printed
                 self.assertEqual(rc, 0, out)
                 self.assertIn("Taken on again, on your word (--use-this-folder)", out)
                 w.port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
@@ -6008,6 +6012,193 @@ class G6(unittest.TestCase):
             self.assertIn("--use-this-folder changes nothing here: the record of what the skill made", out)
             self.assertEqual(set(mirror.read_made(w.p)[0]), set(rec))
 
+    def test_G6_25_a_folder_that_holds_no_mirror_names_each_entry_by_its_path(self):
+        """M158 (G6.25; found 2026-11-26 in a reading of the code, a step backward): a data folder that holds one file of
+        the person's own and no record (never set up there, or left so by uninstall --delete-copies) stopped setup
+        with "already holds things the skill did not make: <the record> is not there", a thing that cannot be
+        moved, and the person's file unnamed. Where the folder holds no mirror, setup's stop names each entry by its
+        path, as before the cure, with WSM_HOME set and without it; a record there that could not be read is named
+        with them. Then the step as printed, taken: setup goes on to its end, and the person's file is byte for
+        byte as planted."""
+        def stop_names(out):
+            self.assertIn(" already holds things the skill did not make: ", out)
+            return out.split(" already holds things the skill did not make: ", 1)[1].split(". The skill writes", 1)[0]
+
+        def full_setup(h):
+            # place_gitea stands in for setup's own download of the pinned program; it is a new start of the
+            # skill's, as each command is (main reads the folders again when it starts)
+            mirror._made_start.update(data=None, fresh=None, use=False)
+            h.place_gitea()
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("already holds things the skill did not make", out)
+
+        for wsm in (True, False):
+            with self.subTest(wsm_home=wsm), Home(linger="yes") as h:
+                if not wsm:
+                    os.environ.pop("WSM_HOME")                    # put back by Home on its way out
+                p = mirror.paths()
+                made = os.path.join(p["data"], mirror.MADE_RECORD)
+                mine = os.path.join(p["data"], "my-notes.txt")
+                os.makedirs(p["data"])
+                with open(mine, "w") as f:
+                    f.write("mine\n")
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                self.assertEqual(stop_names(out), mine)
+                self.assertNotIn(f"{made} is not there", out)
+                self.assertNotIn(mirror.USE_FOLDER_STEP, out)
+                self.assertFalse(os.path.lexists(made))
+                with open(made, "wb"):
+                    pass                                          # a record at 0 bytes beside it: named with it
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                self.assertEqual(stop_names(out), f"{made} (could not be read: it is empty (0 bytes)), {mine}")
+                self.assertEqual(fread_bytes(made), b"")
+                os.remove(made)
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                if wsm:                                           # the step as printed: a folder of its own
+                    self.assertIn("The one next step: set WSM_HOME to a folder that does not exist yet, or is empty, "
+                                  "and run setup again.", out)
+                    os.environ["WSM_HOME"] = os.path.join(h.tmp, "a-new-folder")
+                else:                                             # the step as printed: moved out, setup again
+                    self.assertIn("The one next step: move those out of it (into a folder of your own, to keep them), "
+                                  "and run setup again.", out)
+                    kept = os.path.join(h.tmp, "kept-by-the-person")
+                    os.makedirs(kept)
+                    os.rename(mine, os.path.join(kept, "my-notes.txt"))
+                    mine = os.path.join(kept, "my-notes.txt")
+                full_setup(h)
+                self.assertEqual(fread(mine), "mine\n")
+        with World(self) as w:                                    # left so by uninstall --delete-copies
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            mine = os.path.join(p["data"], "my-notes.txt")
+            with open(mine, "w") as f:
+                f.write("mine\n")
+            saved = sys.stdin
+            sys.stdin = AtTerminal("0\n")            # its number of copies
+            try:
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.lexists(made))
+            self.assertFalse(mirror.holds_mirror(p))
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            self.assertEqual(stop_names(out), mine)
+            self.assertIn("The one next step: set WSM_HOME to a folder that does not exist yet", out)
+            os.environ["WSM_HOME"] = os.path.join(h.tmp, "a-new-folder")
+            full_setup(h)
+            self.assertEqual(fread(mine), "mine\n")
+
+    def test_G6_29_a_folder_of_the_skills_that_cannot_be_entered_is_never_said_as_an_absence(self):
+        """M167 (G6.29; found 2026-11-26 in a reading of the code, then seen at command level in made homes): the
+        readers began with os.path.lexists, which answers False for any error, so with the settings folder at mode
+        000 status and sync said "Run setup first", key set and config include ended in a traceback, and with the data
+        folder at mode 000 config include wrote the settings file, then ended in a traceback. Now "not there" is said
+        only when the system said the name is not there; every other error is "could not be read", with the error's
+        class and the folder that could not be entered. Each folder of the skill's (WSM_HOME's, data, settings, keys)
+        at mode 000: every command stops first, exit 2, naming the folder, and nothing in the made home changes; the
+        step as printed (a chmod line) is run in a shell, and the command then goes on. The readers' own answers, by
+        name. A folder another account owns (as a run with sudo leaves it) gives a chown line, the account's number stood
+        in for here (NOT SEEN BY US here; seen on a stock Ubuntu guest, the walk's world 3)."""
+        if os.geteuid() == 0:
+            self.skipTest("root enters every folder whatever its mode")
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            for pr in h.procs:                        # the forge stopped, so the whole made home holds still
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            h.forge_follows = False
+            commands = (["status"], ["sync"], ["key", "set", "someone"], ["config", "include", "someone/a"],
+                        ["setup", "--dry-run"], ["left-out"], ["go"], ["restore", "--check"], ["uninstall"])
+            for folder in (os.environ["WSM_HOME"], p["data"], p["conf"], p["keys"]):
+                before = made_home_tree(h, p)
+                mode = os.stat(folder).st_mode & 0o7777
+                os.chmod(folder, 0)
+                try:
+                    for cmd in commands:
+                        with self.subTest(folder=folder, cmd=cmd):
+                            saved = sys.stdin
+                            sys.stdin = io.StringIO(w.gh.key + "\n")
+                            kept_env = {k: os.environ[k] for k in mirror.TEST_SETTINGS if k in os.environ}
+                            try:
+                                rc, out = quiet(mirror.main, cmd)
+                            finally:
+                                sys.stdin = saved
+                                # with WSM_HOME's folder shut the suite's marker cannot be read, so the tool drops
+                                # its test-only settings, as it must; they are given back for the next command
+                                os.environ.update(kept_env)
+                            self.assertEqual(rc, 2, out)
+                            last = out.strip().split("\n")[-1]
+                            name = cmd[0] + (" set" if cmd[0] == "key" else "")
+                            self.assertEqual(last, f"Stopped: {folder} is a folder of the skill's that this account "
+                                             "cannot read, write and enter (it is yours, and its mode does not let "
+                                             f"you), so {name} cannot read what is kept there, and changes nothing: "
+                                             "nothing was copied, written or taken away. The one next step: give it "
+                                             f"back its mode: chmod u+rwx {shlex.quote(folder)}; then run the same "
+                                             "command again.")
+                            for never in ("Run setup first", "Traceback", "not there", "has not run"):
+                                self.assertNotIn(never, out)
+                finally:
+                    step = last.split("give it back its mode: ", 1)[1].split("; then run", 1)[0]
+                    ran = subprocess.run(step, shell=True, capture_output=True, text=True)   # the step, as printed
+                    if ran.returncode:
+                        os.chmod(folder, mode)
+                self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+                os.chmod(folder, mode)        # chmod u+rwx gives the person's bits back; the skill made it 0700
+                self.assertEqual(made_home_tree(h, p), before)
+                rc, out = quiet(mirror.main, ["left-out"])
+                self.assertEqual(rc, 0, out)
+            # the readers' own answers, by name
+            keyf = mirror.key_path(p, "someone")
+            for f, read in ((p["settings"], mirror.kept_read), (p["state"], mirror.kept_read),
+                            (keyf, mirror.key_file_read), (p["mirror_key"], mirror.key_file_read),
+                            (p["app_ini"], lambda _f: mirror.forge_ini_read(p))):
+                d = os.path.dirname(f)
+                mode = os.stat(d).st_mode & 0o7777
+                os.chmod(d, 0)
+                try:
+                    self.assertEqual(read(f), ("could not be read", "it could not be opened (PermissionError): the "
+                                                                     f"folder {d} could not be entered"))
+                finally:
+                    os.chmod(d, mode)
+            gone = os.path.join(p["conf"], "not-a-file.json")
+            self.assertEqual(mirror.kept_read(gone), ("not there", None))
+            os.symlink(os.path.join(h.tmp, "nowhere"), gone)
+            self.assertEqual(mirror.kept_read(gone), ("could not be read", "it is a link to a file that is not there"))
+            os.remove(gone)
+            os.makedirs(gone)
+            self.assertEqual(mirror.kept_read(gone), ("could not be read", "it could not be opened (IsADirectoryError)"))
+            os.rmdir(gone)
+            os.remove(p["mirror_key"])                 # an absent key file is said as absent, never as a failed read
+            with self.assertRaises(mirror.KeptUnread) as e:
+                mirror.Forge(p, mirror.load_state(p))
+            self.assertEqual(str(e.exception), f"{p['mirror_key']} is not there")
+            rc, out = quiet(mirror.main, ["status"])           # (status says it as setup not finished: its step)
+            self.assertEqual(out.strip().split("\n")[-1], "Run setup first.")
+        real = os.getuid
+        try:                                           # another account owns it: the uid stood in for
+            mirror.os.getuid = lambda: real() + 1
+            why, step = mirror.folder_step(os.path.dirname(SCRIPT))
+        finally:
+            mirror.os.getuid = real
+        self.assertEqual(why, "another account owns it, as one run of the skill with sudo leaves it")
+        self.assertTrue(step.startswith("give it back to your account, as an administrator of this computer: sudo "
+                                        f"chown -R {shlex.quote(mirror.getpass.getuser())} "), step)
+
     def test_G6_25_the_way_back_is_taken_only_once_no_stop_of_setups_is_left(self):
         """M158 (G6.25; seen 2026-11-26 on a stock Ubuntu 24.04 guest, real systemd 255, walk6 (C)): setup
         --use-this-folder set the record aside and wrote a new one, then stopped on lingering not yet chosen with
@@ -6028,8 +6219,8 @@ class G6(unittest.TestCase):
             saved = mirror.linger_state
             mirror.linger_state = lambda: "no"
             try:
-                rc, out = h.setup("--use-this-folder", choose=False)
-            finally:
+                rc, out = h.setup("--use-this-folder", choose=False)   # the line exactly as printed, to its next
+            finally:                                                    # stop (lingering not yet chosen)
                 mirror.linger_state = saved
             self.assertEqual(rc, 2, out)
             self.assertIn(mirror.LINGER_CHOICE, out)
@@ -8382,7 +8573,7 @@ class G9(unittest.TestCase):
                                     continue
                             if text == "[Service]\n" and mirror.system()[0] != "darwin":
                                 # M153 (G9.17): on Linux the unit opens and systemd shows no start line: it runs
-                                # nothing, so it is no other install; the file is not as the skill wrote it (rule 23):
+                                # nothing, so it is no other install; the file is not as the skill wrote it, so never written over:
                                 # setup stops with the move, uninstall names it, leaves it, and goes to its end
                                 self.assertNotIn("read that file", out)
                                 self.assertIn("not as the skill wrote it", out)
@@ -9200,6 +9391,22 @@ class G9(unittest.TestCase):
                                           f"{os.path.basename(forge)} does not exist.)", said[0])
                             self.assertTrue(said[0].endswith(f"rm {shlex.quote(link)}"), said[0])
                             self.assertTrue(os.path.islink(link))
+                            # the line as printed, run as a person pastes it into a shell: the link goes, and a
+                            # second uninstall says nothing of it
+                            ran = subprocess.run(said[0].rsplit("when you want: ", 1)[1], shell=True,
+                                                 capture_output=True, text=True)
+                            self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+                            self.assertFalse(os.path.lexists(link))
+                            rc2, out2 = quiet(mirror.main, ["uninstall"])
+                            self.assertNotIn("default.target.wants", out2)
+                            # a path holding a backtick or a dollar-parenthesis gets no line to run
+                            for odd in ("a" + chr(96) + "b", "a$" + chr(40) + "b)"):
+                                bad = os.path.join(h.tmp, odd, "default.target.wants", os.path.basename(forge))
+                                words = mirror.link_left_line(bad, mirror.SERVICE, "said")
+                                self.assertNotIn("rm ", words)
+                                self.assertNotIn(chr(96), words)
+                                self.assertNotIn("$" + chr(40), words)
+                                self.assertIn("so no line is given", words)
                         if world.startswith("Q"):
                             self.assertFalse(timer_off, (offs, out))
                             self.assertIn(mirror.SYNC_UNIT + ".timer", h.units_up)

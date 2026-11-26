@@ -149,10 +149,12 @@ def load_json(path, default):
 
 class KeptUnread(Exception):
     """A file the tool keeps that is there and could not be read (its third answer): the command stops before it
-    changes anything, naming the file, where the read stopped, and one step a person can take (rule 6)."""
+    changes anything, naming the file, where the read stopped, and one step a person can take."""
 
     def __init__(self, path, why):
-        super().__init__(f"{path} could not be read: {why}")
+        # why None: a file the command needs that is not there (the system said so); said as that, never as a read
+        self.said = "is not there" if why is None else f"could not be read: {why}"
+        super().__init__(f"{path} {self.said}")
         self.path, self.why = path, why
 
 
@@ -160,17 +162,59 @@ def json_kind(v):
     return {list: "list", str: "string", bool: "true or false", type(None): "null"}.get(type(v), "number")
 
 
+def blocked_folder(path):
+    """The first folder on a path's road that this account may not enter (search), or None. Named in a failed read's
+    why, so a folder at mode 000, or one another account owns (left by a run with sudo), is said as that."""
+    road, d = [], os.path.dirname(os.path.abspath(path))
+    while True:
+        road.append(d)
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    for d in reversed(road):
+        if not os.path.isdir(d):
+            return None
+        if not os.access(d, os.X_OK):
+            return d
+    return None
+
+
+def opened_why(path, e):
+    """Why a kept file could not be opened: the error's class, and the folder that could not be entered when that is
+    the cause; never a byte of the file."""
+    why = f"it could not be opened ({type(e).__name__})"
+    d = blocked_folder(path) if isinstance(e, PermissionError) else None
+    return why + (f": the folder {d} could not be entered" if d else "")
+
+
+def open_kept(path):
+    """A kept file's bytes with its three answers: ('read', the bytes); ('not there', None) only when the system
+    itself said the name is not there (the open's own FileNotFoundError, and no link by that name); else ('could not
+    be read', why). Any other error (a folder that cannot be entered, a name that is a folder) is never said as an
+    absence."""
+    try:
+        with open(path, "rb") as f:
+            return "read", f.read()
+    except FileNotFoundError:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return "not there", None
+        except OSError as e:
+            return "could not be read", opened_why(path, e)
+        return "could not be read", "it is a link to a file that is not there"
+    except OSError as e:
+        return "could not be read", opened_why(path, e)
+
+
 def kept_read(path):
     """M151, M154, M157 (G3.19, G6.21, G6.24): a kept JSON file's three answers: ('read', the object), ('not
     there', None), or ('could not be read', why). Never taken as empty, never written over on that answer. The why
     names the error's class or where the parser stopped (line, column), never a byte or a value of the file."""
-    if not os.path.lexists(path):
-        return "not there", None
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    answer, data = open_kept(path)
+    if answer != "read":
+        return answer, data
     if not data.strip():
         return "could not be read", "it is empty (0 bytes)" if not data else "it holds only blank space"
     try:
@@ -236,9 +280,9 @@ def write_private(path, text):
 
 def put_whole(path, text, mode):
     """M161 (G4.10): written whole under a temporary name of this write's own, then put in place, so two writes of
-    one file at once never meet in one temporary file: the file holds one writer's bytes, whole. Rule 28: the
-    temporary file is made new (never one left by an earlier run) with its own mode, before a byte is written,
-    whatever the umask."""
+    one file at once never meet in one temporary file: the file holds one writer's bytes, whole. Whatever the umask, the
+    temporary file is made new (never one left by an earlier run) with its own mode, before a byte is written, so no
+    other account can read a key in it."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
@@ -334,12 +378,12 @@ def read_made(p):
     --use-this-folder made a new one); a record that could not be read is never taken as empty, and its why names
     where the read stopped, never a byte of it."""
     f = os.path.join(p["data"], MADE_RECORD)
-    if not os.path.lexists(f):
+    answer, got = kept_read(f)
+    if answer == "not there":
         if (_made_start["fresh"] is False and not _made_start["use"]
                 and _made_start["data"] == os.path.abspath(p["data"])):
             return None, f"{f} is not there"
         return {}, None
-    answer, got = kept_read(f)
     if answer != "read":
         return None, f"{f} could not be read: {got}"
     made = got.get("made") or {}
@@ -504,7 +548,7 @@ def take_folder_on(p, lost, rec):
         "deleted or written over.")
     took = sorted(k for k, v in rec.items() if v != "dir" and v != "set-aside record")
     left = not_ours(p, rec)
-    say(f"Taken on as the skill's ({len(took)}), by name; each goes with uninstall as the skill's own:")
+    say(f"Taken on as the skill's ({len(took)}), each named here, and each goes with uninstall as the skill's own:")
     for k in took:
         say(f"  {k}" + (" (the forge's own folder, with the copies)" if rec[k] == "tree:forge" else
                         " (a cache of one copy)" if rec[k] == "tree:git" else ""))
@@ -950,8 +994,16 @@ def home_is_not_ours(p, use=False, dry=False):
             "it would without it." if not lost else
             f"{p['data']} holds no mirror (no forge settings file at {p['app_ini']}, and no forge data folder), so "
             "there is nothing of a mirror's to go on with; setup goes on as it would without it."))
+    record_unread = []
     if rec is None:
         rec, why = read_made(p)
+        if rec is None:
+            # No mirror here (holds_mirror is False), so nothing of the skill's is lost with the record: each entry
+            # in its folders is named by its path, as one the skill did not make, and a record that is there but
+            # could not be read is named with them (it is moved out with them; nothing is deleted or written over)
+            rec = {}
+            if not why.endswith(" is not there"):
+                record_unread = [why.replace(" could not be read: ", " (could not be read: ", 1) + ")"]
     states = {f: service_file_state(p, rec, f) for f in service_files(p) if os.path.lexists(f)}
     unread = [(f, w) for f, (a, w) in states.items() if a == "could not be read"]
     if unread:
@@ -970,7 +1022,7 @@ def home_is_not_ours(p, use=False, dry=False):
                     ", and not as the skill wrote it (it was changed since, or something else wrote it)")
                 + ", so setup does not write over it. Nothing was changed. The one next step: move it out of that "
                 "folder, and run setup again.")
-    others = not_ours(p, rec)
+    others = record_unread + not_ours(p, rec)
     if taken_on:
         # M158 (the owner's ruling, 11-26): on the way back, what setup does not take on stays where it is and is
         # named as the person's; only an entry at a place setup itself writes stops it (never written over)
@@ -1178,13 +1230,9 @@ def forge_ini_read(p):
     """M159 (G6.26): the forge's settings file's three answers: ('read', None), ('not there', None) or ('could not
     be read', why); the why names the error's class or the setting that is missing, never a value of the file."""
     f = p["app_ini"]
-    if not os.path.lexists(f):
-        return "not there", None
-    try:
-        with open(f, "rb") as fh:
-            data = fh.read()
-    except OSError as e:
-        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    answer, data = open_kept(f)
+    if answer != "read":
+        return answer, data
     try:
         data.decode("utf-8")
     except UnicodeDecodeError:
@@ -2431,13 +2479,9 @@ FORGE_KEY_FORM = re.compile(r"^[0-9a-f]{40}$")
 def key_file_read(path, form=None):
     """M155, M156 (G6.22, G6.23): a kept key file's three answers: ('read', the key), ('not there', None), or ('could
     not be read', why). The why names the error's class or what is wrong with its form, never a byte of it."""
-    if not os.path.lexists(path):
-        return "not there", None
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    answer, data = open_kept(path)
+    if answer != "read":
+        return answer, data
     try:
         key = data.decode("utf-8").strip()
     except UnicodeDecodeError:
@@ -2976,7 +3020,7 @@ class Forge:
         self.base = f"http://127.0.0.1:{st['port']}"
         answer, got = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
         if answer != "read":                    # M155, M156: said as that, with its one step; never "does not answer"
-            raise KeptUnread(p["mirror_key"], got or "it is not there")
+            raise KeptUnread(p["mirror_key"], got if answer == "could not be read" else None)
         self.key = got
         self.user = st.get("mirror_user", MIRROR_USER)
 
@@ -3645,13 +3689,19 @@ def cmd_sync(args):
 
 
 def kept_step(p, e):
-    """Rule 6's one step for a kept JSON file that could not be read (KeptUnread): the file is moved out of its
+    """The one step for a kept file that could not be read (KeptUnread): the file is moved out of its
     folder, by the person, and what it held is chosen again or found again; never written over by the tool."""
+    blocked = blocked_folder(e.path)
+    if blocked:
+        return f"{blocked} cannot be entered ({folder_step(blocked)[0]}); {folder_step(blocked)[1]}"
     d = os.path.dirname(e.path)
     move = f"move that file out of {d} (into a folder of your own, to keep it)"
     if e.path == p["settings"]:
-        owners = sorted(f[:-4] for f in (os.listdir(p["keys"]) if os.path.isdir(p["keys"]) else [])
-                        if f.endswith(".key") and OWNER_RE.match(f[:-4]))
+        try:
+            names = os.listdir(p["keys"])
+        except OSError:             # not there, or could not be read: no owner is named, and the step still stands
+            names = []
+        owners = sorted(f[:-4] for f in names if f.endswith(".key") and OWNER_RE.match(f[:-4]))
         keys = "; ".join(own_command(p, "key", "set", o) for o in owners)
         return (f"{move}; then, if you had chosen what is copied, choose it again ({own_command(p, 'config', 'include')} "
                 f"or {own_command(p, 'config', 'exclude')}), and run key set again for each owner whose key is kept "
@@ -3677,10 +3727,72 @@ def kept_step(p, e):
     return f"{move}, then run the same command again"
 
 
+def folder_step(d):
+    """(why, the one step) for a folder of the skill's that this account cannot read, write and enter: it is given
+    back to the person by its owner. Never a move of a file inside it (the person cannot reach one), never a write by
+    the tool. A command is printed only for a path the tool prints as it is."""
+    try:
+        theirs = os.stat(d).st_uid != os.getuid()
+    except OSError:
+        theirs = False
+    if theirs:
+        cmd = f"sudo chown -R {shlex.quote(getpass.getuser())} {shlex.quote(d)}"
+        return ("another account owns it, as one run of the skill with sudo leaves it",
+                "give it back to your account, as an administrator of this computer"
+                + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)")
+                + "; then run the same command again")
+    cmd = f"chmod u+rwx {shlex.quote(d)}"
+    return ("it is yours, and its mode does not let you",
+            "give it back its mode" + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)")
+            + "; then run the same command again")
+
+
+def link_left_line(link, unit, said):
+    """M163 (walk6, 2026-11-26): the link systemctl made at setup and did not take off, named with its step. The rm
+    line is printed only for a path the tool prints as it is (no backtick, no dollar-parenthesis, no character that
+    cannot be seen), each part through shlex.quote, so the line runs nothing else when pasted."""
+    return (f"Not taken: {shown_as_is(link)}, the link systemctl made at setup so that {unit} starts by itself. "
+            f"systemctl did not take it off (it answered: {said}), so uninstall stopped the service instead, and read "
+            "it stopped; the link stays where systemctl made it. With the service's program gone it starts nothing; "
+            "delete it as you delete any file, when you want" + (
+                f": rm {shlex.quote(link)}" if shows_as_is(link) else
+                f" ({SHOWN_CHANGED} in its path, so no line is given)"))
+
+
+def folders_floor(p, cmd):
+    """M167 (G6.29): before any command reads or writes a kept file, each folder of the
+    skill's own that is there (WSM_HOME's, the data and settings folders, the keys folder) is one this account can
+    read, write and enter. Else the command stops before it reads or changes anything, naming the folder and why, so
+    a failed read is never said as an absence ("Run setup first") and never ends in a traceback. None, or the
+    stop."""
+    seen = []
+    for d in [os.environ.get("WSM_HOME"), p["data"], p["conf"], p["keys"]]:
+        if not d or os.path.abspath(d) in seen:
+            continue
+        d = os.path.abspath(d)
+        seen.append(d)
+        try:
+            st_ = os.stat(d)
+        except FileNotFoundError:
+            continue
+        except NotADirectoryError:
+            continue                  # a file where a folder goes: said by the step that reads that place
+        except OSError:
+            d = blocked_folder(os.path.join(d, "x")) or d
+        else:
+            if not stat.S_ISDIR(st_.st_mode) or os.access(d, os.R_OK | os.W_OK | os.X_OK):
+                continue
+        why, step = folder_step(d)
+        return (f"Stopped: {d} is a folder of the skill's that this account cannot read, write and enter ({why}), "
+                f"so {cmd} cannot read what is kept there, and changes nothing: nothing was copied, written or taken "
+                f"away. The one next step: {step}.")
+    return None
+
+
 def kept_stop_words(p, e, cmd):
     what = {p["settings"]: "what you chose to copy", p["state"]: "what this computer's mirror holds"}.get(
         e.path, "what that file holds")
-    return (f"Stopped: {e.path} could not be read: {e.why}. So {cmd} cannot tell {what}, and changes nothing: "
+    return (f"Stopped: {e.path} {e.said}. So {cmd} cannot tell {what}, and changes nothing: "
             f"nothing was copied, written or taken away. The one next step: {kept_step(p, e)}.")
 
 
@@ -4850,7 +4962,7 @@ def cmd_status(args):
         st = load_state(p)
         s = load_settings(p)
     except KeptUnread as e:          # M151, M154, M157: a problem line, with its one step; nothing else is read
-        say(f"problem: {e.path} could not be read: {e.why}. The one next step: {kept_step(p, e)}.")
+        say(f"problem: {e.path} {e.said}. The one next step: {kept_step(p, e)}.")
         return 1
     if set_up_misses(p, st):
         say("Run setup first.")
@@ -4861,7 +4973,7 @@ def cmd_status(args):
             raise KeptUnread(p["app_ini"], why)
         forge = Forge(p, st)
     except KeptUnread as e:          # M155, M156, M159: the forge's key or settings, said with its one step
-        say(f"problem: {e.path} could not be read: {e.why}. The one next step: {kept_step(p, e)}.")
+        say(f"problem: {e.path} {e.said}. The one next step: {kept_step(p, e)}.")
         return 1
     problems, notes = [], []
     lost = read_made(p)[1]
@@ -6208,10 +6320,7 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         link = os.path.join(os.path.dirname(p["unit"]), "timers.target.wants" if unit.endswith(".timer")
                             else "default.target.wants", unit if unit.endswith(".timer") else unit + ".service")
         if os.path.lexists(link):
-            say(f"Not taken: {link}, the link systemctl made at setup so that {unit} starts by itself. systemctl did "
-                f"not take it off (it answered: {said}), so uninstall stopped the service instead, and read it "
-                "stopped; the link stays where systemctl made it. With the service's program gone it starts "
-                f"nothing; delete it as you delete any file, when you want: rm {shlex.quote(link)}")
+            say(link_left_line(link, unit, said))
     if left_service:
         say("Not taken, and still there: " + "; ".join(left_service) + ". It is switched off; look at it, and keep "
             "or delete it as you choose.")
@@ -6361,10 +6470,15 @@ def main(argv=None):
                "Nothing of the skill's is set up on this computer; to use it, install the plugin again and run "
                "setup."))
         return 3
+    floor = folders_floor(paths(), a.cmd + (f" {a.key_cmd}" if a.cmd == "key" else ""))
+    if floor:
+        say(floor)
+        return 2
     try:
         if a.cmd not in ("uninstall", "status", "run-forge", "expose"):
-            # Rule 6 (M151, M154, M157): the kept files are read first, so a command that cannot read one stops
-            # before it changes anything. Uninstall never stops on them (rule 8); status says them in its lines.
+            # M151, M154, M157: the kept files are read first, so a command that cannot read one stops before it
+            # changes anything. Uninstall never stops on them (a leave always goes to its end); status says them in
+            # its lines.
             load_state(paths())
             load_settings(paths())
         if a.cmd in ("setup", "sync", "go", "restore", "backup", "upgrade-forge"):
@@ -6375,7 +6489,7 @@ def main(argv=None):
     except DoorShut as e:
         say(str(e))
         return 1
-    except KeptUnread as e:          # rule 6: a kept file that could not be read stops the command before any change
+    except KeptUnread as e:          # a kept file that could not be read stops the command before any change
         say(kept_stop_words(paths(), e, a.cmd))
         return 2
     finally:

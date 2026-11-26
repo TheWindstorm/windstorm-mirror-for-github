@@ -100,9 +100,11 @@ pre-push hook of yours does not check that push.
   runs stays where it is: uninstall names it as yours, with each folder that stayed because of it, and still goes
   to its end for everything that is the skill's. If that record is lost (it could not be read, or is not there)
   while the folder holds your mirror, setup and uninstall say so and take nothing; setup names the way back,
-  `setup --use-this-folder`, which is yours to type. It takes as the skill's the files under the skill's own names
-  in its own folders (the forge's program only with the pinned sum, a key file only under a name the skill gives
-  and in the form it writes), names each file it took and each it did not, and what it took goes with uninstall.
+  `setup --use-this-folder`, which is yours to type. It takes as the skill's what stands under the skill's own names
+  in its own folders: the forge's program only with the pinned sum, and a key file only under a name the skill
+  gives and in the form it writes; its state, settings and other files of its own by their place alone, each a
+  plain file; its folders and the forge's tree by their place and names. It names each file it took and each it
+  did not, and what it took goes with uninstall.
 - **The folders above it.** A file is only as closed as the folders above it. Setup reads every folder from your
   home down to what the skill runs (its service files, its own copy, the forge's program) and to what decides what
   runs (the forge's settings, the skill's settings and state, the Python its service names). A folder of the skill's
@@ -248,6 +250,10 @@ with no key; a sync and a restore on a Mac are not seen yet.
   - on a Mac where another account, an administrator, installed the developer tools, `status` ends with 1 from the
     first minute, naming the folders of the Python it runs with as problems; nothing needs doing about them, and
     0.1.1 says them as plain lines (row M149);
+  - a write of the skill's cut short (a kill, a power cut) can leave beside one of its files a temporary file named
+    like `state.json.k3x9a2.tmp` (the file's own name, a dot, random letters, `.tmp`); nothing takes it away yet.
+    `setup` stops on it among the things the skill did not make, and `uninstall` leaves it as not the skill's. One
+    beside a key file may hold that key: delete it as you delete any file of yours (row M168);
   - on a Mac, a project is not copied or refreshed while GitHub holds in it a branch or tag whose name is not UTF-8
     text, two branches or two tags whose names differ only in upper and lower case (Feature and feature), or two
     that differ only in how an accented letter is written. A Mac's disk keeps each such pair as one file, or cannot
