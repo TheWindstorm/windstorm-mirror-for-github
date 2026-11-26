@@ -19,6 +19,7 @@ import base64
 import calendar
 import fnmatch
 import plistlib
+import xml.parsers.expat
 import shlex
 import unicodedata
 import getpass
@@ -219,8 +220,21 @@ def service_files(p):
     return [p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")]
 
 
+def service_file_state(p, rec, f):
+    """M150 (a reviewer's trial, 11-26): is this service file exactly as this home wrote it (its recorded SHA-256):
+    ('yes', None), ('no', None), or ('could not be read', why) when its bytes could not be read (mode 000, an error
+    in the read). The third is never this home's (never written over, never removed) and never "not there"."""
+    if os.path.islink(f) or not os.path.isfile(f):
+        return "no", None
+    try:
+        got = sha256_of(f)
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    return ("yes" if rec is not None and rec.get(f) == "service:" + got else "no"), None
+
+
 def service_file_ours(p, rec, f):
-    return rec is not None and os.path.isfile(f) and not os.path.islink(f) and rec.get(f) == "service:" + sha256_of(f)
+    return service_file_state(p, rec, f)[0] == "yes"
 
 
 def write_made(p, rec):
@@ -551,7 +565,17 @@ def home_is_not_ours(p):
                     + ("set WSM_HOME to a folder of your own that does not exist yet" if h else
                        f"make {d} yours alone (run chmod go-w {shlex.quote(d)} as its owner)") + ", and run setup again.")
     rec, why = read_made(p)
-    changed = [f for f in service_files(p) if os.path.lexists(f) and not service_file_ours(p, rec, f)]
+    states = {f: service_file_state(p, rec, f) for f in service_files(p) if os.path.lexists(f)}
+    unread = [(f, w) for f, (a, w) in states.items() if a == "could not be read"]
+    if unread:
+        return ("Stopped: this computer already has " + "; and ".join(f"{f}, and it could not be read: {w}"
+                                                                      for f, w in unread)
+                + ". So setup cannot tell whether " + ("it is" if len(unread) == 1 else "they are") + " as the "
+                "skill wrote " + ("it" if len(unread) == 1 else "them") + ", and does not write over "
+                + ("it" if len(unread) == 1 else "them") + ". Nothing was changed. The one next step: move "
+                + ("that file" if len(unread) == 1 else "those files") + f" out of {os.path.dirname(unread[0][0])} "
+                f"(into a folder of your own, to keep it), then run {own_command(p, 'setup')}")
+    changed = [f for f, (a, _) in states.items() if a == "no"]
     if changed:
         return ("Stopped: this computer already has " + ", ".join(changed) + ", and not as the skill wrote it (it "
                 "was changed since, or something else wrote it), so setup does not write over it. Nothing was "
@@ -3503,26 +3527,68 @@ PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes
                "computer and keeps every copy current. To take it off: {command}")
 
 
+def plist_read(f):
+    """M150 (G9.15), the family's rule 6: THE one reader of a property list in the tool; every place that parses one
+    goes through it. ('read', the dict at its top), ('not there', None) or ('could not be read', where the read
+    stopped): cannot be opened, 0 bytes, cut short, not well-formed, not a property list, or a top that is not a
+    dict. Where the read stopped is the parser's line and column where it gives them, else the error's class; never
+    a byte of the file (a parser's own message can quote one, so only expat's message for its code is said)."""
+    try:
+        with open(f, "rb") as fh:
+            data = fh.read()
+    except (FileNotFoundError, NotADirectoryError):
+        return "not there", None
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    if not data:
+        return "could not be read", "it is empty (0 bytes)"
+    try:
+        top = plistlib.loads(data)
+    except xml.parsers.expat.ExpatError as e:
+        return "could not be read", (f"it is not a well-formed property list (the read stopped at line {e.lineno}, "
+                                     f"column {e.offset}: {xml.parsers.expat.ErrorString(e.code)})")
+    except Exception as e:          # every other way the parser stops (a binary list cut short, a value too large)
+        return "could not be read", f"it is not a property list this tool can read ({type(e).__name__})"
+    if not isinstance(top, dict):
+        return "could not be read", f"it holds no job: its top is {type(top).__name__}, not a dict"
+    return "read", top
+
+
+def plist_job_args(f):
+    """M150: the job's arguments in a launch agent file, through plist_read: ('read', a list of strings), ('not
+    there', None) or ('could not be read', where the read stopped). Arguments that are not a list of words are
+    "could not be read", never a job of anyone's."""
+    answer, got = plist_read(f)
+    if answer != "read":
+        return answer, got
+    args = got.get("ProgramArguments")
+    if not isinstance(args, list) or not args or not all(isinstance(w, str) for w in args):
+        return "could not be read", "its ProgramArguments is not a list of words"
+    return "read", args
+
+
 def other_install(p):
     """G9.12: the service file this computer has for the skill, when it runs another home's copy than p's.
-    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file).
+    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file;
+    M150: where the read of the file stopped, when launchd has not loaded the job and the file itself could not be
+    read, else "").
     G1.24: what it runs is read as the service manager parsed it (systemd over its bus; launchd's loaded job, or,
     when launchd has not loaded it, the file's own strings as the property-list format gives them), never by a
     pattern over the file's text."""
     f = p["plist"] if system()[0] == "darwin" else p["unit"]
     if not os.path.exists(f):
         return None
-    if service_file_ours(p, read_made(p)[0], f):     # this home wrote these very bytes: its own, whatever is parsed
+    state, unread = service_file_state(p, read_made(p)[0], f)
+    if state == "yes":                               # this home wrote these very bytes: its own, whatever is parsed
         return None
     argv = None
     if system()[0] == "darwin":
-        got = launchd_parsed(LAUNCHD_LABEL)
+        got = launchd_held(LAUNCHD_LABEL)
         if got == "absent":
-            try:
-                with open(f, "rb") as fh:
-                    got = (plistlib.load(fh)["ProgramArguments"], None)
-            except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
-                got = None
+            answer, got = plist_job_args(f)
+            if answer != "read":
+                return "", f, got if answer == "could not be read" else "it went while it was read"
+            got = (got, None)
         if isinstance(got, tuple) and isinstance(got[0], list) and all(isinstance(w, str) for w in got[0]):
             argv = got[0]
     else:
@@ -3530,18 +3596,51 @@ def other_install(p):
         if got and len(got[0]) == 1:
             argv = got[0][0][1:]
     if argv is None:
-        return "", f
+        # M152: where the service manager's answer could not be read and the tool's own reader could not read the
+        # file either, the stop's step is the one that can be taken (move it out), never "read that file"
+        if state != "could not be read" and system()[0] == "darwin":
+            answer, why = plist_job_args(f)
+            unread = why if answer == "could not be read" else None
+        return "", f, unread or ""
     if argv[1:] == ["-I", p["script"], "run-forge"]:
         return None
-    return (argv[2] if len(argv) == 4 and argv[1] == "-I" and argv[3] == "run-forge" else ""), f
+    return (argv[2] if len(argv) == 4 and argv[1] == "-I" and argv[3] == "run-forge" else ""), f, ""
 
 
-def other_install_stop(p, cmd):
-    """Setup and uninstall do nothing against another home's install: said with the home it uses and one step."""
-    found = other_install(p)
+def launchd_held(label):
+    """M152 (G9.16, seen in a stand-in trial in a made home, not on a Mac): launchd_parsed, but where this account's
+    domain answers LAUNCHD_NO_SCREEN (no login at the Mac's screen), read as launchd_off reads it: nothing of this
+    account is loaded, so the job counts as not held ("absent") and the file's own words decide. Only that answer:
+    every other answer launchd_parsed could not read stays None (G9.12's stop)."""
+    got = launchd_parsed(label)
+    if got is None and mac_no_screen():
+        return "absent"
+    return got
+
+
+def job_is_ours(p, label, args):
+    """M150: a loaded job launchd shows running this home's own copy of the skill, argument by argument after the
+    interpreter (forge_argv, sync_argv)."""
+    want = forge_argv(p) if label == LAUNCHD_LABEL else sync_argv(p)
+    return isinstance(args, list) and args[1:] == want[1:]
+
+
+def other_install_stop(p, cmd, found="read it"):
+    """Setup and uninstall do nothing against another home's install: said with the home it uses and one step.
+    M150: a launch agent file at the skill's path that could not be read stops setup with the one step that can be
+    taken (it is moved out of that folder); uninstall is not stopped by it (rule 8), and goes on within its limit."""
+    found = other_install(p) if found == "read it" else found
     if not found:
         return None
-    script, f = found
+    script, f, unread = found
+    if unread:
+        if cmd == "uninstall":
+            return None
+        kind = "a launch agent file" if system()[0] == "darwin" else "a service file"
+        return (f"Stopped: this computer already has {kind} at the skill's path ({f}), and it could not "
+                f"be read: {unread}. So {cmd} cannot tell whose it is: this home's, another home's, or something "
+                f"else's. Nothing was changed. The one next step: move that file out of {os.path.dirname(f)} (into a "
+                f"folder of your own, to keep it), then run {own_command(p, cmd)}")
     if not script:
         return (f"Stopped: this computer already has the skill's service ({f}), and which copy of the skill it runs "
                 f"could not be read, so {cmd} cannot tell whether it is this one ({p['script']}). Nothing was "
@@ -4216,12 +4315,28 @@ def cmd_status(args):
                         "this computer says" if shut_kind == "other" else
                         f"a program answers on port {st['port']} at {a}; whether it is this mirror's forge could not "
                         "be read")
+    rec_s = read_made(p)[0]
+    for f in service_files(p):                      # M150: a service file whose bytes could not be read, any road
+        if os.path.lexists(f) and service_file_state(p, rec_s, f)[0] == "could not be read":
+            problems.append(f"the service file {f} could not be read: {service_file_state(p, rec_s, f)[1]}, so this "
+                            "tool cannot tell whether it is as setup wrote it, and never writes over it or removes it. "
+                            f"The one next step: move that file out of {os.path.dirname(f)} (into a folder of your "
+                            f"own, to keep it), then run {own_command(p, 'setup')}")
     if not no_screen:                               # G1.24: what the manager parsed, read now
         reads = {which: service_read(p, which) for which in ("forge", "sync")}     # each read once
         for which, (held, _, parts) in reads.items():
             if held in ("differs", "unread", "unrecorded"):
                 problems.append(read_back_words(which, held, not_set_up(held), read_back_step(which, held, "status"),
                                                 parts))
+            elif held == "absent" and system()[0] == "darwin":
+                # M150: the job's file, read by the one reader when launchd holds no job; one line, never a traceback
+                f = p["plist"] if which == "forge" else os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+                answer, why = plist_job_args(f)
+                if answer == "could not be read" and not any(f in x for x in problems):
+                    problems.append(f"the {which}'s launch agent file {f} could not be read: {why}, so this tool "
+                                    "cannot tell whose it is, and launchd holds no job for it now. The one next step: "
+                                    f"move that file out of {os.path.dirname(f)} (into a folder of your own, to keep "
+                                    f"it), then run {own_command(p, 'setup')}")
         warn = theirs_line(p, reads)
         if warn:
             notes.append("note: " + warn)
@@ -5034,7 +5149,11 @@ def cmd_uninstall(args):
     """G9.3: everything but the folder of copies goes; that folder goes only on the person's typed word, typed
     at a terminal (it cannot be undone, so nothing piped in counts)."""
     p = paths()
-    other = other_install_stop(p, "uninstall")
+    found = other_install(p)
+    # M150: a launch agent file at the skill's path that could not be read never keeps a person from leaving; while
+    # it stands, uninstall takes off and removes only what it can show to be this home's own (below).
+    limit = found if found and found[2] else None
+    other = None if limit else other_install_stop(p, "uninstall", found)
     if other:
         say(other)
         return 2
@@ -5064,15 +5183,40 @@ def cmd_uninstall(args):
             say(f"Not now: a sync is still running (process {lock_holder(p)}) after {UNINSTALL_WAIT // 60} minutes, "
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
-    removed, linger_said, left_service, foreign, unreadable = [], "", [], [], None
+    removed, linger_said, left_service, foreign, unreadable, kept, told = [], "", [], [], None, [], []
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
             # G1.17 and the family's rule 30: both jobs are told off and read first; while either is not read gone,
             # nothing at all is removed (a job launchd still holds would go on starting a program taken from it).
-            jobs = [(plist, words, *launchd_off(p, label)) for label, plist, words in (
-                (LAUNCHD_LABEL, p["plist"], "the forge's job"),
-                (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"), "the sync's job"))]
+            # M150: while the forge's file could not be read, a job is told off only when launchd shows it running
+            # this home's own copy; any other loaded job is named and left loaded, and its file left with it.
+            # A job launchd could not answer for is "could not be read" (a reviewer's trial, 11-26): never "loaded",
+            # never left while the rest goes; nothing is told off until every job is read.
+            both = ((LAUNCHD_LABEL, p["plist"], "the forge's job"),
+                    (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"), "the sync's job"))
+            held = {label: launchd_held(label) for label, _, _ in both} if limit else {}
+            unread_jobs = [f"{words} ({label})" for label, _, words in both if limit and held[label] is None]
+            if unread_jobs:
+                again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                say("Not now: whether launchd holds " + " and ".join(unread_jobs) + ", and what "
+                    + ("it runs" if len(unread_jobs) == 1 else "they run") + f", could not be read, and {limit[1]} "
+                    f"could not be read either ({limit[2]}), so uninstall cannot show what is this home's. Nothing "
+                    f"was removed and nothing was taken off. The one next step: move {limit[1]} out of "
+                    f"{os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run uninstall "
+                    f"again: {again}")
+                return 3
+            jobs = []
+            for label, plist, words in both:
+                got = held.get(label)
+                if limit and got == "absent":
+                    jobs.append((plist, words, "gone", 0.0, 113))
+                elif limit and not job_is_ours(p, label, got[0]):
+                    kept.append(f"{words} ({label}), loaded in launchd, which runs another copy than this home's, "
+                                f"and its file {plist}")
+                else:
+                    jobs.append((plist, words, *launchd_off(p, label)))
+                    told.append(words)
             if any(answer != "gone" for _, _, answer, _, _ in jobs):
                 said = []
                 for plist, words, answer, waited, code in jobs:
@@ -5084,6 +5228,8 @@ def cmd_uninstall(args):
                 say("Not now: " + "; ".join(said) + f". Nothing was removed. Run uninstall again in a minute: {again}")
                 return 3
             for plist, _, _, _, _ in jobs:
+                if limit and plist == limit[1]:
+                    continue                    # M150: named on its own below, and left byte for byte
                 take_service_file(p, plist, removed, left_service)
         else:
             # G1.18 and the family's rule 30: every unit is told to stop and read stopped first; while one is not,
@@ -5106,8 +5252,11 @@ def cmd_uninstall(args):
                     f"from a login of your own to this computer, such as ssh or a terminal at the screen: {again}"
                     if no_bus else f"Run uninstall again in a minute: {again}"))
                 return 3
+            told += [words for words, _, _, _ in units]
             base = os.path.dirname(p["unit"])
             for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
+                if limit and f == limit[1]:
+                    continue                    # M150: named on its own below, and left byte for byte
                 take_service_file(p, f, removed, left_service)
             run(["systemctl", "--user", "daemon-reload"])
             if st.get("linger_by_setup"):
@@ -5155,7 +5304,8 @@ def cmd_uninstall(args):
         take_data(p, removed, "the skill's folder", None)
     if record == "read":
         take_made_folders(st, removed)
-    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service)
+    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
+                     unread_service=limit, kept_jobs=kept, told_off=told)
     return rc
 
 
@@ -5185,7 +5335,11 @@ def take_service_file(p, f, removed, left):
     if not os.path.lexists(f):
         return
     rec, why = read_made(p)
-    if service_file_ours(p, rec, f):
+    state, unread = service_file_state(p, rec, f)
+    if state == "could not be read":
+        left.append(f"{f} (it could not be read: {unread}, so the tool could not tell whether it is as the skill "
+                    "wrote it; left byte for byte)")
+    elif state == "yes":
         os.remove(f)
         removed.append(f)
         if rec is not None and os.path.exists(p["data"]):
@@ -5330,7 +5484,7 @@ def stayed_for(p, foreign):
 
 
 def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
-                     left_service=()):
+                     left_service=(), unread_service=None, kept_jobs=(), told_off=()):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
     it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
@@ -5353,10 +5507,21 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
             say("Folders of the skill's that stayed because they hold those:")
             for d in sorted(held):
                 say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
+    if (left_service or unread_service) and told_off:
+        say("Switched off first, and read off before anything was removed: " + "; ".join(told_off) + ".")
     if left_service:
         say("Not taken, and still there: " + "; ".join(left_service) + ". It is switched off; look at it, and keep "
             "or delete it as you choose.")
-    if not removed and not unreadable and not foreign and not left_service:
+    if kept_jobs:
+        say("Left as they are, because the tool cannot show them to be this home's: " + "; ".join(kept_jobs) + ".")
+    if unread_service:
+        f, why = unread_service[1], unread_service[2]
+        say(f"Not taken, and left byte for byte: {f}. It could not be read: {why}, so the tool could not tell whose "
+            f"it is. It is still in {os.path.dirname(f)}, "
+            + ("the folder launchd reads at a login" if system()[0] == "darwin" else
+               "the folder systemd reads this account's services from") + "; look at it, and keep or delete it as you "
+            "choose.")
+    if not removed and not unreadable and not foreign and not left_service and not unread_service and not kept_jobs:
         say("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and the keys were "
             "already gone.")
     if linger_said:
@@ -5388,7 +5553,10 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         say("Still on this computer, and not uninstall's to take:")
         for x in left:
             say(f"  {x}")
-    if foreign or left_service or unreadable:
+    if kept_jobs:
+        say("What uninstall could not show to be this home's is named above, and was left as it is; it is yours, "
+            "to keep or delete after you look at it.")
+    elif foreign or left_service or unreadable or unread_service:
         say("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or delete "
             "after you look at it.")
 

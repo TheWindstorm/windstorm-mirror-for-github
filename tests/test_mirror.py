@@ -299,7 +299,8 @@ class Home:
         # bus_answer: (code, stdout) every busctl call answers instead, when set; bus_starts: the start lines every
         # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
         self.bus_answer, self.bus_starts, self.bus_objs = None, None, {}
-        self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set
+        self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set; or
+                                     # {label: (arguments, environment) or None} per job (M150)
         self.launchd_form = None     # a loaded job's whole print block instead, when set (recorded or MADE UP: each
                                      # test names which)
         self.bus_env_extra = []      # Environment entries a person's own drop-in adds to every unit (rule 31 (v.5) (3))
@@ -386,8 +387,13 @@ class Home:
         same day on GitHub's macOS 15.7.9, 15.8.2, 26.6.1 and 26.7.2 (tests/launchd-print): one argument to a line
         after two tabs; the inherited and default environment blocks; then the job's own environment block,
         launchd's OSLogRateLimit first (not on 15) and its XPC_SERVICE_NAME last around the file's variables."""
-        if self.launchd_args is not None:
-            args, env = self.launchd_args
+        given = self.launchd_args
+        if isinstance(given, dict):         # per label: (arguments, environment), or None for a print with no blocks
+            if label in given and given[label] is None:
+                return ""                   # (launchd_parsed: could not be read; such a print is MADE UP, not seen)
+            given = given.get(label)
+        if given is not None:
+            args, env = given
         else:
             base = os.path.dirname(mirror.paths()["plist"])
             f = os.path.join(base, label + ".plist")
@@ -396,13 +402,17 @@ class Home:
             try:
                 with open(f, "rb") as fh:
                     pl = plistlib.load(fh)
-            except (plistlib.InvalidFileException, ValueError):
-                # A file that is not a plist: the stand-in answers it as it answers no file, with no blocks. What
-                # launchctl print gives for a label whose file is not a plist is NOT SEEN BY US.
+            except Exception:
+                # A file that is not a plist (M150: any way the parser stops, expat's not-well-formed among them, which
+                # is not a ValueError): the stand-in answers it as it answers no file, with no blocks, and never
+                # raises where the tool would answer. What launchctl print gives for a label whose file is not a
+                # plist is NOT SEEN BY US.
                 return ""
             if not isinstance(pl, dict):                # a file with no job in it (a bare <plist/>): no block
                 return ""
             args, env = pl.get("ProgramArguments") or [], pl.get("EnvironmentVariables") or {}
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not isinstance(env, dict):
+                return ""                               # M150: arguments that are not a list of words: no block
         own = {"OSLogRateLimit": "64", **env, **self.launchd_env_extra}
         own["XPC_SERVICE_NAME"] = label
         return (f"gui/{os.getuid()}/{label} = {{\n\tactive count = 1\n\ttype = LaunchAgent\n\tstate = running\n\n"
@@ -436,7 +446,12 @@ class Home:
             return done(0, json.dumps({"type": "o", "data": [obj]}) + "\n")
         if cmd[3] == "get-property" and cmd[5] in self.bus_objs:
             f = os.path.join(os.path.dirname(mirror.paths()["unit"]), self.bus_objs[cmd[5]])
-            text = fread(f) if os.path.exists(f) else ""
+            try:
+                text = fread(f) if os.path.exists(f) else ""
+            except OSError:
+                # M150: a unit file the manager cannot open is answered as one with no start line, never a raise; what
+                # systemd answers for a unit file of mode 000 that it has not loaded is NOT SEEN BY US
+                text = ""
             starts, env = sd_standin_unit(text, self.env["HOME"])
             if cmd[7] == "ExecStart":
                 return done(0, json.dumps({"type": "a(sasbttttuii)",
@@ -706,12 +721,13 @@ def http_get(url, key=None):
         return e.code, e.headers, e.read().decode()
 
 
-def doors_the_hosts_way(real_system):
+def doors_the_hosts_way(real_system, always=False):
     """A Mac runner standing in for Linux has no /proc/net/tcp (seen on GitHub's Mac runners at 649ee99 for G1.9,
     and at 38590cc for G1.24): setup's door floor and door read then run for real the Mac's own way (netstat), as
-    G1.9 does. Returns the pair to put back."""
+    G1.9 does. always: the same for a Linux runner standing in for a Mac (M150: the Mac's road on every leg), whose
+    netstat is not a Mac's. Returns the pair to put back."""
     saved = mirror.read_door, mirror.door_floor
-    if os.path.exists(mirror.PROC_TCP[0]):
+    if os.path.exists(mirror.PROC_TCP[0]) and not always:
         return saved
 
     def the_hosts_way(read):
@@ -7412,65 +7428,87 @@ class G9(unittest.TestCase):
                 return mirror.plist_text(q) if mirror.system()[0] == "darwin" else mirror.unit_text(q)
             finally:
                 os.environ["WSM_HOME"] = was
-        with Home() as h:
-            p = mirror.paths()
-            f = p["plist"] if mirror.system()[0] == "darwin" else p["unit"]
-            os.makedirs(os.path.dirname(f), exist_ok=True)
-            other = os.path.join(h.tmp, "other home")
-            for q in (mirror.paths(other), mirror.paths(None)):         # each service's copy is there, as it runs (M144)
-                os.makedirs(os.path.dirname(q["script"]), exist_ok=True)
-                shutil.copyfile(SCRIPT, q["script"])
-            for text, want in ((service_text(other), f"WSM_HOME={shlex.quote(other)} python3 -I "
-                                f"{shlex.quote(mirror.paths(other)['script'])}"),
-                               (service_text(None), "unset WSM_HOME, then run python3 -I "
-                                f"{shlex.quote(mirror.paths(None)['script'])}"),
-                               ("[Service]\n", "could not be read")):
-                with open(f, "w") as fh:
-                    fh.write(text)
-                for cmd in (["setup", "--linger"], ["setup", "--dry-run"], ["uninstall"]):
-                    rc, out = quiet(mirror.main, cmd)
-                    self.assertEqual(rc, 2, (cmd, out))
-                    self.assertIn("Nothing was changed.", out)
-                    self.assertIn(want, out)
-                    self.assertEqual(fread(f), text)
-                    self.assertFalse(os.path.exists(p["data"]), "nothing made")
-            # The control: the service of this home's own copy, as the skill wrote it, is no reason to stop.
-            with open(f, "w") as fh:
-                fh.write(service_text(os.environ["WSM_HOME"]))
-            mirror.claim(f)                                       # what setup records when it writes it
-            rc, out = quiet(mirror.main, ["setup", "--dry-run"])
-            self.assertNotIn("uses another home", out)
-            self.assertEqual(rc, 0, out)
-            # Rule 23: the same file changed since (by the person, or by something else) is not written over by
-            # setup, nor removed by uninstall: it is named and left. Setup stops there; uninstall goes to its end
-            # (rule 8: a person who wants to leave is never refused because of the state of their own files).
-            with open(f, "a") as fh:
-                fh.write("# the person's own line\n")
-            changed = fread(f)
-            for cmd in (["setup", "--dry-run"], ["uninstall"]):
-                rc, out = quiet(mirror.main, cmd)
-                if cmd[0] == "setup":
-                    self.assertNotEqual(rc, 0, (cmd, out))
-                else:
-                    self.assertEqual(rc, 0, (cmd, out))
-                    self.assertIn("It is switched off; look at it, and keep or delete it as you choose.", out)
-                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
-                self.assertIn("not as the skill wrote it", out)
-                self.assertIn(f, out)
-                self.assertEqual(fread(f), changed)
-                self.assertNotIn("Kept: nothing", out)
-            os.remove(f)
-            # Rule 28: a folder of the skill's that other accounts can write in, or that another account owns, is
-            # refused before anything is written there.
-            os.makedirs(p["data"], exist_ok=True)
-            mode = os.stat(p["data"]).st_mode
-            try:
-                os.chmod(p["data"], 0o777)
-                rc, out = quiet(mirror.main, ["setup", "--dry-run"])
-                self.assertEqual(rc, 2, out)
-                self.assertIn(f"Stopped: {p['data']} is not yours alone (other accounts can write in it)", out)
-            finally:
-                os.chmod(p["data"], mode & 0o777)
+        # M150 (G9.15): both roads on every leg, the system stood in for (a Mac's road ran only on the Mac legs, and
+        # a stand-in that raised there was how a launch agent file that is not well-formed went unseen on Linux)
+        saved = mirror.system
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        try:
+            for name in (("linux", "x86_64"), ("darwin", "arm64")):
+                mirror.system = lambda name=name: name
+                with Home() as h, self.subTest(system=name[0]):
+                    p = mirror.paths()
+                    f = p["plist"] if mirror.system()[0] == "darwin" else p["unit"]
+                    os.makedirs(os.path.dirname(f), exist_ok=True)
+                    other = os.path.join(h.tmp, "other home")
+                    for q in (mirror.paths(other), mirror.paths(None)):         # each service's copy is there, as it runs (M144)
+                        os.makedirs(os.path.dirname(q["script"]), exist_ok=True)
+                        shutil.copyfile(SCRIPT, q["script"])
+                    for text, want in ((service_text(other), f"WSM_HOME={shlex.quote(other)} python3 -I "
+                                        f"{shlex.quote(mirror.paths(other)['script'])}"),
+                                       (service_text(None), "unset WSM_HOME, then run python3 -I "
+                                        f"{shlex.quote(mirror.paths(None)['script'])}"),
+                                       ("[Service]\n", "could not be read")):
+                        with open(f, "w") as fh:
+                            fh.write(text)
+                        for cmd in (["setup", "--linger"], ["setup", "--dry-run"], ["uninstall"]):
+                            rc, out = quiet(mirror.main, cmd)
+                            if text == "[Service]\n" and mirror.system()[0] == "darwin":
+                                # M150/M152: not a property list, so the tool's own reader could not read it either:
+                                # the step is the move, never "read that file"; uninstall, with launchd's answer for
+                                # the job unread too, is a Not now that names the same step (a reviewer's world C)
+                                self.assertNotIn("read that file", out)
+                                self.assertIn(f"out of {os.path.dirname(f)}", out)
+                                if cmd[0] == "uninstall":
+                                    self.assertEqual(rc, 3, (cmd, out))
+                                    self.assertIn("Nothing was removed and nothing was taken off.", out)
+                                    self.assertEqual(fread(f), text)
+                                    continue
+                            self.assertEqual(rc, 2, (cmd, out))
+                            self.assertIn("Nothing was changed.", out)
+                            self.assertIn(want, out)
+                            self.assertEqual(fread(f), text)
+                            self.assertFalse(os.path.exists(p["data"]), "nothing made")
+                    # The control: the service of this home's own copy, as the skill wrote it, is no reason to stop.
+                    with open(f, "w") as fh:
+                        fh.write(service_text(os.environ["WSM_HOME"]))
+                    mirror.claim(f)                                       # what setup records when it writes it
+                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                    self.assertNotIn("uses another home", out)
+                    self.assertEqual(rc, 0, out)
+                    # Rule 23: the same file changed since (by the person, or by something else) is not written over by
+                    # setup, nor removed by uninstall: it is named and left. Setup stops there; uninstall goes to its end
+                    # (rule 8: a person who wants to leave is never refused because of the state of their own files).
+                    with open(f, "a") as fh:     # M150: a change that stays a well-formed property list on a Mac
+                        fh.write("<!-- the person's own line -->\n" if mirror.system()[0] == "darwin" else
+                                 "# the person's own line\n")
+                    changed = fread(f)
+                    for cmd in (["setup", "--dry-run"], ["uninstall"]):
+                        rc, out = quiet(mirror.main, cmd)
+                        if cmd[0] == "setup":
+                            self.assertNotEqual(rc, 0, (cmd, out))
+                        else:
+                            self.assertEqual(rc, 0, (cmd, out))
+                            self.assertIn("It is switched off; look at it, and keep or delete it as you choose.", out)
+                            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+                        self.assertIn("not as the skill wrote it", out)
+                        self.assertIn(f, out)
+                        self.assertEqual(fread(f), changed)
+                        self.assertNotIn("Kept: nothing", out)
+                    os.remove(f)
+                    # Rule 28: a folder of the skill's that other accounts can write in, or that another account owns, is
+                    # refused before anything is written there.
+                    os.makedirs(p["data"], exist_ok=True)
+                    mode = os.stat(p["data"]).st_mode
+                    try:
+                        os.chmod(p["data"], 0o777)
+                        rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: {p['data']} is not yours alone (other accounts can write in it)", out)
+                    finally:
+                        os.chmod(p["data"], mode & 0o777)
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
         # Rule 28: whatever umask the tool is started with (000 in some containers and job runners), it makes
         # nothing other accounts can write, so its own next run never refuses a folder it made itself.
         def everything(h):
@@ -7722,6 +7760,367 @@ class G9(unittest.TestCase):
                 self.assertIn(want, lines)
                 self.assertEqual([x for x in lines if x.startswith(theirs + " ") and "chmod" in x], [], uid)
             os.chmod(theirs, 0o755)
+
+    def test_G9_15_a_launch_agent_file_that_cannot_be_read_never_ends_a_command_in_a_traceback(self):
+        """M150 (G9.15), the family's rule 6: a launch agent file at the skill's path that is not a well-formed
+        property list (cut short, or changed by hand) ended setup and uninstall in a traceback (seen on the suite's
+        Mac legs and in a stand-in trial). The one reader answers each planted form "could not be read", with where
+        the read stopped and never a byte of the file; with launchd holding no job, setup stops with nothing changed
+        and the one step a person can take, which is taken here; uninstall names the file, leaves it byte for byte
+        and goes on, removing only what it can show to be this home's (each world planted); status gives one
+        problem line. The Mac's road runs on every leg, the system stood in for."""
+        mark = "zq-planted-bytes-7c1e"                         # a byte of the file must never be said
+        saved, rel = mirror.system, mirror.release_check
+        door = doors_the_hosts_way(saved, always=True)
+        mirror.system = lambda: ("darwin", "arm64")
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")
+        mirror.release_check = lambda st, force=False: []
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                whole = mirror.plist_text(p).replace(mirror.LAUNCHD_LABEL, mirror.LAUNCHD_LABEL + "." + mark, 1)
+                whole = whole.encode("utf-8")
+                binary = plistlib.dumps({"Label": mark, "ProgramArguments": ["python3", mark]},
+                                        fmt=plistlib.FMT_BINARY)
+                forms = [
+                    ("0 bytes", b""),
+                    ("cut short in its head", whole[:len(whole) // 5]),
+                    ("cut short in its arguments", whole[:whole.index(b"<array>") + 20]),
+                    ("cut short at its end", whole[:-4]),
+                    ("an unescaped ampersand", whole.replace(mark.encode(), mark.encode() + b" & more", 1)),
+                    ("not XML", f"[Service]\nExecStart=/bin/true {mark}\n".encode()),
+                    ("a binary list's header cut short", binary[:12]),
+                    ("a top that is an array", plistlib.dumps([mark])),
+                    ("ProgramArguments as a word", plistlib.dumps({"Label": mark, "ProgramArguments": "python3"})),
+                    ("an argument that is a number", plistlib.dumps({"Label": mark,
+                                                                     "ProgramArguments": ["python3", 3]})),
+                ]
+            # The commands, each planted form at the skill's own path, launchd holding no job of either label.
+            for name, data in forms:
+                with Home() as h, self.subTest(form=name):
+                    p = mirror.paths()
+                    la = os.path.dirname(p["plist"])
+                    os.makedirs(la)
+                    h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                    with open(p["plist"], "wb") as fh:
+                        fh.write(data)
+                    for cmd in (["setup", "--dry-run"], ["setup"]):
+                        rc, out = quiet(mirror.main, cmd)
+                        self.assertEqual(rc, 2, (cmd, out))
+                        self.assertIn(f"a launch agent file at the skill's path ({p['plist']}), and it could not be "
+                                      "read: ", out)
+                        self.assertIn("cannot tell whose it is", out)
+                        self.assertIn("Nothing was changed.", out)
+                        self.assertIn(f"The one next step: move that file out of {la}", out)
+                        self.assertNotIn(mark, out)
+                        self.assertEqual(fread_bytes(p["plist"]), data)
+                        self.assertEqual(sorted(os.listdir(la)), [os.path.basename(p["plist"])])
+                        self.assertFalse(os.path.exists(p["data"]), "nothing made")
+                    # the one step, taken as printed: the file moved out of that folder, setup no longer stops on it
+                    os.rename(p["plist"], os.path.join(h.tmp, "kept.plist"))
+                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                    self.assertNotIn("could not be read", out)
+                    self.assertEqual(rc, 0, out)
+                    os.rename(os.path.join(h.tmp, "kept.plist"), p["plist"])
+                    # uninstall: named, left byte for byte, and it goes on to its end (rule 8)
+                    n = len(h.calls)
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn(f"Not taken, and left byte for byte: {p['plist']}. It could not be read: ", out)
+                    self.assertIn(f"It is still in {la}, the folder launchd reads at a login", out)
+                    self.assertNotIn(mark, out)
+                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+                    self.assertEqual(fread_bytes(p["plist"]), data)
+                    self.assertFalse([c for c in h.calls[n:] if c[:2] == ["launchctl", "bootout"]], out)
+            # The worlds for the limit: the forge's file cannot be read, and the sync's file
+            # is (i) this home's own bytes, (ii) another home's, (iii) cannot be read either. Setup changes nothing in
+            # any; uninstall removes the sync's file only when it is this home's own, and takes off a loaded job only
+            # when launchd shows it running this home's copy.
+            for world in ("own", "another home's", "unreadable"):
+                with Home() as h, self.subTest(world=world):
+                    p = mirror.paths()
+                    la = os.path.dirname(p["plist"])
+                    os.makedirs(la)
+                    sp = os.path.join(la, mirror.SYNC_LABEL + ".plist")
+                    if world == "own":                             # written by the tool, so recorded as its own
+                        mirror.write_file(sp, mirror.sync_plist_text(p, 15))
+                    else:                                          # put there by something else
+                        with open(sp, "w") as fh:
+                            fh.write(mirror.sync_plist_text(mirror.paths(os.path.join(h.tmp, "other")), 15)
+                                     if world == "another home's" else "<plist><dict>")
+                    with open(p["plist"], "wb") as fh:
+                        fh.write(forms[4][1])
+                    planted = {x: fread_bytes(x) for x in (p["plist"], sp)}
+                    h.gone |= {mirror.LAUNCHD_LABEL}               # launchd holds no forge job; the sync's as below
+                    if world == "unreadable":
+                        h.gone |= {mirror.SYNC_LABEL}
+                    rc, out = quiet(mirror.main, ["setup"])
+                    self.assertEqual(rc, 2, out)
+                    self.assertEqual({x: fread_bytes(x) for x in planted}, planted)
+                    n = len(h.calls)
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 0, out)
+                    offs = [c for c in h.calls[n:] if c[:2] == ["launchctl", "bootout"]]
+                    self.assertEqual(fread_bytes(p["plist"]), planted[p["plist"]])
+                    if world == "own":                             # its loaded job runs this home's copy: taken off
+                        self.assertFalse(os.path.exists(sp), out)
+                        self.assertEqual(offs, [["launchctl", "bootout", f"gui/{os.getuid()}/{mirror.SYNC_LABEL}"]])
+                    else:
+                        self.assertEqual(fread_bytes(sp), planted[sp], out)
+                        self.assertEqual(offs, [], out)
+                        self.assertIn(sp, out)
+                        if world == "another home's":
+                            self.assertIn("which runs another copy than this home's", out)
+                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+            # A reviewer's world C (11-26): under the limit, a job launchd could not answer for (no arguments
+            # block, a code neither 0 nor 113, a timeout) is "could not be read": never "loaded" and left while the
+            # rest goes. Uninstall is a Not now: nothing taken off, nothing removed (this home's installed copy
+            # stays), exit 3, and the step that ends it, which is taken here.
+            with Home() as h:
+                p = mirror.paths()
+                la = os.path.dirname(p["plist"])
+                os.makedirs(la)
+                sp = os.path.join(la, mirror.SYNC_LABEL + ".plist")
+                mirror.write_file(sp, mirror.sync_plist_text(p, 15))
+                os.makedirs(os.path.dirname(p["script"]), exist_ok=True)
+                mirror.write_file(p["script"], fread(SCRIPT))
+                with open(p["plist"], "wb") as fh:
+                    fh.write(forms[4][1])
+                h.gone |= {mirror.LAUNCHD_LABEL}
+                h.launchd_args = {mirror.SYNC_LABEL: None}
+                planted = {x: fread_bytes(x) for x in (p["plist"], sp, p["script"])}
+                n = len(h.calls)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertIn("\nNot now: whether launchd holds the sync's job", out)
+                self.assertIn("Nothing was removed and nothing was taken off.", out)
+                self.assertIn(f"The one next step: move {p['plist']} out of {la}", out)
+                self.assertNotIn("loaded in launchd", out)
+                self.assertNotIn(mark, out)
+                self.assertEqual({x: fread_bytes(x) for x in planted}, planted)
+                self.assertFalse([c for c in h.calls[n:] if c[:2] == ["launchctl", "bootout"]], out)
+                os.rename(p["plist"], os.path.join(h.tmp, "kept.plist"))      # the step, as printed
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("Not now", out)
+            # status: the same reader, one problem line, no traceback
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]))
+                for d in (p["data"], p["conf"]):
+                    os.makedirs(d, mode=0o700, exist_ok=True)
+                mirror.save_state(p, {"port": 1})
+                with open(p["mirror_key"], "w") as fh:
+                    fh.write("a stand-in key\n")
+                with open(p["plist"], "wb") as fh:
+                    fh.write(forms[4][1])
+                h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                mirror.DOOR_SEEN.clear()
+                rc, out = status()
+                said = [x for x in out.split("\n") if p["plist"] in x]
+                self.assertEqual(len(said), 1, out)
+                self.assertTrue(said[0].startswith(f"problem: the forge's launch agent file {p['plist']} could not be "
+                                                   "read: it is not a well-formed property list (the read stopped at "
+                                                   "line "), said[0])
+                self.assertIn("move that file out of", said[0])
+                self.assertNotIn(mark, out)
+                self.assertEqual(fread_bytes(p["plist"]), forms[4][1])
+            # The one reader, each form alone: "could not be read", where it stopped, never a byte of the file
+            with Home() as h:
+                p = mirror.paths()
+                f = os.path.join(h.tmp, "planted.plist")
+                for name, data in forms:
+                    with open(f, "wb") as fh:
+                        fh.write(data)
+                    answer, why = mirror.plist_job_args(f)
+                    self.assertEqual(answer, "could not be read", (name, why))
+                    self.assertNotIn(mark, why, name)
+                    if name == "an unescaped ampersand":
+                        self.assertTrue(why.startswith("it is not a well-formed property list (the read stopped at "
+                                                       "line "), why)
+                self.assertEqual(mirror.plist_job_args(os.path.join(h.tmp, "nothing.plist")), ("not there", None))
+                os.remove(f)
+                os.makedirs(f)                                     # a file that cannot be opened: a folder by its name
+                self.assertEqual(mirror.plist_job_args(f), ("could not be read", "it could not be opened "
+                                                            "(IsADirectoryError)"))
+                os.rmdir(f)
+                if os.geteuid() != 0:
+                    with open(f, "wb") as fh:
+                        fh.write(whole)
+                    os.chmod(f, 0)
+                    try:
+                        self.assertEqual(mirror.plist_job_args(f), ("could not be read", "it could not be opened "
+                                                                    "(PermissionError)"))
+                    finally:
+                        os.chmod(f, 0o600)
+                with open(f, "wb") as fh:                          # the control: the file as setup writes it, read
+                    fh.write(mirror.plist_text(p).encode("utf-8"))
+                self.assertEqual(mirror.plist_job_args(f), ("read", mirror.forge_argv(p)))
+        finally:
+            mirror.system, mirror.release_check = saved, rel
+            mirror.read_door, mirror.door_floor = door
+
+    def test_G9_15_a_service_file_that_cannot_be_opened_is_never_this_homes_and_never_a_traceback(self):
+        """M150 (G9.15), a reviewer's trial (11-26: 16 tracebacks of 16 in a made home): a service file of mode 000
+        ended setup --dry-run and uninstall in a PermissionError, on both roads, the forge's file and the sync's, this
+        home's own bytes or not, uninstall's after the jobs were told off and before any of its last lines. "Is this
+        service file as this home wrote it" has three answers at every reader; the third is never this home's (never
+        written over, never removed) and never "not there": setup and its dry run stop with nothing changed, the
+        file, the error's class and a step, which is taken here; uninstall names it, leaves it byte for byte and goes
+        to its end, saying what it switched off; status gives one problem line. Both roads, the system stood in for;
+        the service manager holding this home's jobs (loaded before the file became unreadable) or holding none."""
+        saved, rel = mirror.system, mirror.release_check
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        real_sha = mirror.sha256_of
+        mirror.release_check = lambda st, force=False: []
+        try:
+            for name in (("linux", "x86_64"), ("darwin", "arm64")):
+                mirror.system = lambda name=name: name
+                mac = name[0] == "darwin"
+                for which in range(3 if not mac else 2):
+                    for held in ("held", "none"):
+                        for own in (True, False):
+                            with Home() as h, self.subTest(system=name[0], file=which, manager=held, own=own):
+                                p = mirror.paths()
+                                files = mirror.service_files(p)
+                                texts = ([mirror.plist_text(p), mirror.sync_plist_text(p, 15)] if mac else
+                                         [mirror.unit_text(p), mirror.sync_unit_text(p), mirror.sync_timer_text(15)])
+                                for x, text in zip(files, texts):           # as setup writes them, and records them
+                                    mirror.write_file(x, text)
+                                for d in (p["data"], p["conf"]):
+                                    os.makedirs(d, mode=0o700, exist_ok=True)
+                                mirror.save_state(p, {"port": 1})
+                                mirror.write_file(p["mirror_key"], "a stand-in key\n", 0o600)
+                                f = files[which]
+                                if not own:                                 # bytes this home did not write
+                                    os.remove(f)
+                                    with open(f, "w") as fh:
+                                        fh.write(texts[which] + ("<!-- another -->\n" if mac else "# another\n"))
+                                whole = fread_bytes(f)
+                                if mac:
+                                    if held == "held":                      # loaded at setup, before the chmod
+                                        h.launchd_args = {mirror.LAUNCHD_LABEL: (mirror.forge_argv(p), {}),
+                                                          mirror.SYNC_LABEL: (mirror.sync_argv(p), {})}
+                                    else:
+                                        h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                                elif held == "held":
+                                    h.bus_starts = [["/usr/bin/python3", mirror.forge_argv(p), False, 0, 0, 0, 0, 0,
+                                                     0, 0]]
+                                os.chmod(f, 0)
+                                if os.access(f, os.R_OK):                   # root reads mode 000: the read's fault stood in
+                                    def sha(path, real=real_sha, f=f):
+                                        if path == f:
+                                            raise PermissionError(13, "Permission denied")
+                                        return real(path)
+                                    mirror.sha256_of = sha
+                                try:
+                                    for cmd in (["setup", "--dry-run"], ["setup", "--linger"]):
+                                        rc, out = quiet(mirror.main, cmd)
+                                        self.assertEqual(rc, 2, (cmd, out))
+                                        self.assertIn(f, out)
+                                        self.assertIn("could not be read: it could not be opened (PermissionError)", out)
+                                        self.assertIn("Nothing was changed.", out)
+                                        self.assertIn(f"out of {os.path.dirname(f)}", out)
+                                        self.assertNotIn("read that file", out)
+                                        self.assertEqual(os.stat(f).st_mode & 0o777, 0)
+                                    # the step, as printed: the file moved out of that folder, setup no longer stops on it
+                                    os.rename(f, os.path.join(h.tmp, "kept"))
+                                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                                    self.assertNotIn("could not be read", out)
+                                    self.assertNotIn("Traceback", out)
+                                    os.rename(os.path.join(h.tmp, "kept"), f)
+                                    rc, out = status()
+                                    said = [x for x in out.split("\n") if f in x]
+                                    self.assertEqual(len(said), 1, out)
+                                    self.assertTrue(said[0].startswith("problem: "), said[0])
+                                    self.assertIn("could not be opened (PermissionError)", said[0])
+                                    self.assertIn(f"move that file out of {os.path.dirname(f)}", said[0])
+                                    n = len(h.calls)
+                                    rc, out = quiet(mirror.main, ["uninstall"])
+                                    self.assertEqual(rc, 0, out)
+                                    self.assertIn(f"{f} (it could not be read: it could not be opened (PermissionError)"
+                                                  if (which or held == "held") else f"Not taken, and left byte for "
+                                                  f"byte: {f}. It could not be read: it could not be opened "
+                                                  "(PermissionError)", out)
+                                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look "
+                                                                         "at it."), out)
+                                    self.assertTrue(os.path.lexists(f), out)
+                                    self.assertEqual(os.stat(f).st_mode & 0o777, 0)
+                                    for x in files:                        # the others: this home's, so taken
+                                        if x != f:
+                                            self.assertFalse(os.path.lexists(x), (x, out))
+                                    offs = [c for c in h.calls[n:] if c[:2] in (["launchctl", "bootout"],
+                                                                                ["systemctl", "--user"])]
+                                    if mac and held == "none":
+                                        if which == 0:
+                                            self.assertNotIn("Switched off first", out)
+                                    else:
+                                        self.assertIn("Switched off first, and read off before anything was "
+                                                      "removed: the forge's", out)
+                                        self.assertTrue(offs, out)
+                                finally:
+                                    mirror.sha256_of = real_sha
+                                    os.chmod(f, 0o600)
+                                self.assertEqual(fread_bytes(f), whole)
+        finally:
+            mirror.system, mirror.release_check = saved, rel
+            mirror.read_door, mirror.door_floor = saved_doors
+            mirror.sha256_of = real_sha
+
+    def test_G9_16_no_login_at_the_macs_screen_never_keeps_a_person_from_leaving(self):
+        """M152 (G9.16; seen 2026-11-26 in a stand-in trial in a made home, not on a Mac): with no login at the Mac's
+        screen, launchctl answers 125 for the account's domain and for each job (seen 2026-11-24 over ssh on macOS
+        13.7.8). G9.12's read of the forge's job took that for "could not be read", so uninstall stopped (exit 2) with
+        "read that file, and run uninstall with the copy it names": over this home's own file with one line a person
+        added (D), every time; over a file that is not well-formed (B), naming a file the tool itself could not read.
+        That answer is read as launchd_off reads it: nothing of this account is loaded, and the file's own words decide.
+        Each world with and without a login at the screen."""
+        saved = mirror.system
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        mirror.system = lambda: ("darwin", "arm64")
+        bad = None
+        try:
+            for screen in (True, False):
+                for world in ("D: this home's file, a line added", "B: not well-formed"):
+                    with Home() as h, self.subTest(screen=screen, world=world):
+                        h.mac_session = screen
+                        p = mirror.paths()
+                        la = os.path.dirname(p["plist"])
+                        sp = os.path.join(la, mirror.SYNC_LABEL + ".plist")
+                        mirror.write_file(p["plist"], mirror.plist_text(p))
+                        mirror.write_file(sp, mirror.sync_plist_text(p, 15))
+                        if world.startswith("D"):
+                            with open(p["plist"], "a") as fh:
+                                fh.write("<!-- the person's own line -->\n")
+                        else:
+                            text = mirror.plist_text(p)
+                            bad = text.replace("</string>", " & more</string>", 1)
+                            with open(p["plist"], "w") as fh:
+                                fh.write(bad)
+                        if screen:                                 # logged in: launchd holds no forge job now
+                            h.gone |= {mirror.LAUNCHD_LABEL}
+                        planted = fread_bytes(p["plist"])
+                        rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                        self.assertEqual(rc, 2, out)
+                        self.assertNotIn("read that file", out)
+                        self.assertIn(f"out of {la}" if world.startswith("B") else "move it out of that folder", out)
+                        for _ in range(2):                         # twice running: never the same stop again
+                            rc, out = quiet(mirror.main, ["uninstall"])
+                            self.assertEqual(rc, 0, out)
+                            self.assertNotIn("read that file", out)
+                            self.assertIn(p["plist"], out)
+                            self.assertEqual(fread_bytes(p["plist"]), planted)
+                            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at "
+                                                                 "it."), out)
+                            if world.startswith("D"):
+                                self.assertIn("not as the skill wrote it", out)
+                            else:
+                                self.assertIn(f"Not taken, and left byte for byte: {p['plist']}. It could not be "
+                                              "read: it is not a well-formed property list", out)
+                        self.assertFalse(os.path.exists(sp), out)
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
 
     def test_G9_1_a_forge_upgrade_backs_up_first_and_rolls_back_on_failure(self):
         if not real_gitea():
