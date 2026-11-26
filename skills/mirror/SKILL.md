@@ -136,6 +136,8 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 - Never type `setup --use-this-folder` unless the person asks for it in their own words in this conversation,
   after setup's stop said what it does: going on with a folder whose record of what the skill made is lost is
   their word, never yours.
+- Never type `setup --new-password` unless the person asks for it in their own words in this conversation: a new
+  password for their Gitea account ends any password they set for it themselves, so it is their word, never yours.
 - Never change the forge's address from 127.0.0.1, and never start a tunnel to it.
 - Never push to GitHub, and never answer a GitHub prompt on the person's behalf.
 - Reach GitHub only through `M`, never by yourself, not even to look: no `git clone` or `git ls-remote` of

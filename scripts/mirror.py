@@ -1325,6 +1325,74 @@ def forge_users(p):
     return names
 
 
+def forge_api_call(p, port, method, path, body=None, token=None, basic=None):
+    """M175 (G6.34): one request to the skill's own forge's API, only once the door reads the port as the forge's
+    own (G8.7: a key or a password goes to no other program there), through the one opener (no proxy, no redirect);
+    (status, the answer's bytes), status 0 when nothing was sent or no answer came. What it carries goes in the
+    request, never on a command line."""
+    try:
+        if door(p, port, fresh=True) != "mine":
+            return 0, b""
+    except DoorShut:
+        return 0, b""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1{path}", method=method,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", "token " + token)
+    if basic:
+        req.add_header("Authorization", "Basic " + base64.b64encode(basic.encode()).decode())
+    try:
+        with forge_opener().open(req, timeout=30) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+    except (urllib.error.URLError, OSError):
+        return 0, b""
+
+
+def new_forge_password(p, name, port):
+    """M175 (G6.34), on the person's own word (setup --new-password): their Gitea account gets a new password. A token
+    of the forge's own command, read from its standard output (Gitea 28.4.0's change-password takes the password on
+    its command line only, where other accounts on the computer can read it); the password in a request's body to
+    127.0.0.1; the token taken away with the new password before setup ends, and read gone. The password is kept
+    first under a name of its own and takes the file's name only once the forge has it. Gives (the line, done)."""
+    tag = "windstorm-mirror-password-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex()
+    out = gitea(p, "admin", "user", "generate-access-token", "--username", name, "--token-name", tag,
+                "--scopes", "write:admin,write:user", "--raw")
+    token = out.stdout.strip() if out.returncode == 0 else ""
+    if not token or any(c.isspace() for c in token):
+        return (f"Your Gitea account '{name}' was not given a new password: the forge did not give the key it needs "
+                "for that, and nothing of the account was changed. Run the same command again: "
+                f"{own_command(p, 'setup', '--new-password')}", False)
+    word = secrets.token_urlsafe(24)
+    held = p["password"] + ".new"
+    write_private(held, word + "\n")
+    code, _ = forge_api_call(p, port, "PATCH", f"/admin/users/{name}", {"login_name": name, "source_id": 0,
+                                                                  "password": word, "must_change_password": False},
+                         token=token)
+    if code != 200:
+        os.remove(held)
+        unclaim(p, [os.path.abspath(held)])
+        left = forge_api_call(p, port, "GET", "/user", token=token)[0] == 200
+        return (f"Your Gitea account '{name}' was not given a new password: the forge answered {code or 'nothing'}, "
+                "and its password is as it was."
+                + (f" A key named {tag} is still on that account, which setup could not take away without the "
+                   "password: take it away in Gitea's settings of that account (Applications)." if left else "")
+                + f" Run the same command again: {own_command(p, 'setup', '--new-password')}", False)
+    os.replace(held, p["password"])
+    claim(p["password"])                       # in the record under its own name (seen: setup after it stopped on it)
+    unclaim(p, [os.path.abspath(held)])
+    gone = forge_api_call(p, port, "DELETE", f"/users/{name}/tokens/{tag}", basic=f"{name}:{word}")[0] == 204
+    gone = gone and forge_api_call(p, port, "GET", "/user", token=token)[0] == 401
+    said = (f"Your Gitea account '{name}' has a new password, in {p['password']} (readable by you only). A password "
+            "you set for it yourself no longer works.")
+    if not gone:
+        return (said + f" A key named {tag} that setup made for the change is still on that account: take it away in "
+                "Gitea's settings of that account (Applications), signing in with the new password.", False)
+    return said, True
+
+
 def create_user(p, name, admin):
     """The password is made by Gitea and read from its answer: never on a command line, never printed."""
     args = ["admin", "user", "create", "--username", name, "--email", f"{name}@localhost.invalid",
@@ -4631,7 +4699,14 @@ def take_made_folders(st, removed):
             pass
 
 
-def setup_plan(p, st):
+def no_password_line(p, name):
+    """M175 (G6.34): the person's Gitea account is there from before and the skill holds no password for it."""
+    return (f"Your Gitea account '{name}' is there from before: setup did not change it or its password, and the "
+            "skill holds no password for it. If you do not know its password, the one step: "
+            f"{own_command(p, 'setup', '--new-password')} (a password you set for it yourself then stops working).")
+
+
+def setup_plan(p, st, new_password=False):
     plan = []
     made = folders_setup_makes(p)
     if made:
@@ -4647,9 +4722,13 @@ def setup_plan(p, st):
     if not st.get("person"):
         plan.append(f"make your Gitea account '{person_name()}' (administrator) and save its first password in "
                     f"{p['password']}, readable by you only")
+    elif new_password:
+        plan.append(f"give your Gitea account '{st['person']}' a new password, kept in {p['password']}, readable by "
+                    "you only; a password you set for it yourself stops working")
     elif not os.path.exists(p["password"]):
         plan.append(f"leave your Gitea account '{st['person']}' as it is, from before: setup does not change it or "
-                    "its password")
+                    "its password, and the skill holds no password for it; if you do not know its password, the one "
+                    f"step: {own_command(p, 'setup', '--new-password')}")
     if not st.get("mirror_user"):
         plan.append(f"make the '{MIRROR_USER}' account that owns the copies, with a key of its own in "
                     f"{p['mirror_key']}, readable by you only")
@@ -4747,6 +4826,16 @@ def cmd_setup(args):
             f"{os.path.dirname(p['mirror_key'])} (into a folder of your own, to keep it), then run setup again: "
             f"{own_command(p, 'setup')}")
         return 2
+    pw_answer, pw_why = key_file_read(p["password"])
+    if pw_answer == "could not be read":
+        # M175 (G6.34): the kept password of the person's Gitea account is never written over on a read that failed,
+        # with or without --new-password
+        # (a folder of the skill's that cannot be entered stopped every command before this, at its floor)
+        say(f"Stopped: the password file of your Gitea account, {p['password']}, could not be read: {pw_why}. Setup "
+            "changed nothing, and never writes over that file. The one next step: move that file out of "
+            f"{os.path.dirname(p['password'])} (into a folder of your own, to keep it), then run the same command "
+            "again")
+        return 2
     bus = bus_floor(p)                              # G1.24: the read-back's road, before the first write
     if bus:
         say(bus)
@@ -4773,7 +4862,8 @@ def cmd_setup(args):
     if far:
         say(far)
         return 2
-    plan = setup_plan(p, st)
+    new_password = getattr(args, "new_password", False)
+    plan = setup_plan(p, st, new_password)
     if args.dry_run:
         back, note = (comes_back_by_itself(dry=True) if system()[0] == "darwin"
                       else linger_step(None, dry=True, allow=allow))
@@ -4836,17 +4926,23 @@ def cmd_setup(args):
         raise SystemExit(f"Gitea could not prepare its database: {last_line(out.stderr)}. Run setup again; if it "
                          "stops here again, Gitea's words above are the reason.")
     users = forge_users(p)
+    give_password = None
     if not st.get("person"):
         name = person_name()
         if name not in users:
             write_private(p["password"], create_user(p, name, admin=True) + "\n")
             say(f"Your Gitea account '{name}' is made. Its first password is in {p['password']} (readable by you "
                 "only).")
+        elif not new_password:
+            say(no_password_line(p, name) if not os.path.exists(p["password"]) else
+                f"Your Gitea account '{name}' is there from before: setup did not change it or its password.")
         else:
-            say(f"Your Gitea account '{name}' is there from before: setup did not change it or its password.")
+            give_password = name
         st["person"] = name
+    elif new_password:
+        give_password = st["person"]
     elif not os.path.exists(p["password"]):
-        say(f"Your Gitea account '{st['person']}' is there from before: setup did not change it or its password.")
+        say(no_password_line(p, st["person"]))
     # M84: the key is made whenever its file is missing (after an uninstall that kept the copies, or a cut one), under
     # a name of its own, since Gitea refuses a key name the account already holds.
     key_answer, key_why = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
@@ -4909,6 +5005,12 @@ def cmd_setup(args):
         say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
     else:
         say(not_answering_yet(p, st["port"], SETUP_WAIT))
+    if give_password:
+        said, given = new_forge_password(p, give_password, st["port"]) if ok and up else (
+            f"Your Gitea account '{give_password}' was not given a new password: the forge did not answer. Run the "
+            f"same command again once it does: {own_command(p, 'setup', '--new-password')}", False)
+        say(said)
+        ok = ok and given
     if timer_why:                                   # G1.17: the forge's own line stands; the sync's is its own
         ok = False
         say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
@@ -6219,7 +6321,13 @@ def cmd_uninstall(args):
     n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
     rc = 0
     copies_here = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)
-    if args.delete_copies and os.path.exists(p["data"]) and unreadable:
+    if args.delete_copies and os.path.exists(p["data"]) and unreadable and copies_on_disk(p) == 0:
+        # M179 (seen 2026-11-26): the same command again after a delete that left only what is not the skill's said
+        # "with every copy in it" of a folder with no copy in it, and ended 1
+        say(f"No copy is in {p['data']}, so none was deleted: there is none to delete. {unreadable[:1].upper()}"
+            f"{unreadable[1:]}, so the skill cannot tell which files in that folder it made, and takes none of them; "
+            "the folder is yours now, as it is.")
+    elif args.delete_copies and os.path.exists(p["data"]) and unreadable:
         # M158 (G6.25): the number is not asked; nothing in the skill's folders goes; the folder is the person's now
         say(f"The copies were not deleted: {unreadable}, so the skill cannot tell which files in {p['data']} it "
             f"made, and deletes none of them. That folder, with every copy in it, is still at {p['data']}, and it is "
@@ -6235,6 +6343,8 @@ def cmd_uninstall(args):
                                         "copies (the forge's own folders in it)", foreign)
             if refused is not None:
                 stopped, rc = not_deleted_line(p, refused, before, n), 1
+            elif os.path.exists(p["data"]):
+                stopped = folder_stays_line(p, before)
         else:
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
@@ -6244,13 +6354,15 @@ def cmd_uninstall(args):
         refused, before = take_data(p, removed, "the skill's folder", None, foreign)
         if refused is not None:                                     # M179: never passed over here either
             stopped, rc = not_deleted_line(p, refused, before, n), 1
+        elif os.path.exists(p["data"]):
+            stopped = folder_stays_line(p, before)
     if record == "read":
         take_made_folders(st, removed)
     uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
-                     unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(stopped))
+                     unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(rc and stopped))
     if unreadable and holds_mirror(p):     # M158: the way to go on, named once, last
         say(USE_FOLDER_STEP + own_command(p, "setup", "--use-this-folder"))
-    if stopped:                            # M179: where the delete stopped, and the one next step, last
+    if stopped:                            # M179: where the delete stopped and the one next step, or what stays, last
         say(stopped)
     return rc
 
@@ -6291,8 +6403,11 @@ def take_data(p, removed, what, copies_line, known=()):
                 os.rmdir(p["data"])
         except OSError as e:
             failed.append(e)
-    if not failed and os.path.exists(p["data"]) and isinstance(known, list):
-        # the state and the record are gone: what is left is not the skill's, and each entry is named as kept
+    if (not failed and os.path.exists(p["data"]) and isinstance(known, list)
+            and not os.path.lexists(os.path.join(p["data"], MADE_RECORD))):
+        # the state and the record are gone: what is left is not the skill's, and each entry is named as kept (with
+        # the record still there, it is what names the skill's own: seen 2026-11-26, a folder of the person's in the
+        # forge's folder had the record and that folder named as not the skill's)
         try:
             known.extend(sorted(set(os.path.join(p["data"], x) for x in os.listdir(p["data"])) - set(known)))
         except OSError as e:
@@ -6305,6 +6420,37 @@ def take_data(p, removed, what, copies_line, known=()):
     elif copies_line and (not os.path.exists(p["forge"]) or set(os.listdir(p["forge"])).isdisjoint(FORGE_NAMES)):
         removed.insert(gone, copies_line)
     return None, before
+
+
+def folder_stays_line(p, before):
+    """M179: the delete ended with only what is not the skill's left in the folder of
+    copies. The copies are said as deleted and the folder as staying, each entry in it named; the folder is said as
+    deleted only once it is gone."""
+    copies = ("No copy was on the disk to delete." if before == 0 else
+              f"The copies are deleted: the {before} on the disk {'is' if before == 1 else 'are'} gone." if before
+              else "The copies are deleted (how many were on the disk could not be read).")
+    rec, _ = read_made(p)
+    theirs = [os.path.abspath(x) for x in not_ours(p)] if rec is not None else []
+    try:
+        names = sorted(os.listdir(p["data"]))
+    except OSError as e:
+        return (f"{copies} The folder of copies stays at {p['data']}; what is in it could not be read "
+                f"({type(e).__name__}).")
+    said, not_theirs, changed = [], "what is not the skill's", False
+    for n in names:
+        e = os.path.abspath(os.path.join(p["data"], n))
+        if n == MADE_RECORD and rec is not None:
+            said.append(f"{n} (the record of what the skill did here, kept while something it names is there)")
+        elif rec is not None and rec.get(e) == "dir":
+            held = [os.path.relpath(x, p["data"]) for x in theirs if x.startswith(e + os.sep)]
+            changed = changed or any(not shows_as_is(x) for x in held)
+            said.append(f"{n} (the skill's, kept because it holds "
+                        f"{', '.join(shown_as_is(x) for x in held) or not_theirs})")
+        else:
+            changed = changed or not shows_as_is(n)
+            said.append(f"{shown_as_is(n)} (not the skill's)")
+    return (f"{copies} The folder of copies stays at {p['data']}, because it holds what is not the skill's; in it "
+            f"now: {', '.join(said)}" + (f"; {SHOWN_CHANGED}." if changed else "."))
 
 
 def rmtree_whole_path(path):
@@ -6672,6 +6818,9 @@ def main(argv=None):
     s.add_argument("--use-this-folder", action="store_true",
                    help="the person's own word: go on with a folder that holds a mirror whose record of what the "
                         "skill made is lost (its stop names it)")
+    s.add_argument("--new-password", action="store_true",
+                   help="the person's own word: give their Gitea account a new password, kept for them (a password "
+                        "they set for it themselves stops working)")
     s.add_argument("--no-linger", action="store_true",
                    help="on Linux: do not switch on lingering; the mirror then syncs only while you are logged in")
     s.set_defaults(fn=cmd_setup)

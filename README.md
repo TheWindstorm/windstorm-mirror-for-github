@@ -82,7 +82,9 @@ pre-push hook of yours does not check that push.
   (127.0.0.1), with sign-up closed. Setup needs no administrator rights. Setup and its dry run check the program
   against the pinned SHA-256 each time they run; the service's start does not check it again.
 - It makes two Gitea accounts: yours, and `mirror`, which owns the copies. Each password and each key is kept in a
-  file that only you can read.
+  file that only you can read. If you leave and come back, setup leaves your account and its password as they are,
+  and says when it holds no password for it; `setup --new-password`, which is yours to type, then gives your account
+  a new one, kept in that file (a password you set for it yourself stops working).
 - It runs Gitea as your own service, and syncs every 15 minutes. On Linux that is a systemd user unit, with the
   sync timer beside it, in `~/.config/systemd/user/`; switching them on, systemd links them in that folder's
   `default.target.wants/` and `timers.target.wants/`. On macOS, two launch agents in `~/Library/LaunchAgents/`.

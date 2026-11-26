@@ -6365,6 +6365,133 @@ class G6(unittest.TestCase):
             os.environ.clear()
             os.environ.update(saved_env)
 
+    def test_G6_34_a_password_the_person_set_is_theirs_and_a_new_one_comes_only_on_their_word(self):
+        """M175 (G6.34), seen 2026-11-26 in a made home: plain uninstall takes the kept password of the person's Gitea
+        account while the account stays, and setup after it said "setup did not change it or its password" with no
+        word that the skill holds none. Without --new-password, setup changes nothing of the account and says the
+        skill holds no password for it, with the one step. With it (the person's own word), the account gets a new
+        password by the forge's own token on standard output and the password in a request's body on 127.0.0.1, the
+        token taken away before setup ends, kept in the file, readable by the person only, never a byte said; no
+        process's command line or environment ever holds it. A password file that could not be read is a stop that
+        names it and one step, with or without the option, and is never written over."""
+        def api(port, method, path, body=None, basic=None, token=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1{path}", method=method,
+                                         data=json.dumps(body).encode() if body is not None else None)
+            req.add_header("Content-Type", "application/json")
+            if token:
+                req.add_header("Authorization", "token " + token)
+            if basic:
+                req.add_header("Authorization", "Basic " + __import__("base64").b64encode(basic.encode()).decode())
+            try:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=20) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+
+        with World(self) as w:
+            G7.world_with_copies(self, w)
+            p = w.p
+            person = mirror.load_state(p)["person"]
+            port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+            first = fread(p["password"]).strip()
+            own = "the-persons-own-" + os.urandom(6).hex()          # the person sets a password of their own
+            self.assertEqual(api(port, "PATCH", f"/admin/users/{person}", {"login_name": person, "source_id": 0,
+                                 "password": own, "must_change_password": False}, basic=f"{person}:{first}")[0], 200)
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(p["password"]), "as seen: plain uninstall takes the kept password")
+            step = mirror.own_command(p, "setup", "--new-password")
+            # (1) without the option: nothing of the account changes, and the dry run's block and setup say so
+            rc, out = w.home.setup("--dry-run")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Setup would leave your Gitea account '{person}' as it is, from before: setup does not "
+                          "change it or its password, and the skill holds no password for it; if you do not know its "
+                          f"password, the one step: {step}.", out)
+            self.assertRegex(out, r"tell the person \d+ of \d+: Setup would leave your Gitea account")
+            w.home.place_gitea()
+            rc, out = w.home.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Your Gitea account '{person}' is there from before: setup did not change it or its "
+                          "password, and the skill holds no password for it. If you do not know its password, the "
+                          f"one step: {step} (a password you set for it yourself then stops working).", out)
+            self.assertFalse(os.path.exists(p["password"]), out)
+            port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 200, "the person's own password")
+            # (2) the dry run with the option names it, and changes nothing
+            rc, out = w.home.setup("--dry-run", "--new-password")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Setup would give your Gitea account '{person}' a new password, kept in {p['password']}, "
+                          "readable by you only; a password you set for it yourself stops working.", out)
+            self.assertFalse(os.path.exists(p["password"]), out)
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 200)
+            # (3) with the option: every process's command line and environment is read as it starts
+            started, real_init = [], subprocess.Popen.__init__
+
+            def seen(self_, args, *a, **k):
+                started.append((args if isinstance(args, str) else " ".join(map(str, args)),
+                                " ".join(f"{x}={y}" for x, y in (k.get("env") or {}).items())))
+                real_init(self_, args, *a, **k)
+            subprocess.Popen.__init__ = seen
+            wait, mirror.SETUP_WAIT = mirror.SETUP_WAIT, 60          # the World's forge follows its service: wait for it
+            try:
+                rc, out = w.home.setup("--new-password")
+            finally:
+                subprocess.Popen.__init__ = real_init
+                mirror.SETUP_WAIT = wait
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Your Gitea account '{person}' has a new password, in {p['password']} (readable by you "
+                          "only). A password you set for it yourself no longer works.", out)
+            self.assertEqual(os.stat(p["password"]).st_mode & 0o777, 0o600)
+            kept = fread(p["password"]).strip()
+            self.assertTrue(kept and kept not in out and own not in out, "never a byte said")
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200, "the kept password signs in")
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 401, "the person's own stops")
+            self.assertTrue(started, "setup started processes")
+            for argv, env in started:
+                self.assertNotIn(kept, argv)
+                self.assertNotIn(kept, env)
+            code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{kept}")
+            self.assertEqual((code, json.loads(body)), (200, []), "the token is taken away before setup ends")
+            # (4) a password file that could not be read: a stop, the file named, one step; never written over
+            os.chmod(p["password"], 0)
+            try:
+                for opt in ((), ("--new-password",)):
+                    with self.subTest(option=opt):
+                        rc, out = w.home.setup(*opt)
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: the password file of your Gitea account, {p['password']}, could not be "
+                                      "read: it could not be opened (PermissionError). Setup changed nothing, and never "
+                                      f"writes over that file. The one next step: move that file out of "
+                                      f"{os.path.dirname(p['password'])} (into a folder of your own, to keep it), then "
+                                      "run the same command again", out)
+                        self.assertEqual(os.stat(p["password"]).st_mode & 0o777, 0)
+            finally:
+                os.chmod(p["password"], 0o600)
+            self.assertEqual(fread(p["password"]).strip(), kept)
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
+            # (5) the forge refuses the change: said, the kept password as it was, nothing left under another name,
+            # and the token the change could not take away is named (as read: it still answers)
+            real_call = mirror.forge_api_call
+
+            def refused(p_, port_, method, path, *a, **k):
+                return (500, b"") if method == "PATCH" else real_call(p_, port_, method, path, *a, **k)
+            mirror.forge_api_call, wait, mirror.SETUP_WAIT = refused, mirror.SETUP_WAIT, 60
+            try:
+                rc, out = w.home.setup("--new-password")
+            finally:
+                mirror.forge_api_call, mirror.SETUP_WAIT = real_call, wait
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"Your Gitea account '{person}' was not given a new password: the forge answered 500, and "
+                          "its password is as it was. A key named windstorm-mirror-password-", out)
+            self.assertIn(f"Run the same command again: {mirror.own_command(p, 'setup', '--new-password')}", out)
+            self.assertEqual(fread(p["password"]).strip(), kept)
+            self.assertEqual(sorted(os.listdir(os.path.dirname(p["password"]))),
+                             sorted(x for x in os.listdir(os.path.dirname(p["password"])) if not x.endswith(".new")))
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
+            code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{kept}")
+            self.assertEqual([t["name"][:len("windstorm-mirror-password-")] for t in json.loads(body)],
+                             ["windstorm-mirror-password-"], "the token named is the one left")
+
     def test_G6_35_a_command_started_as_root_in_another_accounts_mirror_stops_at_the_door(self):
         """M177 (G6.35), seen on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): with sudo -E, which keeps the
         person's home, status wrote the state file and sync the record of what the skill made as root's, at mode
@@ -10392,9 +10519,78 @@ class G9(unittest.TestCase):
                     self.assertNotIn("type the number", out)
                     self.assertIn(f"  {late}", out)
                     self.assertEqual(left_in(p["data"]), ["late.log"], out)
+                    self.assertEqual(out.rstrip("\n").split("\n")[-1],
+                                     f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
+                                     "because it holds what is not the skill's; in it now: late.log (not the "
+                                     "skill's).", out)
                     continue
                 self.assertIn("To delete the folder of copies (2 copies,", out)
                 self.assertFalse(os.path.exists(p["data"]), out + "\nleft: " + ", ".join(left_in(p["data"])))
+
+        # Only what is not the skill's is left in the folder of copies: exit 0, and the copies are said as deleted, the
+        # folder as staying, with each entry in it named (the folder is said as deleted only once it is gone). K1: a
+        # file of the person's in the folder of copies. K2: a folder of the person's inside the forge's folder, so the
+        # forge's folder stays, and the record with it.
+        def a_file(p):
+            with open(os.path.join(p["data"], "notes.txt"), "w") as f:
+                f.write("mine")
+
+        def a_folder_in_the_forge(p):
+            os.makedirs(os.path.join(p["forge"], "mine"))
+            with open(os.path.join(p["forge"], "mine", "a.txt"), "w") as f:
+                f.write("mine")
+
+        def a_name_with_a_backtick(p):
+            with open(os.path.join(p["data"], "a`b.txt"), "w") as f:
+                f.write("mine")
+
+        stays = {"K1": "notes.txt (not the skill's)",
+                 "K3": f"a?b.txt (not the skill's); {mirror.SHOWN_CHANGED}",
+                 "K2": "forge (the skill's, kept because it holds forge/mine), windstorm-mirror-made.json (the record "
+                       "of what the skill did here, kept while something it names is there)"}
+        for world, plant in (("K1", a_file), ("K2", a_folder_in_the_forge), ("K3", a_name_with_a_backtick)):
+            with self.subTest(world=world), World(self) as w:
+                for n in ("alpha", "beta"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+                p = w.p
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                plant(p)
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(mirror.copies_on_disk(p), 0, out)
+                last = out.rstrip("\n").split("\n")[-1]
+                self.assertEqual(last, f"The copies are deleted: the 2 on the disk are gone. The folder of copies stays "
+                                       f"at {p['data']}, because it holds what is not the skill's; in it now: "
+                                       f"{stays[world]}.", out)
+                self.assertNotIn(f"{p['data']}: the folder of copies", out)        # never said as gone
+                theirs = out.split("Not the skill's, so left where they are")[1].split("\n\n")[0].split("Folders of")[0]
+                self.assertNotIn(os.path.join(p["data"], mirror.MADE_RECORD), theirs, out)
+                self.assertNotIn(f"  {p['forge']}\n", theirs, out)
+                # the same command again: nothing more of the skill's goes, nothing is said that is not there
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("with every copy in it", out)
+                self.assertNotIn("type the number", out)
+                if world in ("K1", "K3"):
+                    self.assertEqual(left_in(p["data"]), ["notes.txt" if world == "K1" else "a`b.txt"], out)
+                    self.assertIn(f"No copy is in {p['data']}, so none was deleted: ", out)
+                else:
+                    self.assertEqual(left_in(p["data"]), ["forge", "forge/mine", "forge/mine/a.txt", mirror.MADE_RECORD], out)
+                    self.assertEqual(out.rstrip("\n").split("\n")[-1],
+                                     f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
+                                     f"because it holds what is not the skill's; in it now: {stays[world]}.", out)
 
 
     def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):
