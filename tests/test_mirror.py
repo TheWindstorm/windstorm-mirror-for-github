@@ -298,7 +298,7 @@ class Home:
         # G1.24: the user manager's bus (busctl), answering from the unit files on disk as sd_standin_unit reads them.
         # bus_answer: (code, stdout) every busctl call answers instead, when set; bus_starts: the start lines every
         # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
-        self.bus_answer, self.bus_starts, self.bus_objs = None, None, {}
+        self.bus_answer, self.bus_starts, self.bus_objs, self.bus_loaded = None, None, {}, {}
         self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set; or
                                      # {label: (arguments, environment) or None} per job (M150)
         self.launchd_form = None     # a loaded job's whole print block instead, when set (recorded or MADE UP: each
@@ -450,8 +450,10 @@ class Home:
                 text = fread(f) if os.path.exists(f) else ""
             except OSError:
                 # M150: a unit file the manager cannot open is answered as one with no start line, never a raise; what
-                # systemd answers for a unit file of mode 000 that it has not loaded is NOT SEEN BY US
-                text = ""
+                # systemd answers for a unit file of mode 000 that it has not loaded is NOT SEEN BY US. RECORDED on
+                # systemd 255 (walk6, 2026-11-26): one it loaded before the file became unreadable is held as loaded,
+                # its start line too, until a daemon-reload (bus_loaded: the unit's text as loaded)
+                text = self.bus_loaded.get(self.bus_objs[cmd[5]], "")
             starts, env = sd_standin_unit(text, self.env["HOME"])
             if cmd[7] == "ExecStart":
                 return done(0, json.dumps({"type": "a(sasbttttuii)",
@@ -498,6 +500,17 @@ class Home:
                 if not self.user_bus:
                     return subprocess.CompletedProcess(cmd, 1, "", self.no_bus_words + "\n")
                 verb = [c for c in cmd[2:] if not c.startswith("-")]
+                if verb[:1] in (["enable"], ["disable"]):
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26, walk6b): a unit whose file in
+                    # this account's unit folder cannot be read refuses the WHOLE call, in these words, code 1, and
+                    # with --now nothing in that call is started or stopped; `stop` alone needs no file.
+                    base = os.path.dirname(mirror.paths()["unit"])
+                    for u in verb[1:]:
+                        name = u if u.endswith((".service", ".timer")) else u + ".service"
+                        f = os.path.join(base, name)
+                        if os.path.lexists(f) and not os.path.islink(f) and not os.access(f, os.R_OK):
+                            return subprocess.CompletedProcess(
+                                cmd, 1, "", f"Failed to {verb[0]} unit: Unit file {name} does not exist.\n")
                 if verb[:1] in (["enable"], ["start"]) and ("--now" in cmd or verb[0] == "start"):
                     self.units_up |= set(verb[1:])
                 elif verb[:1] in (["disable"], ["stop"]) and ("--now" in cmd or verb[0] == "stop"):
@@ -5981,12 +5994,76 @@ class G6(unittest.TestCase):
                           out)
             self.assertTrue(out.strip().split("\n")[-2].startswith(f"tell the person 1 of 2: {mirror.USE_FOLDER_STEP}"))
             self.assertFalse(os.path.lexists(os.path.join(p["data"], mirror.MADE_RECORD)))
+            # uninstall names only what is there (walk6 (C), 2026-11-26: it named a settings file that was not)
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            line = next(x for x in out.split("\n") if x.startswith("Not taken: "))
+            for f in (p["settings"], p["bin"], p["cache"]):
+                self.assertFalse(os.path.lexists(f))
+                self.assertNotIn(f, line)
         with World(self) as w:
             rec = mirror.read_made(w.p)[0]
             rc, out = w.home.setup("--use-this-folder")
             self.assertEqual(rc, 0, out)
             self.assertIn("--use-this-folder changes nothing here: the record of what the skill made", out)
             self.assertEqual(set(mirror.read_made(w.p)[0]), set(rec))
+
+    def test_G6_25_the_way_back_is_taken_only_once_no_stop_of_setups_is_left(self):
+        """M158 (G6.25; seen 2026-11-26 on a stock Ubuntu 24.04 guest, real systemd 255, walk6 (C)): setup
+        --use-this-folder set the record aside and wrote a new one, then stopped on lingering not yet chosen with
+        "Nothing was changed". The take-on is made only once no stop of setup's is left before its first write: with
+        lingering not chosen, and with a sync holding the lock while the forge's settings file is to be written new,
+        setup stops and the record is as it was, none set aside; with both cleared, the way back goes on, one record
+        set aside."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            aside = lambda: sorted(x for x in os.listdir(p["data"]) if x.startswith(mirror.MADE_RECORD + "."))
+            with open(made, "wb"):
+                pass                                                    # 0 bytes
+            saved = mirror.linger_state
+            mirror.linger_state = lambda: "no"
+            try:
+                rc, out = h.setup("--use-this-folder", choose=False)
+            finally:
+                mirror.linger_state = saved
+            self.assertEqual(rc, 2, out)
+            self.assertIn(mirror.LINGER_CHOICE, out)
+            self.assertNotIn("Taken on again", out)
+            self.assertEqual(fread_bytes(made), b"")
+            self.assertEqual(aside(), [])
+            kept = os.path.join(h.tmp, "kept-by-the-person")
+            os.makedirs(kept)
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            os.rename(p["app_ini"], os.path.join(kept, "app.ini"))
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                with open(os.path.join(p["data"], "sync.lock"), "w") as f:
+                    f.write(str(sleeper.pid))
+                rc, out = h.setup("--use-this-folder")
+                self.assertEqual(rc, 3, out)
+                self.assertIn(f"Not now: a sync is running (process {sleeper.pid})", out)
+                self.assertIn("Nothing was changed.", out)
+                self.assertNotIn("Taken on again", out)
+                self.assertEqual(fread_bytes(made), b"")
+                self.assertEqual(aside(), [])
+            finally:
+                sleeper.kill()
+                sleeper.wait()
+            os.remove(os.path.join(p["data"], "sync.lock"))
+            rc, out = h.setup("--use-this-folder")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(out.count("Taken on again, on your word (--use-this-folder)"), 1, out)
+            self.assertEqual(len(aside()), 1)
+            self.assertEqual(fread_bytes(os.path.join(p["data"], aside()[0])), b"")
+            self.assertIsNotNone(mirror.read_made(p)[0])
 
     def test_G6_25_the_way_back_takes_only_the_skills_own_names_and_forms(self):
         """M158 (G6.25, the owner's ruling 11-26: never by a name alone): with the record not there, setup
@@ -9045,14 +9122,19 @@ class G9(unittest.TestCase):
         off only when systemd's own start line for it names this home's copy. Q: the sync's service names another
         home's copy, its timer running: named and left running, its two files byte for byte. P (the control): it
         names this home's copy: told off. U: systemd could not answer: "Not now", exit 3, nothing told off, and the
-        step taken as printed (the forge's unit moved out of that folder) lets uninstall go on. NOT SEEN BY US: what
-        real systemd holds for a unit whose file is mode 000 (the stand-in reads the file, and answers no start line)."""
+        step taken as printed (the forge's unit moved out of that folder) lets uninstall go on. R, RECORDED on systemd
+        255 (a stock Ubuntu 24.04 guest, 2026-11-26): systemd holds a unit loaded before its file became mode 000,
+        its start line too, and refuses to disable it ("Unit file ... does not exist.", code 1), stopping nothing in
+        that call; uninstall then told the same units off again each alone, stopped the refused one, read every one
+        stopped and went on, naming the link systemctl did not take off. What systemd holds for a unit of mode 000 it
+        has not loaded is NOT SEEN BY US (the stand-in answers no start line)."""
         saved, rel = mirror.system, mirror.release_check
         saved_doors = doors_the_hosts_way(saved, always=True)
         mirror.system, mirror.release_check = (lambda: ("linux", "x86_64")), (lambda st, force=False: [])
         other = "/srv/another-home"
         try:
-            for world in ("Q another home's sync", "P this home's sync", "U systemd does not answer"):
+            for world in ("Q another home's sync", "P this home's sync", "U systemd does not answer",
+                          "R systemd holds the forge as loaded"):
                 with Home() as h, self.subTest(world=world):
                     p = mirror.paths()
                     forge, sync_unit, timer = mirror.service_files(p)
@@ -9077,6 +9159,14 @@ class G9(unittest.TestCase):
                     h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
                     if world.startswith("U"):
                         h.bus_answer = (1, "")
+                    link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
+                    if world.startswith("R"):
+                        # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, walk6 and walk6b, 2026-11-26): the
+                        # unit loaded before its file became mode 000 is held with its start line; disable refuses
+                        # the whole call ("Unit file ... does not exist.", code 1) and stops nothing; stop works
+                        h.bus_loaded[os.path.basename(forge)] = mirror.unit_text(p)
+                        os.makedirs(os.path.dirname(link), exist_ok=True)
+                        os.symlink(forge, link)
                     try:
                         n = len(h.calls)
                         rc, out = quiet(mirror.main, ["uninstall"])
@@ -9098,6 +9188,18 @@ class G9(unittest.TestCase):
                             continue
                         self.assertEqual(rc, 0, out)
                         timer_off = any(mirror.SYNC_UNIT + ".timer" in c for c in offs)
+                        if world.startswith("R") and os.geteuid() != 0:
+                            self.assertNotIn("Not now", out)
+                            self.assertIn(["systemctl", "--user", "stop", mirror.SERVICE], offs)
+                            self.assertEqual(h.units_up & {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}, set(), out)
+                            self.assertIn("Switched off first, and read off before anything was removed: the forge's "
+                                          "service", out)
+                            said = [x for x in out.split("\n") if x.startswith(f"Not taken: {link}")]
+                            self.assertEqual(len(said), 1, out)
+                            self.assertIn("(it answered: Failed to disable unit: Unit file "
+                                          f"{os.path.basename(forge)} does not exist.)", said[0])
+                            self.assertTrue(said[0].endswith(f"rm {shlex.quote(link)}"), said[0])
+                            self.assertTrue(os.path.islink(link))
                         if world.startswith("Q"):
                             self.assertFalse(timer_off, (offs, out))
                             self.assertIn(mirror.SYNC_UNIT + ".timer", h.units_up)

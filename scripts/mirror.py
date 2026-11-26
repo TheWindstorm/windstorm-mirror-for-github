@@ -907,6 +907,7 @@ def lost_record_stop(p, lost):
 def home_is_not_ours(p, use=False, dry=False):
     """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it.
     `use`: the person's --use-this-folder (M158)."""
+    _take_on_pending.clear()
     stop = service_value_stop(p)
     if stop:
         return stop
@@ -985,8 +986,19 @@ def home_is_not_ours(p, use=False, dry=False):
                                          if second else "move those out of it (into a folder of your own, to keep "
                                          "them)") + ", and run setup again.")
     if taken_on and not dry:
-        take_folder_on(p, lost, rec)
+        _take_on_pending[:] = [(p, lost, rec)]     # taken on at setup's first write, after its last stop (walk 11-26)
     return None
+
+
+_take_on_pending = []
+
+
+def take_on_now():
+    """setup --use-this-folder's take-on, made only once no stop of setup's is left before its first write: a stop
+    after it (lingering not chosen, a sync holding the lock) would else say "Nothing was changed" over a record
+    already set aside and written anew (seen 2026-11-26 on a stock Ubuntu 24.04 guest)."""
+    while _take_on_pending:
+        take_folder_on(*_take_on_pending.pop())
 
 
 def run(cmd, **kw):
@@ -2188,6 +2200,7 @@ SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told 
 # variables themselves, not from words.)
 NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
 SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
+SYSTEMD_REFUSED = []    # (unit, systemctl's first line) for each unit whose disable systemd refused at uninstall
 
 
 def systemd_off(p, only=None):
@@ -2200,8 +2213,20 @@ def systemd_off(p, only=None):
     the units (SYSTEMD_UNITS' suffixes) uninstall showed to be this home's; no other is told off or read."""
     pick = [(x, w) for x, w in SYSTEMD_UNITS if only is None or x in only]
     told = [SERVICE if x is None else SYNC_UNIT + x for x, _ in pick if x != ".service"]
+    del SYSTEMD_REFUSED[:]
     if told:
-        run(["systemctl", "--user", "disable", "--now", *told])
+        off = run(["systemctl", "--user", "disable", "--now", *told])
+        if off.returncode != 0:
+            # Seen 2026-11-26 on systemd 255 (a stock Ubuntu 24.04 guest, the forge's unit file at mode 000 while
+            # systemd held it loaded): disable refuses the whole call ("Failed to disable unit: Unit file ... does
+            # not exist.", code 1) and stops nothing, the timer in the same call too; stop needs no file. So each
+            # unit is told off alone, and one whose disable is refused is stopped, its refusal kept in its own words.
+            for u in told:
+                one = run(["systemctl", "--user", "disable", "--now", u]) if len(told) > 1 else off
+                if one.returncode != 0:
+                    said = [x.strip() for x in shown_lines(one.stderr or one.stdout)]
+                    SYSTEMD_REFUSED.append((u, said[0] if said else f"code {one.returncode}"))
+                    run(["systemctl", "--user", "stop", u])
     seen = []
     for suffix, words in pick:
         unit = SERVICE if suffix is None else SYNC_UNIT + suffix
@@ -4468,6 +4493,7 @@ def cmd_setup(args):
         say(other)
         return 2
     if getattr(args, "from_file", None):
+        take_on_now()
         return setup_from(p, args)
     have = load_state(p).get("gitea")
     if have and have != GITEA_VERSION:
@@ -4506,6 +4532,7 @@ def cmd_setup(args):
                 f"The one next step: run setup again when the sync has ended: {own_command(p, 'setup')}")
             return 3
         _setup_held[0] = True
+    take_on_now()
     made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
@@ -6158,7 +6185,11 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         say(f"Not taken: {unreadable}, so uninstall cannot tell which files in its folders the skill made, and took "
             "nothing from them; nothing there was deleted or written over. Still there, each as it was: "
             + (f"the folder of copies, {p['data']}, with the forge and its copies; " if holds_mirror(p) else "")
-            + f"the forge's binary, the copies' caches and the settings ({p['settings']})"
+            + ", ".join([w for w, there in (
+                (f"the forge's binary ({p['bin']})", os.path.lexists(p["bin"])),
+                (f"the copies' caches ({p['cache']})", os.path.lexists(p["cache"])),
+                (f"the settings ({p['settings']})", os.path.lexists(p["settings"]))) if there]
+                        or ["the other files in those folders"])    # each named only where it is (walk6 (C), 11-26)
             + ("; and, kept because that record cannot show them to be the skill's to take: " + "; ".join(held)
                if held else "") + ". Nothing of the skill's runs. They are yours, to keep or delete after you look "
             "at them.")
@@ -6173,6 +6204,14 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
                 say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
     if (left_service or unread_service) and told_off:
         say("Switched off first, and read off before anything was removed: " + "; ".join(told_off) + ".")
+    for unit, said in SYSTEMD_REFUSED:
+        link = os.path.join(os.path.dirname(p["unit"]), "timers.target.wants" if unit.endswith(".timer")
+                            else "default.target.wants", unit if unit.endswith(".timer") else unit + ".service")
+        if os.path.lexists(link):
+            say(f"Not taken: {link}, the link systemctl made at setup so that {unit} starts by itself. systemctl did "
+                f"not take it off (it answered: {said}), so uninstall stopped the service instead, and read it "
+                "stopped; the link stays where systemctl made it. With the service's program gone it starts "
+                f"nothing; delete it as you delete any file, when you want: rm {shlex.quote(link)}")
     if left_service:
         say("Not taken, and still there: " + "; ".join(left_service) + ". It is switched off; look at it, and keep "
             "or delete it as you choose.")
