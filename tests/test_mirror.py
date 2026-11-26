@@ -10696,6 +10696,155 @@ class G9(unittest.TestCase):
                                       CLOSING], out)
 
 
+    def test_G9_22_what_another_account_owns_in_the_skills_folders_is_never_the_skills(self):
+        """M180 (seen 2026-11-26 on a stock Ubuntu 24.04 guest: a file another account owns in the forge's data folder
+        went with the delete, exit 0, and the line said the skill made it). The skill and its forge run as this
+        account, so nothing another account owns is theirs: the owner read, made once by a command about to remove a
+        tree and, for the delete, before the number is asked, finds it; it stays where it is with the folders above it,
+        is named with whose it is before the number and at the end, "made by the skill" is never said of it, and the
+        leave goes on, exit 0. An owner that could not be read is said as that and stays. With nothing foreign the
+        folder goes as before; a file of the person's own at the forge's top stays as before; a command that removes
+        nothing, and the census, read no tree to its depth. Who owns an entry is the suite's stand-in (an account
+        cannot make another's file); the guest's worlds are B1 and B2."""
+        CLOSING = ("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or "
+                   "delete after you look at it.")
+        import errno
+        other = 3999999                          # an account number no account on this computer has
+
+        def delete(typed):
+            saved, sys.stdin = sys.stdin, AtTerminal(typed)
+            try:
+                return quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+
+        def made(w):
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+
+        def stand_in(owned, unread=()):
+            """The owner read's answers, stood in: `owned` another account's, `unread` not readable; deep reads
+            (below a folder of the forge's top) are counted."""
+            real, deep = getattr(mirror, "entry_owner", None), []    # (none before the cure: its red run reads on)
+
+            def owner(e):
+                e = os.path.abspath(e)
+                deep.append(e)
+                if e in unread:
+                    raise PermissionError(errno.EACCES, "Permission denied", e)
+                return other if e in owned else os.lstat(e).st_uid
+            mirror.entry_owner = owner
+            return real, deep
+
+        def put_back(real):
+            if real is None:
+                del mirror.entry_owner
+            else:
+                mirror.entry_owner = real
+
+        def write(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as h:
+                h.write("x")
+        # (1) the delete: a file and a folder of another account's, deep in the forge's tree
+        with World(self) as w:
+            made(w)
+            p = w.p
+            self.assertEqual(quiet(mirror.main, ["uninstall"])[0], 0)
+            f = os.path.join(p["forge"], "data", "theirs.txt")
+            d = os.path.join(p["forge"], "data", "lfs", "theirs")
+            write(f)
+            write(os.path.join(d, "g"))
+            real, deep = stand_in({os.path.abspath(f), os.path.abspath(d)})
+            try:
+                rc, out = delete("2\n")
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(mirror.copies_on_disk(p), 0, out)
+                self.assertEqual(left_in(p["forge"]), ["data", "data/lfs", "data/lfs/theirs", "data/lfs/theirs/g",
+                                                       "data/theirs.txt"], out)
+                said = f"{d} (another account owns it, account {other}); {f} (another account owns it, account {other})"
+                first = out.split("type the number of copies it holds")[0]
+                self.assertIn(f"Not the skill's, so it stays where it is, with the folders above it: {said}.", first)
+                for x in (f, d):
+                    self.assertIn(f"  {x}: another account owns it, account {other}\n", out)
+                self.assertNotIn(os.path.join(d, "g"), out, "inside another account's folder nothing is read")
+                self.assertNotIn("each thing the skill made in it by name", out)
+                self.assertNotIn("sudo chown", out)
+                last = out.rstrip("\n").split("\n")[-2:]
+                self.assertTrue(last[0].startswith("The copies are deleted: the 2 on the disk are gone. The folder of "
+                                                   f"copies stays at {p['data']}, because it holds what is not the "
+                                                   "skill's; in it now: forge (the skill's, kept because it holds "),
+                                out)
+                self.assertEqual(last[1], CLOSING, out)
+                rc, out = delete("0\n")          # run again: nothing more goes, and it ends 0
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(left_in(p["forge"]), ["data", "data/lfs", "data/lfs/theirs", "data/lfs/theirs/g",
+                                                       "data/theirs.txt"], out)
+                self.assertNotIn("sudo chown", out)
+                # (6) a command that removes nothing reads no tree to its depth, nor does the census
+                for cmd in (["status"], ["uninstall"]):
+                    del deep[:]
+                    quiet(mirror.main, cmd)
+                    self.assertEqual([x for x in deep if mirror.inside(x, p["forge"]) or mirror.inside(x, p["cache"])],
+                                     [], cmd)
+            finally:
+                put_back(real)
+        # (2) plain uninstall's own tree removals: a file of another account's in a cache of one copy stays, named
+        with World(self) as w:
+            made(w)
+            p = w.p
+            cache = sorted(os.path.join(p["cache"], x) for x in os.listdir(p["cache"]))[0]
+            g = os.path.join(cache, "objects", "theirs.pack")
+            write(g)
+            real, deep = stand_in({os.path.abspath(g)})
+            try:
+                rc, out = quiet(mirror.main, ["uninstall"])
+            finally:
+                put_back(real)
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.isfile(g), out)
+            self.assertEqual(left_in(cache), ["objects", "objects/theirs.pack"], out)
+            self.assertIn(f"  {g}: another account owns it, account {other}\n", out)
+            self.assertEqual(out.rstrip("\n").split("\n")[-1], CLOSING, out)
+        # (3) the control, nothing foreign: the folder goes, today's line word for word; (4) the person's own file at
+        # the forge's top stays as before, with no owner words; (5) an owner that could not be read stays, said so
+        for world in ("control", "top", "unread"):
+            with self.subTest(world=world), World(self) as w:
+                made(w)
+                p = w.p
+                self.assertEqual(quiet(mirror.main, ["uninstall"])[0], 0)
+                top = os.path.join(p["forge"], "readme.txt")
+                u = os.path.join(p["forge"], "data", "unread.txt")
+                if world == "top":
+                    write(top)
+                if world == "unread":
+                    write(u)
+                real, deep = stand_in(set(), {os.path.abspath(u)} if world == "unread" else ())
+                try:
+                    rc, out = delete("2\n")
+                finally:
+                    put_back(real)
+                self.assertEqual(rc, 0, out)
+                if world == "control":
+                    self.assertFalse(os.path.exists(p["data"]), out)
+                    self.assertIn(f"  {p['data']}: the folder of copies (2 copies) and the record of what the skill "
+                                  "did here, each thing the skill made in it by name\n", out)
+                    self.assertNotIn("Not the skill's", out)
+                elif world == "top":
+                    self.assertTrue(os.path.isfile(top), out)
+                    self.assertIn(f"  {top}\n", out)
+                    self.assertNotIn("another account owns it", out)
+                    self.assertNotIn("Not the skill's, so it stays where it is, with the folders above it", out)
+                else:
+                    self.assertTrue(os.path.isfile(u), out)
+                    self.assertIn(f"Not the skill's, so it stays where it is, with the folders above it: {u} (whose it "
+                                  "is could not be read (PermissionError)).", out)
+                    self.assertIn(f"  {u}: whose it is could not be read (PermissionError)\n", out)
+                    self.assertTrue(out.rstrip("\n").split("\n")[-2].startswith("The copies are deleted"), out)
+
     def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):
         """Rule 8 (the family's): a person who wants to leave is never refused. A running sync is a wait that says
         what holds it and the one next step; the last thing printed says what is gone and what is kept; run twice,

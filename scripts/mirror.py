@@ -6200,6 +6200,7 @@ def cmd_uninstall(args):
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
     removed, linger_said, left_service, foreign, unreadable, kept, told = [], "", [], [], None, [], []
+    owners = {}                          # M180: what the owner read found not mine, by path
     stopped = stays = None               # M179: the line of a delete the system refused part-way, said last; the
                                          # line of the folder that stays, above the closing sentence
     try:
@@ -6330,7 +6331,11 @@ def cmd_uninstall(args):
         rec_now, unreadable = read_made(p)
         if rec_now is not None:
             foreign = not_ours(p)
-            remove_made(p, [os.path.dirname(p["bin"]), p["cache"], p["conf"], p["script"]], removed)
+            leave = [os.path.dirname(p["bin"]), p["cache"], p["conf"], p["script"]]
+            theirs = not_mine_in(p, leave)      # M180: read once, before anything of those goes
+            owners.update(theirs)
+            foreign = sorted(set(foreign) | set(theirs))
+            remove_made(p, leave, removed, keep=theirs)
     finally:
         if os.path.exists(p["data"]):
             drop_lock(p)
@@ -6350,13 +6355,19 @@ def cmd_uninstall(args):
             "yours now, as it is.")
         rc = 1
     elif args.delete_copies and copies_here:
+        theirs = not_mine_in(p, [p["data"]])   # M180: read once, before the number is asked, so it is named first
+        owners.update(theirs)
+        if theirs:
+            names, changed = named_ten(theirs)
+            say(f"Not the skill's, so it stays where it is, with the folders above it: {names}"
+                + (f"; {SHOWN_CHANGED}." if changed else "."))
         say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds. Only "
             "what the skill made goes; anything else in it stays where it is, and is named:")
         answer = input("> ").strip()
         if answer == str(n):
-            foreign = sorted(set(foreign) | set(not_ours(p)))     # read again: a file may have arrived meanwhile
+            foreign = sorted(set(foreign) | set(not_ours(p)) | set(theirs))   # read again: a file may have arrived
             refused, before = take_data(p, removed, f"the folder of copies ({n} copies)", f"{p['forge']}: the {n} "
-                                        "copies (the forge's own folders in it)", foreign)
+                                        "copies (the forge's own folders in it)", foreign, keep=theirs)
             if refused is not None:
                 stopped, rc = not_deleted_line(p, refused, before, n), 1
             elif os.path.exists(p["data"]):
@@ -6366,8 +6377,10 @@ def cmd_uninstall(args):
                 f"--delete-copies again and type {n}.")
             rc = 1
     elif args.delete_copies and os.path.exists(p["data"]):         # no copies left in it: nothing to ask
-        foreign = sorted(set(foreign) | set(not_ours(p)))
-        refused, before = take_data(p, removed, "the skill's folder", None, foreign)
+        theirs = not_mine_in(p, [p["data"]])   # M180: read once, before anything goes
+        owners.update(theirs)
+        foreign = sorted(set(foreign) | set(not_ours(p)) | set(theirs))
+        refused, before = take_data(p, removed, "the skill's folder", None, foreign, keep=theirs)
         if refused is not None:                                     # M179: never passed over here either
             stopped, rc = not_deleted_line(p, refused, before, n), 1
         elif os.path.exists(p["data"]):
@@ -6376,7 +6389,7 @@ def cmd_uninstall(args):
         take_made_folders(st, removed)
     uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
                      unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(rc and stopped),
-                     stays=stays)
+                     stays=stays, owners=owners)
     if unreadable and holds_mirror(p):     # M158: the way to go on, named once, last
         say(USE_FOLDER_STEP + own_command(p, "setup", "--use-this-folder"))
     if stopped:                            # M179: where the delete stopped and the one next step, last
@@ -6393,23 +6406,25 @@ class Arrived(Exception):
         self.path = path
 
 
-def take_data(p, removed, what, copies_line, known=()):
+def take_data(p, removed, what, copies_line, known=(), keep=()):
     """The delete: what the record holds in the data folder goes, by name; the record goes last, once nothing it
     names is still here; the folder goes once it is empty. M179: the forge's folder, with the copies, goes first,
     and the rest only once it is gone, so a removal that stops part-way leaves the state and the record, and the
     number asked stays the same. `known`: what in the folder was read as not the skill's before the removal (it stays
     there, and is named). Gives (the first error the system answered, or Arrived for an entry there after the removal
-    that was not there before it; the copies on the disk before), or (None, ...) when nothing was refused."""
+    that was not there before it; the copies on the disk before), or (None, ...) when nothing was refused. M180:
+    `keep`, what the owner read found not mine before the number was asked, stays where it is, with the folders above
+    it."""
     gone, failed, before = len(removed), [], copies_on_disk(p)
-    remove_made(p, [p["forge"]], removed, failed)
+    remove_made(p, [p["forge"]], removed, failed, keep)
     if not failed:
         # a write that landed once the forge's folder had gone by is found while the state and the record are still
         # there to count it against
-        new = sorted(set(map(os.path.abspath, not_ours(p))) - set(map(os.path.abspath, known)))
+        new = sorted(set(map(os.path.abspath, not_ours(p))) - set(map(os.path.abspath, known)) - set(keep))
         if new:
             failed.append(Arrived(new[0]))
     if not failed:
-        remove_made(p, [p["data"]], removed, failed)
+        remove_made(p, [p["data"]], removed, failed, keep)
     if not failed:
         rec_left, why = read_made(p)
         try:
@@ -6470,6 +6485,85 @@ def folder_stays_line(p, before):
             f"now: {', '.join(said)}" + (f"; {SHOWN_CHANGED}." if changed else "."))
 
 
+def entry_owner(path):
+    """M180: the account that owns this entry (the link itself, for a link), by its number."""
+    return os.lstat(path).st_uid
+
+
+def owner_read(path):
+    """M180: the owner read, three answers: ("mine", uid), ("another", uid), ("unread", the error's class)."""
+    try:
+        uid = entry_owner(path)
+    except OSError as e:
+        return "unread", type(e).__name__
+    return ("mine" if uid == os.getuid() else "another"), uid
+
+
+def whose_words(answer):
+    """M180: whose an entry is, as a line says it."""
+    kind, it = answer
+    return (f"another account owns it, {owner_words(it)}" if kind == "another" else
+            f"whose it is could not be read ({it})")
+
+
+def not_mine_in(p, targets):
+    """M180: the one deep read, made only by a command about to remove the skill's trees, before it removes anything
+    (the delete: before it asks the number): every entry at or under what the record holds in `targets` that the owner
+    read does not answer "mine" for, as {path: answer}. The skill and its forge run as this account, so nothing
+    another account owns is theirs. lstat only, no link followed; inside a folder that is not mine nothing is read
+    (it stays whole). A folder of mine that cannot be listed is left to the removal (M179's stop names it)."""
+    rec, why = read_made(p)
+    if rec is None:
+        return {}
+    targets = [os.path.abspath(t) for t in targets]
+    found = {}
+    for k in sorted(rec):
+        if not any(k == t or inside(k, t) for t in targets) or not os.path.lexists(k):
+            continue
+        if any(inside(k, x) for x in found):
+            continue
+        answer = owner_read(k)
+        if answer[0] != "mine":
+            found[k] = answer
+            continue
+        if not rec[k].startswith("tree:") or not os.path.isdir(k) or os.path.islink(k):
+            continue
+        for root, dirs, files in os.walk(k):
+            for n in list(dirs) + files:
+                e = os.path.join(root, n)
+                answer = owner_read(e)
+                if answer[0] != "mine":
+                    found[e] = answer
+                    if n in dirs:
+                        dirs.remove(n)
+    return found
+
+
+def named_ten(found):
+    """M180: the names of what stays because it is not the skill's: the first ten, each as the tool shows names and
+    with whose it is, then "and N more"; and whether a name was shown changed."""
+    names = sorted(found)
+    said = [f"{shown_as_is(x)} ({whose_words(found[x])})" for x in names[:10]]
+    more = len(names) - 10
+    return "; ".join(said) + (f"; and {more} more" if more > 0 else ""), not all(shows_as_is(x) for x in names[:10])
+
+
+def remove_chain(e, keep):
+    """M180: remove `e` but what `keep` names in it: a subtree that holds nothing of `keep` goes whole (shutil.rmtree,
+    as before); only the folders on the way down to what stays are walked, and they are given back (the skill's own,
+    kept because they hold what is not)."""
+    if e in keep:
+        return []
+    inner = [t for t in keep if inside(t, e)]
+    if not inner:
+        rmtree_whole_path(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
+        return []
+    held = [e]
+    for c in sorted(os.listdir(e)):
+        held.extend(remove_chain(os.path.join(e, c), inner))
+    return held
+
+
 def rmtree_whole_path(path):
     """M179: shutil.rmtree, stopping at the first refusal with that error, its file name the whole path of what was
     refused (seen 2026-11-26 on Python 3.12: rmtree's own error names it relative to the folder it was in, so a line
@@ -6511,8 +6605,21 @@ def not_deleted_line(p, e, before, n):
     elif e.errno in (errno.EACCES, errno.EPERM):
         # unlinking a name, or taking a folder out, is refused by the folder that holds it; listing or entering
         # a folder, by that folder itself
+        refused = at
         if not (os.path.isdir(at) and not os.path.islink(at) and not os.access(at, os.R_OK | os.X_OK)):
             at = os.path.dirname(at)
+        theirs = next((x for x in (refused, at) if owner_read(x)[0] == "another"), None)
+        if theirs:
+            # M180: there after the read made before the removal: it is not the skill's and stays; no line changes
+            # its owner or removes it, and the same command again reads it first, leaves it and finishes
+            shown, changed = shown_one(theirs)
+            asked = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)
+            return (f"Not deleted: the folder of copies is still at {p['data']}. Its removal stopped at {shown}"
+                    f"{changed}: {whose_words(owner_read(theirs))}, so it is not the skill's and stays where it is "
+                    f"({type(e).__name__}); the rest of the folder is still there, with the record of what the skill "
+                    "did here. The one next step: run the same command again"
+                    + (f" and type {n}" if asked else "") + "; it leaves that where it is and finishes: "
+                    + own_command(p, "uninstall", "--delete-copies"))
         _, why, step = folder_words(p, at)
         why = f"{why} ({type(e).__name__})"
     elif e.errno in (errno.ENOTEMPTY, errno.EEXIST):
@@ -6563,11 +6670,12 @@ def take_service_file(p, f, removed, left):
         left.append(f"{f} (not as the skill wrote it: changed since, or written by something else)")
 
 
-def remove_made(p, targets, removed, failed=None):
+def remove_made(p, targets, removed, failed=None, keep=()):
     """Remove what the record says the skill made at or inside each target: a file by its name, a tree a program
     of the skill's wrote (checked by its top-level names first), a folder only once it is empty. Each removed thing
     is named; nothing the record does not hold is touched. M179: each removal the system refused is put in `failed`
-    (the error itself) where a caller gives one; the others go on."""
+    (the error itself) where a caller gives one; the others go on. M180: what `keep` names (the owner read's answers
+    that are not "mine", read before) stays where it is, with the folders above it, which stay the skill's."""
     rec, why = read_made(p)
     if rec is None:
         return
@@ -6578,6 +6686,8 @@ def remove_made(p, targets, removed, failed=None):
     gone, caches, as_dir = [], 0, []
     for k in mine:
         kind = rec[k]
+        if k in keep:                       # M180: not the skill's, whatever the record says: left as it is
+            continue
         try:
             if kind == "file" and (os.path.isfile(k) or os.path.islink(k)):
                 os.remove(k)
@@ -6586,17 +6696,17 @@ def remove_made(p, targets, removed, failed=None):
                 allowed = FORGE_NAMES if kind == "tree:forge" else GIT_NAMES if kind == "tree:git" else None
                 names = os.listdir(k)                 # read now, at the moment of removal
                 other = [x for x in names if allowed is not None and x not in allowed and not x.endswith(".lock")]
-                if other:                             # what the program wrote goes; the rest and the folder stay
+                held = [t for t in keep if inside(t, k)]          # M180: another account's, at any depth
+                if other or held:                     # what the program wrote goes; the rest and the folder stay
                     for x in names:
                         if x not in other:
-                            e = os.path.join(k, x)
-                            rmtree_whole_path(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
+                            as_dir.extend(remove_chain(os.path.join(k, x), held))
                     as_dir.append(k)                  # still the skill's folder: it goes once it is empty
                 else:
                     rmtree_whole_path(k)
                 if kind == "tree:git":
                     caches += 1
-                elif not other:
+                elif not other and not held:
                     removed.append(k)
             elif kind == "dir" and os.path.isdir(k) and not os.path.islink(k) and not os.listdir(k):
                 os.rmdir(k)
@@ -6702,7 +6812,7 @@ def stayed_for(p, foreign):
 
 def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
                      left_service=(), unread_service=None, kept_jobs=(), told_off=(), not_deleted=False,
-                     stays=None):
+                     stays=None, owners=None):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
     it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
@@ -6734,15 +6844,18 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
             "at them.")
     if foreign:
         say("Not the skill's, so left where they are (yours, or put there since setup):")
-        for x in foreign:                  # M179: a name somebody else chose, through the tool's own name display
-            say(f"  {shown_as_is(x)}")
+        owners = owners or {}              # M180: whose, from the read made before the removal; never read here
+        for x in foreign[:10]:             # M179: a name somebody else chose, through the tool's own name display
+            say(f"  {shown_as_is(x)}" + (f": {whose_words(owners[x])}" if x in owners else ""))
+        if len(foreign) > 10:
+            say(f"  and {len(foreign) - 10} more")
         held = stayed_for(p, foreign)
         if held:
             say("Folders of the skill's that stayed because they hold those:")
             for d in sorted(held):
                 say(f"  {d}: holds " + ", ".join(shown_as_is(x) for x in sorted(held[d])[:3])
                     + (", and more" if len(held[d]) > 3 else ""))
-        if not all(shows_as_is(x) for x in foreign):
+        if not all(shows_as_is(x) for x in foreign[:10]):
             say(f"In those names, {SHOWN_CHANGED}.")
     if (left_service or unread_service) and told_off:
         say("Switched off first, and read off before anything was removed: " + "; ".join(told_off) + ".")
