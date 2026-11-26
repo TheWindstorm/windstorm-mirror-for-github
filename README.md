@@ -241,6 +241,9 @@ with no key; a sync and a restore on a Mac are not seen yet.
   - `self-update` moving to a newer version: none exists before 0.1.0. Its read of the latest release is seen at
     the release. The road that always works: Claude Code's own plugin update, then `setup`;
 - **Known, and not right yet (due 0.1.1):**
+  - on a Mac where another account, an administrator, installed the developer tools, `status` ends with 1 from the
+    first minute, naming the folders of the Python it runs with as problems; nothing needs doing about them, and
+    0.1.1 says them as plain lines (row M149);
   - on a Mac, a project is not copied or refreshed while GitHub holds in it a branch or tag whose name is not UTF-8
     text, two branches or two tags whose names differ only in upper and lower case (Feature and feature), or two
     that differ only in how an accented letter is written. A Mac's disk keeps each such pair as one file, or cannot
@@ -249,9 +252,10 @@ with no key; a sync and a restore on a Mac are not seen yet.
     macOS 27.2.1 (before this release's guard, the case pair gave a copy called whole that held Feature at
     feature's commit and no feature); not seen with GitHub itself;
   - a project whose branches on GitHub include one named `kept/...` is copied once. At the latest from the first
-    sync after something changes on GitHub, every sync of that project stops with exit 1 and leaves its copy as it
-    was; its line says so in plain words, and that the way to have it refreshed again is to give that branch
-    another name on GitHub. `restore --check` calls such names missing though the copy holds them.
+    sync after something changes on GitHub, every sync of that project reads it from GitHub again, then stops with
+    exit 1 and leaves its copy as it was; its line says so in plain words, and that the way to have it refreshed
+    again is to give that branch another name on GitHub. `restore --check` calls such names missing though the copy
+    holds them.
     `restore --to` brings the project back without them, names them, gives one git line for each that brings it
     over from the copy's own folder in your forge (run each as it is printed), and exits 1. A name holding a
     backtick, a dollar-parenthesis or a character no one can see gets no such line, only a line that lists them,

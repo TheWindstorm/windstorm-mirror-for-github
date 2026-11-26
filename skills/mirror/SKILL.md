@@ -60,7 +60,8 @@ words of your own. Never shorten, merge, reword or leave one out; your own words
    terminal (`go`). Running `--announce` again copies nothing; it says it all again.
 6. `M sync`, only after the person said that `go` kept their go. The first copy can take a while; it says how far
    it is. Without their go it copies nothing and says so.
-7. `M status`. Show the person its `copies:` line and every `problem:` line.
+7. `M status`. Show the person its `copies:` line and every `problem:` line. A `problem:` line about a folder
+   that belongs to another account is that account's: say so, and run nothing for it.
 8. `M restore --check`. Show the person its total. It proves every copy from the forge alone.
 
 To copy only some repositories, before step 5: `M config include <owner/name> ...` or
