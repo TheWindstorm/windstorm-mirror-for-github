@@ -6414,6 +6414,11 @@ class G6(unittest.TestCase):
             self.assertIn(f"Your Gitea account '{person}' is there from before: setup did not change it or its "
                           "password, and the skill holds no password for it. If you do not know its password, the "
                           f"one step: {step} (a password you set for it yourself then stops working).", out)
+            lines = out.splitlines()
+            said = next(i for i, x in enumerate(lines) if x.startswith(f"Your Gitea account '{person}' is there"))
+            forge = next(i for i, x in enumerate(lines) if x.startswith("The forge's service is started")
+                         or x.startswith("The forge runs as your own service"))
+            self.assertGreater(said, forge, "the line stands among setup's last lines")
             self.assertFalse(os.path.exists(p["password"]), out)
             port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
             self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 200, "the person's own password")
@@ -8875,7 +8880,12 @@ class G9(unittest.TestCase):
             self.assertIn(f"  {w.p['forge']}: holds readme.txt", out)
             self.assertNotIn("Kept: nothing", out)
             self.assertNotIn("Kept: the folder of copies", out)
-            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+            # The closing sentence of the list, then, last, what the delete did: the copies are gone, the folder stays
+            last2 = out.strip().splitlines()[-2:]
+            self.assertTrue(last2[0].endswith("it is yours, to keep or delete after you look at it."), out)
+            self.assertTrue(last2[1].startswith(f"The copies are deleted: the 1 on the disk is gone. The folder of "
+                                                f"copies stays at {w.p['data']}, because it holds what is not the "
+                                                "skill's"), out)
             for rel in later:
                 os.remove(os.path.join(root, rel))
             self.assertEqual(uninstall()[0], 0)
@@ -10574,6 +10584,10 @@ class G9(unittest.TestCase):
                 theirs = out.split("Not the skill's, so left where they are")[1].split("\n\n")[0].split("Folders of")[0]
                 self.assertNotIn(os.path.join(p["data"], mirror.MADE_RECORD), theirs, out)
                 self.assertNotIn(f"  {p['forge']}\n", theirs, out)
+                if world == "K3":                # the census shows the name as the new line does, and says so once
+                    self.assertIn(f"  {os.path.join(p['data'], 'a?b.txt')}\n", theirs, out)
+                    self.assertNotIn("`", out)
+                    self.assertEqual(out.count(f"In those names, {mirror.SHOWN_CHANGED}."), 1, out)
                 # the same command again: nothing more of the skill's goes, nothing is said that is not there
                 saved, sys.stdin = sys.stdin, AtTerminal("2\n")
                 try:

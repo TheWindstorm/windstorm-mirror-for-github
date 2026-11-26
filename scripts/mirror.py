@@ -4926,23 +4926,24 @@ def cmd_setup(args):
         raise SystemExit(f"Gitea could not prepare its database: {last_line(out.stderr)}. Run setup again; if it "
                          "stops here again, Gitea's words above are the reason.")
     users = forge_users(p)
-    give_password = None
+    give_password = pw_said = None
     if not st.get("person"):
         name = person_name()
         if name not in users:
             write_private(p["password"], create_user(p, name, admin=True) + "\n")
             say(f"Your Gitea account '{name}' is made. Its first password is in {p['password']} (readable by you "
                 "only).")
+        elif not os.path.exists(p["password"]) and not new_password:
+            pw_said = no_password_line(p, name)           # M175: among setup's last lines, below
         elif not new_password:
-            say(no_password_line(p, name) if not os.path.exists(p["password"]) else
-                f"Your Gitea account '{name}' is there from before: setup did not change it or its password.")
+            say(f"Your Gitea account '{name}' is there from before: setup did not change it or its password.")
         else:
             give_password = name
         st["person"] = name
     elif new_password:
         give_password = st["person"]
     elif not os.path.exists(p["password"]):
-        say(no_password_line(p, st["person"]))
+        pw_said = no_password_line(p, st["person"])       # M175: among setup's last lines, below
     # M84: the key is made whenever its file is missing (after an uninstall that kept the copies, or a cut one), under
     # a name of its own, since Gitea refuses a key name the account already holds.
     key_answer, key_why = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
@@ -5029,7 +5030,7 @@ def cmd_setup(args):
         save_state(p, st)
     # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
     # person must hear before the go is in the announcement's block, the one they say go to.
-    for line in ("After a restart it starts by itself." if back and ok else "", note,
+    for line in (pw_said, "After a restart it starts by itself." if back and ok else "", note,
                  lfs_missing() if not has_git_lfs() else "",
                  *open_folders(p, close=True), PRIVATE_AS_THIS_COMPUTER):
         if line:
@@ -6716,13 +6717,16 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
             "at them.")
     if foreign:
         say("Not the skill's, so left where they are (yours, or put there since setup):")
-        for x in foreign:
-            say(f"  {x}")
+        for x in foreign:                  # M179: a name somebody else chose, through the tool's own name display
+            say(f"  {shown_as_is(x)}")
         held = stayed_for(p, foreign)
         if held:
             say("Folders of the skill's that stayed because they hold those:")
             for d in sorted(held):
-                say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
+                say(f"  {d}: holds " + ", ".join(shown_as_is(x) for x in sorted(held[d])[:3])
+                    + (", and more" if len(held[d]) > 3 else ""))
+        if not all(shows_as_is(x) for x in foreign):
+            say(f"In those names, {SHOWN_CHANGED}.")
     if (left_service or unread_service) and told_off:
         say("Switched off first, and read off before anything was removed: " + "; ".join(told_off) + ".")
     for unit, said in SYSTEMD_LINK_LEFT:
