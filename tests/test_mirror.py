@@ -4196,6 +4196,41 @@ def made_home_tree(h, p):
     return out
 
 
+# launchd_off's own line (scripts/mirror.py): each wait for a job to be taken off, added to launchd.log in the forge's
+# log folder when that folder is there
+LAUNCHD_WAIT_LINE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ (?:" + re.escape(mirror.LAUNCHD_LABEL) + "|"
+                               + re.escape(mirror.SYNC_LABEL) + r"): (?:gone|there|unread) after \d+\.\d s, \d+ "
+                               r"read\(s\), last code -?\d+(?: \(no domain at the screen\))?")
+
+
+def made_home_held(tc, h, p, before):
+    """M158: the whole made home is as it was (made_home_tree, `before` taken with launchd_log_bytes beside it), each
+    path that differs named, paths only, never a byte. On a Mac one file is set aside by its exact path: the forge's
+    launchd.log, which uninstall's take-off of the jobs adds its wait line to (the product's own words); in its
+    place, that file only grew, and each line added has the wait's own form."""
+    tree, log_before = before
+    now = made_home_tree(h, p)
+    log = os.path.join(p["forge"], "log", "launchd.log")
+    if mirror.system()[0] == "darwin":
+        log_now = fread_bytes(log) if os.path.lexists(log) else None
+        tc.assertTrue(log_now is not None or log_before is None, f"{log} is gone")
+        if log_now is not None:
+            old = log_before or b""
+            tc.assertTrue(log_now.startswith(old), f"{log} did not only grow")
+            added = log_now[len(old):].decode("utf-8").splitlines()
+            tc.assertEqual([x for x in added if not LAUNCHD_WAIT_LINE.fullmatch(x)], [],
+                           f"{log}: a line added that is not the wait's own form")
+        tree = {k: v for k, v in tree.items() if k != log}
+        now = {k: v for k, v in now.items() if k != log}
+    tc.assertEqual(sorted(k for k in tree.keys() | now.keys() if tree.get(k) != now.get(k)), [],
+                   "paths in the made home that differ")
+
+
+def launchd_log_bytes(p):
+    log = os.path.join(p["forge"], "log", "launchd.log")
+    return fread_bytes(log) if os.path.lexists(log) else None
+
+
 def kept_file_trial(tc, w, path, wrong):
     """Every form before every command that reads the file: never a traceback, never taken as empty or written
     over, GitHub never asked, and the stop (status: a problem line) names the file, where the read stopped and one
@@ -6024,7 +6059,7 @@ class G6(unittest.TestCase):
                     if pr.poll() is None:
                         pr.terminate()
                         pr.wait(30)
-                before = made_home_tree(h, p)
+                before = made_home_tree(h, p), launchd_log_bytes(p)
                 saved = sys.stdin
                 sys.stdin = AtTerminal("2\n")
                 try:
@@ -6037,10 +6072,10 @@ class G6(unittest.TestCase):
                 self.assertIn(f"it is yours now", out)
                 self.assertEqual(out.count("--use-this-folder"), 1, out)
                 self.assertEqual([x for x in out.strip().split("\n") if x.strip()][-1], mirror.USE_FOLDER_STEP + step)
-                self.assertEqual(made_home_tree(h, p), before)
+                made_home_held(self, h, p, before)
                 rc, out = quiet(mirror.main, ["uninstall"])
                 self.assertEqual(rc, 0, out)
-                self.assertEqual(made_home_tree(h, p), before)
+                made_home_held(self, h, p, before)
                 self.assertIn(f"Not taken: {made} {said}", out)
                 for k in (os.path.join(p["keys"], "someone.key"), p["mirror_key"], p["password"]):
                     self.assertIn(f"({k})", out.split("kept because that record cannot show them")[1].split("\n")[0])
@@ -6726,7 +6761,9 @@ class G6(unittest.TestCase):
         "Nothing was changed". The take-on is made only once no stop of setup's is left before its first write: with
         lingering not chosen, and with a sync holding the lock while the forge's settings file is to be written new,
         setup stops and the record is as it was, none set aside; with both cleared, the way back goes on, one record
-        set aside."""
+        set aside. Lingering is asked on Linux only. On a Mac with nobody logged in at the screen, the folder is taken
+        on and setup then stops on the screen session (1), the take-on said once and one record set aside; with a
+        session there, plain setup goes on (0) and takes nothing on twice."""
         with World(self) as w:
             w.gh.add_repo("someone", "a")
             w.gh.commit("someone/a", {"f": b"1"})
@@ -6737,17 +6774,18 @@ class G6(unittest.TestCase):
             aside = lambda: sorted(x for x in os.listdir(p["data"]) if x.startswith(mirror.MADE_RECORD + "."))
             with open(made, "wb"):
                 pass                                                    # 0 bytes
-            saved = mirror.linger_state
-            mirror.linger_state = lambda: "no"
-            try:
-                rc, out = h.setup("--use-this-folder", choose=False)   # the line exactly as printed, to its next
-            finally:                                                    # stop (lingering not yet chosen)
-                mirror.linger_state = saved
-            self.assertEqual(rc, 2, out)
-            self.assertIn(mirror.LINGER_CHOICE, out)
-            self.assertNotIn("Taken on again", out)
-            self.assertEqual(fread_bytes(made), b"")
-            self.assertEqual(aside(), [])
+            if mirror.system()[0] != "darwin":          # lingering is systemd's question; a Mac never asks it
+                saved = mirror.linger_state
+                mirror.linger_state = lambda: "no"
+                try:
+                    rc, out = h.setup("--use-this-folder", choose=False)   # the line exactly as printed, to its
+                finally:                                                    # next stop (lingering not yet chosen)
+                    mirror.linger_state = saved
+                self.assertEqual(rc, 2, out)
+                self.assertIn(mirror.LINGER_CHOICE, out)
+                self.assertNotIn("Taken on again", out)
+                self.assertEqual(fread_bytes(made), b"")
+                self.assertEqual(aside(), [])
             kept = os.path.join(h.tmp, "kept-by-the-person")
             os.makedirs(kept)
             for pr in h.procs:
@@ -6776,6 +6814,39 @@ class G6(unittest.TestCase):
             self.assertEqual(len(aside()), 1)
             self.assertEqual(fread_bytes(os.path.join(p["data"], aside()[0])), b"")
             self.assertIsNotNone(mirror.read_made(p)[0])
+        if mirror.system()[0] != "darwin":
+            return
+        # The Mac's own stop, after the take-on (the owner's ruling 11-26: kept for 0.1.0, its words true as printed):
+        # with nobody logged in at the screen, the folder is taken on and setup then stops on the screen session; once
+        # a session is there, plain setup goes on and takes nothing on twice.
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            aside = lambda: sorted(x for x in os.listdir(p["data"]) if x.startswith(mirror.MADE_RECORD + "."))
+            with open(made, "wb"):
+                pass                                                    # 0 bytes
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            h.mac_session = False
+            rc, out = h.setup("--use-this-folder")
+            self.assertEqual(rc, 1, out)
+            self.assertEqual(out.count("Taken on again, on your word (--use-this-folder)"), 1, out)
+            self.assertIn(f"The forge's service did not start: {mirror.MAC_NO_SESSION}", out)
+            self.assertNotIn("Nothing was changed", out)
+            self.assertEqual(len(aside()), 1)
+            self.assertEqual(fread_bytes(os.path.join(p["data"], aside()[0])), b"")
+            self.assertIsNotNone(mirror.read_made(p)[0])
+            h.mac_session = True
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("Taken on again", out)
+            self.assertEqual(len(aside()), 1)
 
     def test_G6_25_the_way_back_takes_only_the_skills_own_names_and_forms(self):
         """M158 (G6.25, the owner's ruling 11-26: never by a name alone): with the record not there, setup
@@ -6850,14 +6921,21 @@ class G6(unittest.TestCase):
         """The owner's Q1 (11-26), the meant file's road: with the meant file not readable (0 bytes, cut short, not
         there) and a person's own line in one service file (the forge's unit, or the sync's timer), setup stops and
         writes neither the meant file nor any service file, and switches nothing; with the record of what the skill
-        made unreadable as well, the same, and so with --use-this-folder too (no new record is written)."""
-        if mirror.system()[0] == "darwin":
-            self.skipTest("the systemd road; the Mac's service files are its own test's (G1.24)")
+        made unreadable as well, the same, and so with --use-this-folder too (no new record is written). On a Mac the
+        two files are the forge's and the sync's launch agents, the person's line a comment in the property list, and
+        nothing is loaded, taken off or started."""
+        mac = mirror.system()[0] == "darwin"
         for record in ("read", "0 bytes"):
             with World(self) as w:
                 p, h = w.p, w.home
-                base = os.path.dirname(p["unit"])
-                files = {"the forge's unit": p["unit"], "the sync's timer": os.path.join(base, mirror.SYNC_UNIT + ".timer")}
+                if mac:
+                    base = os.path.dirname(p["plist"])
+                    files = {"the forge's launch agent": p["plist"],
+                             "the sync's launch agent": os.path.join(base, mirror.SYNC_LABEL + ".plist")}
+                else:
+                    base = os.path.dirname(p["unit"])
+                    files = {"the forge's unit": p["unit"],
+                             "the sync's timer": os.path.join(base, mirror.SYNC_UNIT + ".timer")}
                 meant = os.path.join(p["data"], mirror.SERVICE_MEANT)
                 made = os.path.join(p["data"], mirror.MADE_RECORD)
                 whole_meant, whole_made = fread_bytes(meant), fread_bytes(made)
@@ -6865,8 +6943,11 @@ class G6(unittest.TestCase):
                     for form in ("0 bytes", "cut short", "not there"):
                         with self.subTest(record=record, file=which, meant=form):
                             text = fread(f)
+                            theirs = (text.replace("</plist>", "<!-- a line of the person's own -->\n</plist>", 1)
+                                      if mac else text + "# a line of the person's own\n")
+                            self.assertNotEqual(theirs, text)
                             with open(f, "w") as fh:
-                                fh.write(text + "# a line of the person's own\n")
+                                fh.write(theirs)
                             if form == "not there":
                                 os.remove(meant)
                             else:
@@ -6884,6 +6965,9 @@ class G6(unittest.TestCase):
                                                   for x in (meant, made)}, marks)
                                 self.assertEqual([c for c in h.calls[n:] if c[:2] == ["systemctl", "--user"] and any(
                                     v in c for v in ("enable", "start", "stop", "restart", "disable"))], [])
+                                self.assertEqual([c for c in h.calls[n:] if c[:1] == ["launchctl"] and c[1:2] in (
+                                    ["bootstrap"], ["bootout"], ["kickstart"], ["enable"], ["disable"], ["load"],
+                                    ["unload"])], [])
                                 if args:
                                     self.assertIn(f"{f}, and not what setup writes there now", out)
                                     self.assertNotIn("Taken on again", out)
