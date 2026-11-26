@@ -6343,7 +6343,8 @@ class G6(unittest.TestCase):
         600; the person's own status, sync and setup then stopped on a file they could not read, with a step that
         doubles the disk the copies take. Now every command started as root whose folders are another account's, or
         started by sudo where root has no mirror of its own, stops before it reads or writes anything, names whose
-        mirror it is by number, and gives the command to run as that account. Root's own mirror runs as before. The
+        mirror it is by number, and gives the command as typed, every option kept, to run as that account. Root's
+        own mirror runs as before. The
         administrator's number is moved here to stand for root: the suite does not run as root."""
         me = os.getuid()
         saved_root, saved_euid, saved_env = mirror.ROOT_UID, os.geteuid, dict(os.environ)
@@ -6377,9 +6378,15 @@ class G6(unittest.TestCase):
                         f"Stopped: {cmd} runs here as root (account 0), and the skill runs as the account whose "
                         f"mirror it is, {who}: a run as root would leave files in that account's folders that it "
                         f"cannot read. So {cmd} reads nothing and changes nothing: nothing was copied, written or "
-                        f"taken away. The one next step: run the same command again as {who}, without sudo, with the "
-                        f"same options: {mirror.own_command(p, cmd)}"), argv)
+                        f"taken away. The one next step: run the same command again as {who}, without sudo: "
+                        f"{mirror.own_command(p, *map(shlex.quote, argv))}"), argv)
                     self.assertNotIn("Traceback", out)
+                # every option kept (setup --dry-run pasted is never a setup); a name the tool does not print as
+                # it is gets no line
+                rc, out = run("config", "include", "someone/a`b`")
+                self.assertEqual(rc, 2)
+                self.assertTrue(out.endswith(f"without sudo, with the options you gave it ({mirror.SHOWN_CHANGED} in "
+                                             "them, so no line is given)"), out)
                 self.assertEqual(tree(h.tmp), before, "a command started as root changed a file")
                 # started by sudo: the account it came from is named, by number
                 os.environ["SUDO_UID"] = str(me)

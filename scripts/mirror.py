@@ -3854,7 +3854,7 @@ def link_left_line(link, unit, said):
 ROOT_UID = 0                        # the administrator's account number (the suite moves it to its own)
 
 
-def root_door(p, cmd):
+def root_door(p, cmd, typed=()):
     """M177 (G6.35): a command started as root (account 0) whose folders, or whose sudo, are another account's
     stops at the door, before it reads or writes anything (root started by sudo with no mirror of its own is
     stopped too: the mirror it means is that account's). Seen on a stock Ubuntu 24.04 guest, 2026-11-26: with
@@ -3884,7 +3884,10 @@ def root_door(p, cmd):
                           is not None else "a run as root looks for a mirror in root's own home, where there is "
                           "none, and would make one there") + f". So {cmd} reads "
             "nothing and changes nothing: nothing was copied, written or taken away. The one next step: run the "
-            f"same command again as {who}, without sudo, with the same options: {own_command(p, cmd)}")
+            f"same command again as {who}, without sudo" + (
+                f": {own_command(p, *map(shlex.quote, typed))}" if typed and all(shows_as_is(x) for x in typed) else
+                f", with the options you gave it ({SHOWN_CHANGED} in them, so no line is given)" if typed else
+                f": {own_command(p, cmd)}"))
 
 
 def folders_floor(p, cmd):
@@ -6599,7 +6602,8 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
-    floor = root_door(paths(), a.cmd + (f" {a.key_cmd}" if a.cmd == "key" else ""))    # M177: before any read
+    floor = root_door(paths(), a.cmd + (f" {a.key_cmd}" if a.cmd == "key" else ""),    # M177: before any read
+                      sys.argv[1:] if argv is None else argv)
     if floor:
         say(floor)
         return 2
