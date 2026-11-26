@@ -16,6 +16,7 @@ if sys.version_info < (3, 9):
     sys.exit(3)
 import argparse
 import contextlib
+import errno
 import fcntl
 import base64
 import calendar
@@ -3882,8 +3883,8 @@ def root_door(p, cmd, typed=()):
     return (f"Stopped: {cmd} runs here as root (account 0)" + (f", started by sudo from {owner_words(by)}"
             if by is not None else "") + ", and the skill runs as the account whose mirror it is, "
             f"{who}: " + ("a run as root would leave files in that account's folders that it cannot read" if theirs
-                          is not None else "a run as root looks for a mirror in root's own home, where there is "
-                          "none, and would make one there") + f". So {cmd} reads "
+                          is not None else "a run as root looks for a mirror in the home this run was given, where "
+                          "there is none, and would make one there as root's") + f". So {cmd} reads "
             "nothing and changes nothing: nothing was copied, written or taken away. The one next step: run the "
             f"same command again as {who}, without sudo" + (
                 f": {own_command(p, *map(shlex.quote, typed))}" if typed and all(shows_as_is(x) for x in typed) else
@@ -4655,6 +4656,14 @@ def setup_plan(p, st):
     elif not os.path.exists(p["mirror_key"]):
         plan.append(f"give the '{st['mirror_user']}' account that owns the copies a new key of its own in "
                     f"{p['mirror_key']}, readable by you only (its key went with uninstall)")
+    else:
+        # M156 (G6.23), its second case: the dry run names the write-over setup makes of a
+        # kept key that could not be read (seen 2026-11-26 in a made home: at mode 000, the dry run said nothing)
+        answer, why = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
+        if answer == "could not be read":
+            plan.append(f"give the '{st['mirror_user']}' account that owns the copies a new key of its own in "
+                        f"{p['mirror_key']}, readable by you only, in place of the key file there now, which could not "
+                        f"be read: {why}; that file is written over")
     plan.append(f"copy this script to {p['script']}")
     if system()[0] == "darwin" and mac_no_screen():                    # M143: a step that works there
         plan.append("install the forge as your own service (a launch agent), which cannot start now: this account is "
@@ -6074,6 +6083,7 @@ def cmd_uninstall(args):
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
     removed, linger_said, left_service, foreign, unreadable, kept, told = [], "", [], [], None, [], []
+    stopped = None                       # M179: the line of a delete the system refused part-way, said last
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
@@ -6221,42 +6231,144 @@ def cmd_uninstall(args):
         answer = input("> ").strip()
         if answer == str(n):
             foreign = sorted(set(foreign) | set(not_ours(p)))     # read again: a file may have arrived meanwhile
-            take_data(p, removed, f"the folder of copies ({n} copies)", f"{p['forge']}: the {n} copies (the "
-                      "forge's own folders in it)")
+            refused, before = take_data(p, removed, f"the folder of copies ({n} copies)", f"{p['forge']}: the {n} "
+                                        "copies (the forge's own folders in it)", foreign)
+            if refused is not None:
+                stopped, rc = not_deleted_line(p, refused, before, n), 1
         else:
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
             rc = 1
     elif args.delete_copies and os.path.exists(p["data"]):         # no copies left in it: nothing to ask
         foreign = sorted(set(foreign) | set(not_ours(p)))
-        take_data(p, removed, "the skill's folder", None)
+        refused, before = take_data(p, removed, "the skill's folder", None, foreign)
+        if refused is not None:                                     # M179: never passed over here either
+            stopped, rc = not_deleted_line(p, refused, before, n), 1
     if record == "read":
         take_made_folders(st, removed)
     uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
-                     unread_service=limit, kept_jobs=kept, told_off=told)
+                     unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(stopped))
     if unreadable and holds_mirror(p):     # M158: the way to go on, named once, last
         say(USE_FOLDER_STEP + own_command(p, "setup", "--use-this-folder"))
+    if stopped:                            # M179: where the delete stopped, and the one next step, last
+        say(stopped)
     return rc
 
 
-def take_data(p, removed, what, copies_line):
+class Arrived(Exception):
+    """M179: what a removal found in the data folder after it that was not there before it (a write that landed after
+    rmtree had gone by): its path."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.path = path
+
+
+def take_data(p, removed, what, copies_line, known=()):
     """The delete: what the record holds in the data folder goes, by name; the record goes last, once nothing it
-    names is still here; the folder goes once it is empty."""
-    gone = len(removed)
-    remove_made(p, [p["data"]], removed)
-    rec_left, why = read_made(p)
-    try:
-        if rec_left is not None and not any(os.path.lexists(k) for k in rec_left if k != os.path.abspath(p["data"])):
-            os.remove(os.path.join(p["data"], MADE_RECORD))
-        if not os.listdir(p["data"]):
-            os.rmdir(p["data"])
-    except OSError:
-        pass
+    names is still here; the folder goes once it is empty. M179: the forge's folder, with the copies, goes first,
+    and the rest only once it is gone, so a removal that stops part-way leaves the state and the record, and the
+    number asked stays the same. `known`: what in the folder was read as not the skill's before the removal (it stays
+    there, and is named). Gives (the first error the system answered, or Arrived for an entry there after the removal
+    that was not there before it; the copies on the disk before), or (None, ...) when nothing was refused."""
+    gone, failed, before = len(removed), [], copies_on_disk(p)
+    remove_made(p, [p["forge"]], removed, failed)
+    if not failed:
+        # a write that landed once the forge's folder had gone by is found while the state and the record are still
+        # there to count it against
+        new = sorted(set(map(os.path.abspath, not_ours(p))) - set(map(os.path.abspath, known)))
+        if new:
+            failed.append(Arrived(new[0]))
+    if not failed:
+        remove_made(p, [p["data"]], removed, failed)
+    if not failed:
+        rec_left, why = read_made(p)
+        try:
+            if rec_left is not None and not any(os.path.lexists(k) for k in rec_left
+                                                if k != os.path.abspath(p["data"])):
+                os.remove(os.path.join(p["data"], MADE_RECORD))
+            if not os.listdir(p["data"]):
+                os.rmdir(p["data"])
+        except OSError as e:
+            failed.append(e)
+    if not failed and os.path.exists(p["data"]) and isinstance(known, list):
+        # the state and the record are gone: what is left is not the skill's, and each entry is named as kept
+        try:
+            known.extend(sorted(set(os.path.join(p["data"], x) for x in os.listdir(p["data"])) - set(known)))
+        except OSError as e:
+            failed.append(e)
+    if failed:
+        return failed[0], before
     if not os.path.exists(p["data"]):
         removed[gone:] = [f"{p['data']}: {what} and the record of what the skill did here, each thing the skill "
                           "made in it by name"]
     elif copies_line and (not os.path.exists(p["forge"]) or set(os.listdir(p["forge"])).isdisjoint(FORGE_NAMES)):
         removed.insert(gone, copies_line)
+    return None, before
+
+
+def rmtree_whole_path(path):
+    """M179: shutil.rmtree, stopping at the first refusal with that error, its file name the whole path of what was
+    refused (seen 2026-11-26 on Python 3.12: rmtree's own error names it relative to the folder it was in, so a line
+    built from it named the working directory)."""
+    def stop(func, at, exc):
+        e = exc if isinstance(exc, BaseException) else exc[1]
+        if isinstance(e, OSError) and e.errno is not None:
+            raise OSError(e.errno, e.strerror, at) from None
+        raise e
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=stop)
+    else:
+        shutil.rmtree(path, onerror=stop)
+
+
+def copies_on_disk(p):
+    """M179: how many copies the forge keeps on the disk now (stock Gitea: data/gitea-repositories/<owner>/<name>.git,
+    each with its HEAD), read from the disk; None when a folder on the way could not be listed."""
+    root = os.path.join(p["forge"], "data", "gitea-repositories")
+    try:
+        owners = [os.path.join(root, o) for o in os.listdir(root)] if os.path.lexists(root) else []
+        return sum(1 for o in owners if os.path.isdir(o) and not os.path.islink(o)
+                   for x in os.listdir(o) if x.endswith(".git") and os.path.isfile(os.path.join(o, x, "HEAD")))
+    except OSError:
+        return None
+
+
+def not_deleted_line(p, e, before, n):
+    """M179: the last line of an uninstall --delete-copies whose removal the system refused part-way, after the person
+    typed the number: where it stopped and why (the error's class, never a byte of a file), how many of the copies on
+    the disk went before it, that the rest and the record stay, and the one next step, with the same number."""
+    at = (os.path.dirname(e.path) if isinstance(e, Arrived) else
+          os.path.abspath(e.filename) if isinstance(e.filename, str) else p["data"])
+    if isinstance(e, Arrived):
+        name, changed = shown_one(e.path)
+        why = (f"something put files into it while it was being removed: {name}{changed} is there now, and was not "
+               "before the removal")
+        step = "end the program that is still writing there"
+    elif e.errno in (errno.EACCES, errno.EPERM):
+        # unlinking a name, or taking a folder out, is refused by the folder that holds it; listing or entering
+        # a folder, by that folder itself
+        if not (os.path.isdir(at) and not os.path.islink(at) and not os.access(at, os.R_OK | os.X_OK)):
+            at = os.path.dirname(at)
+        _, why, step = folder_words(p, at)
+        why = f"{why} ({type(e).__name__})"
+    elif e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+        why = f"something put files into it while it was being removed ({type(e).__name__}: {e.strerror})"
+        step = "end the program that is still writing there"
+    else:
+        why = f"the system refused it ({type(e).__name__}: {e.strerror})"
+        step = "this computer's administrator finds why"
+    shown, changed = shown_one(at)
+    after = copies_on_disk(p)
+    asked = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)   # the number is asked again
+    went = ("how many of the copies on the disk went before it stopped could not be read" if None in (before, after)
+            else "no copy was on the disk" if before == 0 else
+            f"{before - after} of the {before} copies on the disk {'was' if before - after == 1 else 'were'} deleted "
+            "before it stopped")
+    return (f"Not deleted: the folder of copies is still at {p['data']}. Its removal stopped at {shown}{changed}: "
+            f"{why}. {went[0].upper() + went[1:]}; the rest of the folder is still there, with the record of what the "
+            f"skill did here. The one next step: {step}, then run the same command again"
+            + (f" and type {n}" if asked else "") + ": " + own_command(p, "uninstall", "--delete-copies"))
 
 
 def take_service_file(p, f, removed, left):
@@ -6288,10 +6400,11 @@ def take_service_file(p, f, removed, left):
         left.append(f"{f} (not as the skill wrote it: changed since, or written by something else)")
 
 
-def remove_made(p, targets, removed):
+def remove_made(p, targets, removed, failed=None):
     """Remove what the record says the skill made at or inside each target: a file by its name, a tree a program
     of the skill's wrote (checked by its top-level names first), a folder only once it is empty. Each removed thing
-    is named; nothing the record does not hold is touched."""
+    is named; nothing the record does not hold is touched. M179: each removal the system refused is put in `failed`
+    (the error itself) where a caller gives one; the others go on."""
     rec, why = read_made(p)
     if rec is None:
         return
@@ -6314,10 +6427,10 @@ def remove_made(p, targets, removed):
                     for x in names:
                         if x not in other:
                             e = os.path.join(k, x)
-                            shutil.rmtree(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
+                            rmtree_whole_path(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
                     as_dir.append(k)                  # still the skill's folder: it goes once it is empty
                 else:
-                    shutil.rmtree(k)
+                    rmtree_whole_path(k)
                 if kind == "tree:git":
                     caches += 1
                 elif not other:
@@ -6327,8 +6440,9 @@ def remove_made(p, targets, removed):
                 removed.append(k)
             if not os.path.lexists(k):
                 gone.append(k)
-        except OSError:
-            pass
+        except OSError as e:
+            if failed is not None:
+                failed.append(e)
     for t in targets:                       # a target folder of the skill's own goes once it is empty
         try:
             if t not in rec and os.path.isdir(t) and not os.path.islink(t) and not os.listdir(t) and t != p["data"]:
@@ -6424,7 +6538,7 @@ def stayed_for(p, foreign):
 
 
 def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
-                     left_service=(), unread_service=None, kept_jobs=(), told_off=()):
+                     left_service=(), unread_service=None, kept_jobs=(), told_off=(), not_deleted=False):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
     it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
@@ -6492,7 +6606,7 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         # M158 (G6.25): the record setup --use-this-folder set aside is the person's, and named among what is kept
         say(f"Kept: {x}, the record of what the skill made that could not be read, set aside by setup "
             "--use-this-folder as it was. It is yours.")
-    if unreadable:
+    if unreadable or not_deleted:          # M158; M179: said in its own line, last
         pass
     elif os.path.exists(p["forge"]) and record_here and set(os.listdir(p["forge"])) & FORGE_NAMES:
         # M144: while the skill's own copy is there (or could not be read), the words as before; once it is gone, a

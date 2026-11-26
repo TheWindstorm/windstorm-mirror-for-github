@@ -532,6 +532,8 @@ class Home:
                             if u in self.units_up and self.stop_reads:
                                 self.stopping[u] = self.stop_reads
                             self.units_up.discard(u)
+                        if "--now" in cmd and mirror.SERVICE in verb[1:]:
+                            self.forge_ends()
                         return subprocess.CompletedProcess(cmd, 0, "", "\n".join(said) + "\n")
                 if verb[:1] == ["daemon-reload"]:
                     # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): after uninstall's
@@ -564,11 +566,13 @@ class Home:
             if self.forge_follows:
                 label = f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"
                 if cmd in (["systemctl", "--user", "stop", mirror.SERVICE], ["launchctl", "bootout", label]):
-                    for pr in self.procs:
-                        if pr.poll() is None:
-                            pr.terminate()
-                            pr.wait(30)
+                    self.forge_ends()
                     return subprocess.CompletedProcess(cmd, 0, "", "")
+                if cmd[:4] == ["systemctl", "--user", "disable", "--now"] and mirror.SERVICE in cmd[4:]:
+                    # M179: uninstall's own stop. SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): one
+                    # forge process before `uninstall`, none after it. Until 31f64d9 the stand-in ended the forge only
+                    # on `stop`, so in G9.3 the real Gitea went on writing in its folder while --delete-copies took it.
+                    self.forge_ends()
                 if cmd == ["systemctl", "--user", "start", mirror.SERVICE] or (
                         cmd[:2] == ["launchctl", "bootstrap"] and cmd[-1] == mirror.paths()["plist"]):
                     self.start_forge()
@@ -605,6 +609,15 @@ class Home:
                 return subprocess.CompletedProcess(cmd, 1, "", "Access denied")
             return subprocess.CompletedProcess(cmd, 0 if self.service_ok else 1, "", "" if self.service_ok else "Failed to connect to bus")
         return self.saved_run(cmd, **kw)
+
+    def forge_ends(self):
+        """With forge_follows: the forge's service is stopped, so the forge's process has ended when this returns,
+        as systemd's stop job and launchd's bootout end it before they answer."""
+        if self.forge_follows:
+            for pr in self.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
 
     def __enter__(self):
         os.environ.update(self.env)
@@ -5664,7 +5677,9 @@ class G6(unittest.TestCase):
         ended 0 and left it so; one that could not be opened, was not text or was a folder ended them in a
         traceback. Each form: status says the file in a problem line with its step; sync and restore --check stop
         naming it; the step taken as printed (setup) gives the account a new key and keeps every copy; for a folder,
-        setup stops with its own step and changes nothing."""
+        setup stops with its own step and changes nothing. Second case (seen 2026-11-26 in a made home: the key at
+        mode 000, setup --dry-run ended 0 and said nothing of the file the real setup then wrote over): the dry run
+        names that write-over, and the folder's stop, and changes nothing."""
         with World(self) as w:
             w.gh.add_repo("someone", "a")
             w.gh.commit("someone/a", {"f": b"1"})
@@ -5694,6 +5709,19 @@ class G6(unittest.TestCase):
                         self.assertIn(f"Stopped: {mk} could not be read: ", out)
                         self.assertNotIn("does not answer", out)
                         self.assertNotIn(whole.strip()[:20].decode(), out)
+                    self.assertEqual(kept_mark(mk), mark)
+                    # M156's second case: the dry run says every stop and every write-over the real run makes, and
+                    # writes nothing
+                    rc, out = w.home.setup("--dry-run")
+                    if form == "a folder":
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: {mk} is a folder", out)
+                    else:
+                        self.assertEqual(rc, 0, out)
+                        self.assertIn(f"Setup would give the '{mirror.MIRROR_USER}' account that owns the copies a new "
+                                      f"key of its own in {mk}, readable by you only, in place of the key file there "
+                                      "now, which could not be read: ", out)
+                        self.assertIn("; that file is written over.", out)
                     self.assertEqual(kept_mark(mk), mark)
                     rc, out = w.home.setup()                                     # the step, as printed
                     if form == "a folder":
@@ -6407,9 +6435,22 @@ class G6(unittest.TestCase):
                 self.assertEqual(rc, 2, out)
                 self.assertIn(f"started by sudo from {mirror.owner_words(me)}, and the skill runs as the account "
                               f"whose mirror it is, {mirror.owner_words(me)}: a run as root looks for a mirror in "
-                              "root's own home, where there is none, and would make one there. So status reads "
-                              "nothing", out)
+                              "the home this run was given, where there is none, and would make one there as "
+                              "root's. So status reads nothing", out)
                 self.assertFalse(os.path.exists(mirror.paths()["data"]))
+                # the person's home kept (sudo -E), no folder of the skill's in it yet: a first-ever setup typed
+                # with sudo. The same words, which never say whose home it is, and nothing is made in it
+                kept_home = os.path.join(h.tmp, "the-persons-home")
+                os.makedirs(kept_home, mode=0o700)
+                os.environ.pop("WSM_HOME", None)
+                os.environ["HOME"] = kept_home
+                before = tree(kept_home)
+                rc, out = run("setup")
+                self.assertEqual(rc, 2, out)
+                self.assertIn("a run as root looks for a mirror in the home this run was given, where there is none, "
+                              "and would make one there as root's. So setup reads nothing and changes nothing", out)
+                self.assertNotIn("root's own home", out)
+                self.assertEqual(tree(kept_home), before, "a first setup started with sudo made something")
                 # root with no sudo and no mirror: as before ("Run setup first.")
                 os.environ.pop("SUDO_UID", None)
                 self.assertIsNone(mirror.root_door(mirror.paths(), "status"))
@@ -7360,6 +7401,11 @@ class Stranger:
                 self.pr.wait(10)
         self.seen = [x for x in self.pr.stdout.read().splitlines() if x.startswith("REQ ")]
         return self.seen
+
+
+def left_in(d):
+    """What is left in a folder, each path below it, for a failure's message."""
+    return sorted(os.path.relpath(os.path.join(r, x), d) for r, ds, fs in os.walk(d) for x in ds + fs)
 
 
 def stop_forge(h):
@@ -10225,8 +10271,130 @@ class G9(unittest.TestCase):
                 rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
             finally:
                 sys.stdin = saved
+            # M179: a miss says what the command printed and what was left (seen once under load, 2026-11-26)
             self.assertEqual(rc, 0, out)
-            self.assertFalse(os.path.exists(p["data"]))
+            self.assertFalse(os.path.exists(p["data"]), out + "\nleft: " + ", ".join(left_in(p["data"])))
+
+    def test_G9_21_a_delete_that_stops_part_way_says_what_stayed_and_why_and_never_ends_0(self):
+        """M179 (seen 2026-11-26 in a whole run under load: G9.3's third uninstall --delete-copies ended 0 with the
+        folder of copies still there; read the same day: the stand-in's `disable --now` left the real Gitea running,
+        and every failure of the removal was passed over in silence). After the person typed the number, exit 0 and
+        a word of deleting only once the folder is gone. Otherwise the last line names the folder where the removal
+        stopped and why (the error's class), how many of the copies on the disk went before it stopped, that the
+        rest and the record stay, and the one next step, with the same number to type again; exit 1. The copies go
+        first and the state and the record last, so a stop part-way never changes the number asked. A: a folder in
+        the tree at mode 500, the two copies in it. C: a write lands in a folder of the forge's between its emptying
+        and its removal (as seen). D: a write lands once the forge's folder has gone by (its log folder made again).
+        The other account's folder is the guest's world (it needs an administrator to make it)."""
+        def mode_500(p):
+            d = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
+            os.chmod(d, 0o500)
+            return d, lambda: os.path.exists(d) and os.chmod(d, 0o700)
+
+        def writer(p):
+            # as seen in the failed run: a write lands in a folder of the forge's between its emptying and its
+            # removal (here at that moment exactly, every time, through the system's own rmdir)
+            d = os.path.join(p["forge"], "data", "queues", "writer")
+            os.makedirs(d, exist_ok=True)
+            real, landed = os.rmdir, []
+
+            def rmdir(path, *a, **k):
+                if not landed and (path == d or (k.get("dir_fd") is not None and path == os.path.basename(d))):
+                    landed.append(1)
+                    with open(os.path.join(d, "late.log"), "w") as f:
+                        f.write("x")
+                return real(path, *a, **k)
+            os.rmdir = rmdir
+
+            def undo():
+                os.rmdir = real
+                self.assertTrue(landed, "the write landed")
+            return d, undo
+
+        def after_the_forge(p):
+            # a write lands in the data folder itself once the forge's folder has gone by (one that lands in a
+            # folder the skill made goes with it: that is no stop)
+            real, landed, top = os.rmdir, [], os.path.abspath(p["forge"])
+
+            def rmdir(path, *a, **k):
+                out = real(path, *a, **k)
+                if not landed and k.get("dir_fd") is None and os.path.abspath(path) == top:
+                    landed.append(1)
+                    with open(os.path.join(p["data"], "late.log"), "w") as f:
+                        f.write("x")
+                return out
+            os.rmdir = rmdir
+
+            def undo():
+                os.rmdir = real
+                self.assertTrue(landed, "the write landed")
+            return p["data"], undo
+
+        for world, spoil in (("A", mode_500), ("C", writer), ("D", after_the_forge)):
+            with self.subTest(world=world), World(self) as w:
+                for n in ("alpha", "beta"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+                p = w.p
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(any(pr.poll() is None for pr in w.home.procs), "uninstall leaves no forge running")
+                where, undo = spoil(p)
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                    undo()
+                self.assertEqual(rc, 1, out)
+                self.assertTrue(os.path.exists(p["data"]))
+                last = out.rstrip("\n").split("\n")[-1]
+                self.assertTrue(last.startswith(f"Not deleted: the folder of copies is still at {p['data']}. Its "
+                                                f"removal stopped at "), out)
+                gone = re.search(r"(\d) of the 2 copies on the disk (?:was|were) deleted before it stopped; the rest of the "
+                                 r"folder is still there, with the record of what the skill did here", last)
+                self.assertTrue(gone, out)
+                self.assertEqual(int(gone.group(1)), 2 - mirror.copies_on_disk(p), out)
+                again = mirror.own_command(p, "uninstall", "--delete-copies")
+                # the number only where it is asked again: in D the forge's folder is gone, so none is
+                self.assertTrue(last.endswith(f"then run the same command again{'' if world == 'D' else ' and type 2'}: "
+                                              f"{again}"), out)
+                if world == "A":
+                    self.assertIn(f"Its removal stopped at {where}: it is yours, and its mode does not let you "
+                                  "(PermissionError). ", last)
+                    self.assertIn(f"The one next step: give it back its mode: chmod u+rwx {shlex.quote(where)}, then "
+                                  "run the same command again", last)
+                elif world == "C":
+                    self.assertIn(f"Its removal stopped at {where}: something put files into it while it was being "
+                                  "removed (OSError: ", last)
+                    self.assertIn("The one next step: end the program that is still writing there, then run the same "
+                                  "command again", last)
+                else:
+                    late = os.path.join(p["data"], "late.log")
+                    self.assertIn(f"Its removal stopped at {where}: something put files into it while it was being "
+                                  f"removed: {late} is there now, and was not before the removal. ", last)
+                    self.assertIn("The one next step: end the program that is still writing there, then run the same "
+                                  "command again", last)
+                self.assertNotIn("Kept: the folder of copies", out)
+                self.assertNotIn(f"{p['data']}: the folder of copies", out)        # never said as gone
+                self.assertTrue(os.path.exists(p["state"]) and os.path.exists(os.path.join(p["data"], mirror.MADE_RECORD)),
+                                "the state and the record stay, so the number asked stays 2")
+                # the step taken, the same command again: the same number is asked, and the folder goes
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 0, out)
+                if world == "D":                 # what the skill made goes; the file that came is named and stays
+                    self.assertNotIn("type the number", out)
+                    self.assertIn(f"  {late}", out)
+                    self.assertEqual(left_in(p["data"]), ["late.log"], out)
+                    continue
+                self.assertIn("To delete the folder of copies (2 copies,", out)
+                self.assertFalse(os.path.exists(p["data"]), out + "\nleft: " + ", ".join(left_in(p["data"])))
 
 
     def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):
