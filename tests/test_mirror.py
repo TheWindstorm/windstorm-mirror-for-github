@@ -393,8 +393,13 @@ class Home:
             f = os.path.join(base, label + ".plist")
             if not os.path.exists(f):
                 return ""
-            with open(f, "rb") as fh:
-                pl = plistlib.load(fh)
+            try:
+                with open(f, "rb") as fh:
+                    pl = plistlib.load(fh)
+            except (plistlib.InvalidFileException, ValueError):
+                # A file that is not a plist: the stand-in answers it as it answers no file, with no blocks. What
+                # launchctl print gives for a label whose file is not a plist is NOT SEEN BY US.
+                return ""
             if not isinstance(pl, dict):                # a file with no job in it (a bare <plist/>): no block
                 return ""
             args, env = pl.get("ProgramArguments") or [], pl.get("EnvironmentVariables") or {}
@@ -699,6 +704,27 @@ def http_get(url, key=None):
         return r.status, r.headers, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read().decode()
+
+
+def doors_the_hosts_way(real_system):
+    """A Mac runner standing in for Linux has no /proc/net/tcp (seen on GitHub's Mac runners at 649ee99 for G1.9,
+    and at 38590cc for G1.24): setup's door floor and door read then run for real the Mac's own way (netstat), as
+    G1.9 does. Returns the pair to put back."""
+    saved = mirror.read_door, mirror.door_floor
+    if os.path.exists(mirror.PROC_TCP[0]):
+        return saved
+
+    def the_hosts_way(read):
+        def run(*a, **kw):
+            was = mirror.system
+            mirror.system = real_system
+            try:
+                return read(*a, **kw)
+            finally:
+                mirror.system = was
+        return run
+    mirror.read_door, mirror.door_floor = map(the_hosts_way, saved)
+    return saved
 
 
 def tree(root):
@@ -1800,6 +1826,7 @@ class G1(unittest.TestCase):
         manager is asked, never print the value, and name the character and the one next step. On a Mac the same
         Python path is written whole into its file, so setup goes on there."""
         saved_sys, saved_exe = mirror.system, sys.executable
+        saved_doors = doors_the_hosts_way(saved_sys)
         try:
             mirror.system = lambda: ("linux", "x86_64")
             for bad in ("a\nb", "a\x7fb", "a\u2028b", "a\u200bb", "a\udcffb"):   # each planted character as an escape
@@ -1842,6 +1869,7 @@ class G1(unittest.TestCase):
                 self.assertIsNone(mirror.service_value_stop(mirror.paths()))
         finally:
             mirror.system, sys.executable = saved_sys, saved_exe
+            mirror.read_door, mirror.door_floor = saved_doors
 
     def test_G1_24_set_up_is_said_only_when_the_manager_holds_each_word_as_written(self):
         """M148: on Linux setup reads back what systemd parsed for each service, over its bus one word at a time
@@ -2245,6 +2273,7 @@ class G1(unittest.TestCase):
                   1, "open an issue with this line."),
                  ("bus_version", "timeout", f"did not answer over its bus within {mirror.BUS_WAIT} s", 1,
                   "run setup again in a minute."))
+        saved_doors = doors_the_hosts_way(saved)
         try:
             mirror.system = lambda: ("linux", "x86_64")
             for name, value, said, reads, end in cases:
@@ -2294,6 +2323,7 @@ class G1(unittest.TestCase):
                 self.assertFalse([c for c in h.calls if c[0] in ("busctl", "systemctl")])
         finally:
             mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
 
     def test_G1_24_every_read_of_a_service_manager_has_a_limit_and_each_is_read_once(self):
         """M148 (the owner's ruling, 11-25): every read over the manager's bus, and launchd's print, is given
