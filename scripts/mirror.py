@@ -1325,38 +1325,26 @@ def forge_users(p):
     return names
 
 
-def forge_api_call(p, port, method, path, body=None, token=None, basic=None):
-    """M175 (G6.34): one request to the skill's own forge's API, only once the door reads the port as the forge's
-    own (G8.7: a key or a password goes to no other program there), through the one opener (no proxy, no redirect);
-    (status, the answer's bytes), status 0 when nothing was sent or no answer came. What it carries goes in the
-    request, never on a command line."""
-    try:
-        if door(p, port, fresh=True) != "mine":
-            return 0, b""
-    except DoorShut:
-        return 0, b""
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1{path}", method=method,
-                                 data=json.dumps(body).encode() if body is not None else None)
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", "token " + token)
-    if basic:
-        req.add_header("Authorization", "Basic " + base64.b64encode(basic.encode()).decode())
-    try:
-        with forge_opener().open(req, timeout=30) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, b""
-    except (urllib.error.URLError, OSError):
-        return 0, b""
-
-
-def new_forge_password(p, name, port):
+def new_forge_password(p, st, name):
     """M175 (G6.34), on the person's own word (setup --new-password): their Gitea account gets a new password. A token
     of the forge's own command, read from its standard output (Gitea 28.4.0's change-password takes the password on
     its command line only, where other accounts on the computer can read it); the password in a request's body to
     127.0.0.1; the token taken away with the new password before setup ends, and read gone. The password is kept
-    first under a name of its own and takes the file's name only once the forge has it. Gives (the line, done)."""
+    first under a name of its own and takes the file's name only once the forge has it. Every request goes through
+    Forge.call, the one road to the forge (G8.7: it reads the door first), with this change's own authorization in
+    place of the mirror account's key. Gives (the line, done)."""
+    try:
+        forge = Forge(p, st)
+    except KeptUnread:                         # before any token is made: nothing is left on the account
+        return (f"Your Gitea account '{name}' was not given a new password: the '{MIRROR_USER}' account's key file "
+                f"{p['mirror_key']} could not be read just now, and nothing of your account was changed. Run the same "
+                f"command again: {own_command(p, 'setup', '--new-password')}", False)
+
+    def ask(method, path, body=None, auth=None):
+        try:
+            return forge.call(method, path, body, auth=auth)[0]
+        except DoorShut:
+            return 0
     tag = "windstorm-mirror-password-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex()
     out = gitea(p, "admin", "user", "generate-access-token", "--username", name, "--token-name", tag,
                 "--scopes", "write:admin,write:user", "--raw")
@@ -1368,13 +1356,12 @@ def new_forge_password(p, name, port):
     word = secrets.token_urlsafe(24)
     held = p["password"] + ".new"
     write_private(held, word + "\n")
-    code, _ = forge_api_call(p, port, "PATCH", f"/admin/users/{name}", {"login_name": name, "source_id": 0,
-                                                                  "password": word, "must_change_password": False},
-                         token=token)
+    code = ask("PATCH", f"/admin/users/{name}", {"login_name": name, "source_id": 0, "password": word,
+                                                 "must_change_password": False}, auth=f"token {token}")
     if code != 200:
         os.remove(held)
         unclaim(p, [os.path.abspath(held)])
-        left = forge_api_call(p, port, "GET", "/user", token=token)[0] == 200
+        left = ask("GET", "/user", auth=f"token {token}") == 200
         return (f"Your Gitea account '{name}' was not given a new password: the forge answered {code or 'nothing'}, "
                 "and its password is as it was."
                 + (f" A key named {tag} is still on that account, which setup could not take away without the "
@@ -1383,8 +1370,9 @@ def new_forge_password(p, name, port):
     os.replace(held, p["password"])
     claim(p["password"])                       # in the record under its own name (seen: setup after it stopped on it)
     unclaim(p, [os.path.abspath(held)])
-    gone = forge_api_call(p, port, "DELETE", f"/users/{name}/tokens/{tag}", basic=f"{name}:{word}")[0] == 204
-    gone = gone and forge_api_call(p, port, "GET", "/user", token=token)[0] == 401
+    basic = "Basic " + base64.b64encode(f"{name}:{word}".encode()).decode()
+    gone = ask("DELETE", f"/users/{name}/tokens/{tag}", auth=basic) == 204   # G3.6: the one DELETE beside M17's
+    gone = gone and ask("GET", "/user", auth=f"token {token}") == 401
     said = (f"Your Gitea account '{name}' has a new password, in {p['password']} (readable by you only). A password "
             "you set for it yourself no longer works.")
     if not gone:
@@ -3122,12 +3110,13 @@ class Forge:
         self.key = got
         self.user = st.get("mirror_user", MIRROR_USER)
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, auth=None):
         if door(self.p, self.port) != "mine":    # G8.7: the key goes only to our own forge; on "none" nothing is
             return 0, {"message": f"nothing listens on 127.0.0.1:{self.port}"}   # sent (F1), as no answer
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + "/api/v1" + path, data=data, method=method,
-                                     headers={"Authorization": f"token {self.key}", "Content-Type": "application/json",
+                                     headers={"Authorization": auth or f"token {self.key}",
+                                              "Content-Type": "application/json",
                                               "User-Agent": USER_AGENT})
         try:
             with forge_opener().open(req, timeout=30) as r:
@@ -5007,7 +4996,7 @@ def cmd_setup(args):
     else:
         say(not_answering_yet(p, st["port"], SETUP_WAIT))
     if give_password:
-        said, given = new_forge_password(p, give_password, st["port"]) if ok and up else (
+        said, given = new_forge_password(p, st, give_password) if ok and up else (
             f"Your Gitea account '{give_password}' was not given a new password: the forge did not answer. Run the "
             f"same command again once it does: {own_command(p, 'setup', '--new-password')}", False)
         say(said)

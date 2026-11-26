@@ -2969,7 +2969,20 @@ class G3(unittest.TestCase):
             self.assertEqual(w.forge_refs("someone--alpha"), before)
             st = mirror.load_json(w.p["state"], {})
             self.assertTrue(next(iter(st["repos"].values()))["gone_since"])
-            self.assertEqual(fread(SCRIPT).count('"DELETE"'), 1, "the script can delete a copy outside the M17 stop")
+            # The script deletes in two places only: a copy, in the M17 stop (made public by the forge), and the
+            # token setup --new-password made for the change (M175), on that account's own tokens; nothing else
+            import ast
+            deletes = {}
+            for fn in ast.walk(ast.parse(fread(SCRIPT))):
+                if isinstance(fn, ast.FunctionDef):
+                    for n in ast.walk(fn):
+                        if isinstance(n, ast.Call) and n.args and isinstance(n.args[0], ast.Constant) \
+                                and n.args[0].value == "DELETE":
+                            deletes.setdefault(fn.name, []).append(ast.unparse(n.args[1]))
+            self.assertEqual(fread(SCRIPT).count('"DELETE"'), 2, "the script can delete outside its two places")
+            self.assertEqual(deletes, {"create": ["f'/repos/{self.user}/{urllib.parse.quote(name)}'"],
+                                       "new_forge_password": ["f'/users/{name}/tokens/{tag}'"]},
+                             "the script can delete a copy outside the M17 stop")
 
     def test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts(self):
         with World(self) as w:
@@ -6476,15 +6489,16 @@ class G6(unittest.TestCase):
             self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
             # (5) the forge refuses the change: said, the kept password as it was, nothing left under another name,
             # and the token the change could not take away is named (as read: it still answers)
-            real_call = mirror.forge_api_call
+            real_call = mirror.Forge.call
 
-            def refused(p_, port_, method, path, *a, **k):
-                return (500, b"") if method == "PATCH" else real_call(p_, port_, method, path, *a, **k)
-            mirror.forge_api_call, wait, mirror.SETUP_WAIT = refused, mirror.SETUP_WAIT, 60
+            def refused(self_, method, path, *a, **k):
+                return ((500, None) if method == "PATCH" and path.startswith("/admin/users/") else
+                        real_call(self_, method, path, *a, **k))
+            mirror.Forge.call, wait, mirror.SETUP_WAIT = refused, mirror.SETUP_WAIT, 60
             try:
                 rc, out = w.home.setup("--new-password")
             finally:
-                mirror.forge_api_call, mirror.SETUP_WAIT = real_call, wait
+                mirror.Forge.call, mirror.SETUP_WAIT = real_call, wait
             self.assertEqual(rc, 1, out)
             self.assertIn(f"Your Gitea account '{person}' was not given a new password: the forge answered 500, and "
                           "its password is as it was. A key named windstorm-mirror-password-", out)
