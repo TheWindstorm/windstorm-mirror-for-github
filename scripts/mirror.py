@@ -3593,6 +3593,12 @@ def other_install(p):
             argv = got[0]
     else:
         got = systemd_parsed(SERVICE + ".service")
+        if got is not None and not got[0] and state != "could not be read":
+            # M153 (G9.17; seen in a stand-in trial in a made home): systemd was read, and the unit shows no start
+            # line (masked, emptied, or cut down by hand): it runs nothing, so it is no other install, and the file's
+            # own bytes decide (named and left by uninstall, setup's stop to move it). Only that answer: one that
+            # could not be read stays below.
+            return None
         if got and len(got[0]) == 1:
             argv = got[0][0][1:]
     if argv is None:

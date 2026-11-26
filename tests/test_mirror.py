@@ -7463,6 +7463,22 @@ class G9(unittest.TestCase):
                                     self.assertIn("Nothing was removed and nothing was taken off.", out)
                                     self.assertEqual(fread(f), text)
                                     continue
+                            if text == "[Service]\n" and mirror.system()[0] != "darwin":
+                                # M153 (G9.17): on Linux the unit opens and systemd shows no start line: it runs
+                                # nothing, so it is no other install; the file is not as the skill wrote it (rule 23):
+                                # setup stops with the move, uninstall names it, leaves it, and goes to its end
+                                self.assertNotIn("read that file", out)
+                                self.assertIn("not as the skill wrote it", out)
+                                self.assertEqual(fread(f), text)
+                                if cmd[0] == "uninstall":
+                                    self.assertEqual(rc, 0, (cmd, out))
+                                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you "
+                                                                         "look at it."), out)
+                                else:
+                                    self.assertEqual(rc, 2, (cmd, out))
+                                    self.assertIn("move it out of that folder", out)
+                                    self.assertIn("Nothing was changed.", out)
+                                continue
                             self.assertEqual(rc, 2, (cmd, out))
                             self.assertIn("Nothing was changed.", out)
                             self.assertIn(want, out)
@@ -8118,6 +8134,56 @@ class G9(unittest.TestCase):
                                 self.assertIn(f"Not taken, and left byte for byte: {p['plist']}. It could not be "
                                               "read: it is not a well-formed property list", out)
                         self.assertFalse(os.path.exists(sp), out)
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
+
+    def test_G9_17_a_unit_that_names_no_start_line_never_keeps_a_person_from_leaving(self):
+        """M153 (G9.17; seen 2026-11-26 in a stand-in trial in a made home, systemd stood in for): on Linux, the
+        forge's unit at the skill's path opens but names no start line: the line [Service] alone (L1), a unit the
+        person masked, a link to /dev/null as systemctl mask leaves it (L2), a file the person emptied (L3). Setup's
+        dry run and uninstall stopped (exit 2) with "read that file, and run uninstall with the copy it names": the
+        file names no copy, so the step led back to the stop. A unit systemd was read for that shows no start line
+        runs nothing, so it is no other install. NOT SEEN BY US: what systemd itself answers for a masked unit (the
+        stand-in reads the path's text, which for /dev/null is nothing). L4 (this home's own unit with one comment
+        line) is the control."""
+        saved = mirror.system
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            for world in ("L1 [Service]", "L2 masked", "L3 emptied", "L4 a comment line"):
+                with Home() as h, self.subTest(world=world):
+                    p = mirror.paths()
+                    files = mirror.service_files(p)
+                    for f, text in zip(files, [mirror.unit_text(p), mirror.sync_unit_text(p),
+                                               mirror.sync_timer_text(15)]):
+                        mirror.write_file(f, text)           # as setup writes them, and records them
+                    os.makedirs(os.path.dirname(p["script"]), exist_ok=True)
+                    mirror.write_file(p["script"], "# the installed copy\n")
+                    forge = files[0]
+                    text = mirror.unit_text(p)
+                    os.remove(forge)
+                    if world.startswith("L2"):
+                        os.symlink("/dev/null", forge)
+                    else:
+                        with open(forge, "w") as fh:
+                            fh.write({"L1": "[Service]\n", "L3": "", "L4": text + "# the person's own line\n"}[world[:2]])
+                    planted = os.readlink(forge) if world.startswith("L2") else fread_bytes(forge)
+                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                    self.assertEqual(rc, 2, out)
+                    self.assertNotIn("read that file", out)
+                    self.assertIn("move it out of that folder", out)
+                    for _ in range(2):                         # twice running: never the same stop again
+                        rc, out = quiet(mirror.main, ["uninstall"])
+                        self.assertEqual(rc, 0, out)
+                        self.assertNotIn("read that file", out)
+                        self.assertIn(forge, out)
+                        self.assertIn("not as the skill wrote it", out)
+                        self.assertEqual(os.readlink(forge) if world.startswith("L2") else fread_bytes(forge), planted)
+                        self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."),
+                                        out)
+                    self.assertFalse(os.path.exists(files[1]), out)   # the sync's own unit, this home's: taken
+                    self.assertFalse(os.path.exists(p["script"]), out)
         finally:
             mirror.system = saved
             mirror.read_door, mirror.door_floor = saved_doors

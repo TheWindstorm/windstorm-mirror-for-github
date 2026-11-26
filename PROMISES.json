@@ -2389,7 +2389,7 @@
    "codon": "G9.17",
    "first_ship_in": "0.1.0",
    "ship_in": "0.1.0",
-   "test": "",
+   "test": "test_G9_17_a_unit_that_names_no_start_line_never_keeps_a_person_from_leaving",
    "stand_in": "systemd (its answers for a unit file at the skill's path that opens and shows no start line: a masked unit, which is a link to /dev/null as systemctl mask leaves it, a file of 0 bytes, and a file of the line [Service] alone), stood in for by the suite's own home. NOT SEEN BY US: what systemd itself answers for a masked unit; it is seen on a machine with real systemd before this row says more, and before its version is tagged.",
    "moved_why": "",
    "seen": "2026-11-26, in a stand-in trial in a made home, systemd stood in for: with the forge's unit file at the skill's path masked by the person, emptied, or holding only the line [Service], setup's dry run stopped, exit 2, and uninstall stopped, exit 2, each time it was run, with \"read that file, and run uninstall with the copy it names\". The file names no copy, so the step led back to the same stop, and the person could not leave. This home's own unit file with one comment line added did not stop uninstall.",
