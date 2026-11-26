@@ -2981,7 +2981,7 @@ class G3(unittest.TestCase):
                             deletes.setdefault(fn.name, []).append(ast.unparse(n.args[1]))
             self.assertEqual(fread(SCRIPT).count('"DELETE"'), 2, "the script can delete outside its two places")
             self.assertEqual(deletes, {"create": ["f'/repos/{self.user}/{urllib.parse.quote(name)}'"],
-                                       "new_forge_password": ["f'/users/{name}/tokens/{tag}'"]},
+                                       "new_forge_password": ["f'/users/{name}/tokens/{number}'"]},
                              "the script can delete a copy outside the M17 stop")
 
     def test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts(self):
@@ -6510,6 +6510,82 @@ class G6(unittest.TestCase):
             code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{kept}")
             self.assertEqual([t["name"][:len("windstorm-mirror-password-")] for t in json.loads(body)],
                              ["windstorm-mirror-password-"], "the token named is the one left")
+            left5 = json.loads(body)
+            step = mirror.own_command(p, "setup", "--new-password")
+
+            def tokens(password):
+                code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{password}")
+                self.assertEqual(code, 200, body)
+                return sorted((t["id"], t["name"]) for t in json.loads(body))
+            def no_key_part(out, password):
+                """A line that names a key gives its name only: no line carries the last eight characters of any
+                key on the account (the ones the forge lists), nor the mirror account's key."""
+                code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{password}")
+                self.assertEqual(code, 200, body)
+                eights = [t["token_last_eight"] for t in json.loads(body)]
+                self.assertTrue(eights and all(len(x) == 8 for x in eights), body)
+                for x in eights + [fread(p["mirror_key"]).strip()]:
+                    self.assertNotIn(x, out)
+            # (6) a key of the name this run would make already stands: one an earlier run left when it broke off
+            # (the one (5) left), or one made by hand. Not made by this run: left as it is, named, nothing changed
+            hand = "made-by-hand-" + os.urandom(3).hex()
+            made = mirror.gitea(p, "admin", "user", "generate-access-token", "--username", person, "--token-name",
+                                hand, "--scopes", "read:user", "--raw")
+            self.assertEqual(made.returncode, 0, made.stderr)
+            before = tokens(kept)
+            real_tag = mirror.password_token_tag
+            for name in (left5[0]["name"], hand):
+                with self.subTest(standing=name):
+                    mirror.password_token_tag, wait, mirror.SETUP_WAIT = (lambda: name), mirror.SETUP_WAIT, 60
+                    try:
+                        rc, out = w.home.setup("--new-password")
+                    finally:
+                        mirror.password_token_tag, mirror.SETUP_WAIT = real_tag, wait
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(f"Your Gitea account '{person}' was not given a new password: a key named {name} "
+                                  "already stands on that account, one this run of setup did not make, so setup left "
+                                  "it as it is and changed nothing of the account. Run the same command again (it "
+                                  f"makes a key of another name): {step}", out)
+                    self.assertEqual(fread(p["password"]).strip(), kept)
+                    self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
+                    self.assertEqual(tokens(kept), before, "the key that stood is still there, by its number")
+                    no_key_part(out, kept)
+                    self.assertFalse(any(x.endswith(".new") for x in os.listdir(os.path.dirname(p["password"]))))
+            # (7) the account's list of keys could not be read after the change, and (8) it was read and names no
+            # key with this run's name and the last eight characters of this run's key: nothing taken away, named
+            for world in ("unread", "not this run's"):
+                with self.subTest(world=world):
+                    def listed(self_, method, path, *a, **k):
+                        code, body = real_call(self_, method, path, *a, **k)
+                        if method == "GET" and path == f"/users/{person}/tokens":
+                            if world == "unread":
+                                return 500, None
+                            body = [dict(t, token_last_eight="00000000") for t in body]
+                        return code, body
+                    mirror.Forge.call, wait, mirror.SETUP_WAIT = listed, mirror.SETUP_WAIT, 60
+                    try:
+                        rc, out = w.home.setup("--new-password")
+                    finally:
+                        mirror.Forge.call, mirror.SETUP_WAIT = real_call, wait
+                    self.assertEqual(rc, 1, out)
+                    now = fread(p["password"]).strip()
+                    self.assertNotEqual(now, kept)
+                    self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{now}")[0], 200)
+                    self.assertIn(f"Your Gitea account '{person}' has a new password, in {p['password']} (readable "
+                                  "by you only). A password you set for it yourself no longer works.", out)
+                    self.assertIn(("Whether the key named windstorm-mirror-password-" if world == "unread" else
+                                   "The key named windstorm-mirror-password-"), out)
+                    self.assertIn(("that setup made for the change still stands could not be read (the forge "
+                                   "answered 500), so nothing was taken away: " if world == "unread" else
+                                   "that setup made for the change was not found as this run's own on that "
+                                   "account's list, so nothing was taken away: ")
+                                  + "take it away in Gitea's settings of that account (Applications), signing in "
+                                  "with the new password.", out)
+                    no_key_part(out, now)
+                    after = tokens(now)
+                    self.assertEqual(len(after), len(before) + 1, "nothing was taken away; this run's key stands")
+                    self.assertTrue(set(before) < set(after))
+                    before, kept = after, now
 
     def test_G6_35_a_command_started_as_root_in_another_accounts_mirror_stops_at_the_door(self):
         """M177 (G6.35), seen on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): with sudo -E, which keeps the
@@ -8894,12 +8970,7 @@ class G9(unittest.TestCase):
             self.assertIn(f"  {w.p['forge']}: holds readme.txt", out)
             self.assertNotIn("Kept: nothing", out)
             self.assertNotIn("Kept: the folder of copies", out)
-            # The closing sentence of the list, then, last, what the delete did: the copies are gone, the folder stays
-            last2 = out.strip().splitlines()[-2:]
-            self.assertTrue(last2[0].endswith("it is yours, to keep or delete after you look at it."), out)
-            self.assertTrue(last2[1].startswith(f"The copies are deleted: the 1 on the disk is gone. The folder of "
-                                                f"copies stays at {w.p['data']}, because it holds what is not the "
-                                                "skill's"), out)
+            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
             for rel in later:
                 os.remove(os.path.join(root, rel))
             self.assertEqual(uninstall()[0], 0)
@@ -10437,6 +10508,8 @@ class G9(unittest.TestCase):
         the tree at mode 500, the two copies in it. C: a write lands in a folder of the forge's between its emptying
         and its removal (as seen). D: a write lands once the forge's folder has gone by (its log folder made again).
         The other account's folder is the guest's world (it needs an administrator to make it)."""
+        CLOSING = ("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or "
+                   "delete after you look at it.")
         def mode_500(p):
             d = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
             os.chmod(d, 0o500)
@@ -10543,10 +10616,11 @@ class G9(unittest.TestCase):
                     self.assertNotIn("type the number", out)
                     self.assertIn(f"  {late}", out)
                     self.assertEqual(left_in(p["data"]), ["late.log"], out)
-                    self.assertEqual(out.rstrip("\n").split("\n")[-1],
-                                     f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
-                                     "because it holds what is not the skill's; in it now: late.log (not the "
-                                     "skill's).", out)
+                    # the folder that stays, then, last, the closing sentence G9.12 holds
+                    self.assertEqual(out.rstrip("\n").split("\n")[-2:],
+                                     [f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
+                                      "because it holds what is not the skill's; in it now: late.log (not the "
+                                      "skill's).", CLOSING], out)
                     continue
                 self.assertIn("To delete the folder of copies (2 copies,", out)
                 self.assertFalse(os.path.exists(p["data"]), out + "\nleft: " + ", ".join(left_in(p["data"])))
@@ -10590,10 +10664,10 @@ class G9(unittest.TestCase):
                     sys.stdin = saved
                 self.assertEqual(rc, 0, out)
                 self.assertEqual(mirror.copies_on_disk(p), 0, out)
-                last = out.rstrip("\n").split("\n")[-1]
-                self.assertEqual(last, f"The copies are deleted: the 2 on the disk are gone. The folder of copies stays "
-                                       f"at {p['data']}, because it holds what is not the skill's; in it now: "
-                                       f"{stays[world]}.", out)
+                last = out.rstrip("\n").split("\n")[-2:]
+                self.assertEqual(last, [f"The copies are deleted: the 2 on the disk are gone. The folder of copies "
+                                        f"stays at {p['data']}, because it holds what is not the skill's; in it now: "
+                                        f"{stays[world]}.", CLOSING], out)
                 self.assertNotIn(f"{p['data']}: the folder of copies", out)        # never said as gone
                 theirs = out.split("Not the skill's, so left where they are")[1].split("\n\n")[0].split("Folders of")[0]
                 self.assertNotIn(os.path.join(p["data"], mirror.MADE_RECORD), theirs, out)
@@ -10616,9 +10690,10 @@ class G9(unittest.TestCase):
                     self.assertIn(f"No copy is in {p['data']}, so none was deleted: ", out)
                 else:
                     self.assertEqual(left_in(p["data"]), ["forge", "forge/mine", "forge/mine/a.txt", mirror.MADE_RECORD], out)
-                    self.assertEqual(out.rstrip("\n").split("\n")[-1],
-                                     f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
-                                     f"because it holds what is not the skill's; in it now: {stays[world]}.", out)
+                    self.assertEqual(out.rstrip("\n").split("\n")[-2:],
+                                     [f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
+                                      f"because it holds what is not the skill's; in it now: {stays[world]}.",
+                                      CLOSING], out)
 
 
     def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):

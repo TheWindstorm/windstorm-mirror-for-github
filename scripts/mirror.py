@@ -1342,13 +1342,19 @@ def new_forge_password(p, st, name):
 
     def ask(method, path, body=None, auth=None):
         try:
-            return forge.call(method, path, body, auth=auth)[0]
+            return forge.call(method, path, body, auth=auth)
         except DoorShut:
-            return 0
-    tag = "windstorm-mirror-password-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex()
+            return 0, None
+    tag = password_token_tag()
     out = gitea(p, "admin", "user", "generate-access-token", "--username", name, "--token-name", tag,
                 "--scopes", "write:admin,write:user", "--raw")
     token = out.stdout.strip() if out.returncode == 0 else ""
+    if out.returncode != 0 and "access token name has been used already" in (out.stderr or ""):
+        # not made by this run (one an earlier run left when it broke off, or one made by hand): left as it is
+        return (f"Your Gitea account '{name}' was not given a new password: a key named {tag} already stands on that "
+                "account, one this run of setup did not make, so setup left it as it is and changed nothing of the "
+                f"account. Run the same command again (it makes a key of another name): "
+                f"{own_command(p, 'setup', '--new-password')}", False)
     if not token or any(c.isspace() for c in token):
         return (f"Your Gitea account '{name}' was not given a new password: the forge did not give the key it needs "
                 "for that, and nothing of the account was changed. Run the same command again: "
@@ -1356,12 +1362,12 @@ def new_forge_password(p, st, name):
     word = secrets.token_urlsafe(24)
     held = p["password"] + ".new"
     write_private(held, word + "\n")
-    code = ask("PATCH", f"/admin/users/{name}", {"login_name": name, "source_id": 0, "password": word,
+    code, _ = ask("PATCH", f"/admin/users/{name}", {"login_name": name, "source_id": 0, "password": word,
                                                  "must_change_password": False}, auth=f"token {token}")
     if code != 200:
         os.remove(held)
         unclaim(p, [os.path.abspath(held)])
-        left = ask("GET", "/user", auth=f"token {token}") == 200
+        left = ask("GET", "/user", auth=f"token {token}")[0] == 200
         return (f"Your Gitea account '{name}' was not given a new password: the forge answered {code or 'nothing'}, "
                 "and its password is as it was."
                 + (f" A key named {tag} is still on that account, which setup could not take away without the "
@@ -1370,15 +1376,34 @@ def new_forge_password(p, st, name):
     os.replace(held, p["password"])
     claim(p["password"])                       # in the record under its own name (seen: setup after it stopped on it)
     unclaim(p, [os.path.abspath(held)])
-    basic = "Basic " + base64.b64encode(f"{name}:{word}".encode()).decode()
-    gone = ask("DELETE", f"/users/{name}/tokens/{tag}", auth=basic) == 204   # G3.6: the one DELETE beside M17's
-    gone = gone and ask("GET", "/user", auth=f"token {token}") == 401
     said = (f"Your Gitea account '{name}' has a new password, in {p['password']} (readable by you only). A password "
             "you set for it yourself no longer works.")
+    step = "take it away in Gitea's settings of that account (Applications), signing in with the new password."
+    # Only the key this run made is taken away: read from the account's own list, by its name and the last eight
+    # characters of the key this run was given, and taken away by its number, never by its name alone
+    basic = "Basic " + base64.b64encode(f"{name}:{word}".encode()).decode()
+    code, listed = ask("GET", f"/users/{name}/tokens", auth=basic)
+    if code != 200 or not isinstance(listed, list):
+        return (said + f" Whether the key named {tag} that setup made for the change still stands could not be read "
+                f"(the forge {'answered ' + str(code) if code else 'did not answer'}), so nothing was taken away: "
+                + step, False)
+    mine = [t for t in listed if isinstance(t, dict) and t.get("name") == tag
+            and t.get("token_last_eight") == token[-8:] and isinstance(t.get("id"), int)]
+    if len(mine) != 1:
+        return (said + f" The key named {tag} that setup made for the change was not found as this run's own on that "
+                "account's list, so nothing was taken away: " + step, False)
+    number = mine[0]["id"]
+    gone = ask("DELETE", f"/users/{name}/tokens/{number}", auth=basic)[0] == 204   # G3.6: one of two deletes
+    gone = gone and ask("GET", "/user", auth=f"token {token}")[0] == 401
     if not gone:
-        return (said + f" A key named {tag} that setup made for the change is still on that account: take it away in "
-                "Gitea's settings of that account (Applications), signing in with the new password.", False)
+        return (said + f" A key named {tag} that setup made for the change is still on that account: " + step, False)
     return said, True
+
+
+def password_token_tag():
+    """M175: the name of the key setup --new-password makes for the change, new for every run: the second it was made
+    (UTC) and 24 random bits."""
+    return "windstorm-mirror-password-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex()
 
 
 def create_user(p, name, admin):
@@ -6175,7 +6200,8 @@ def cmd_uninstall(args):
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
     removed, linger_said, left_service, foreign, unreadable, kept, told = [], "", [], [], None, [], []
-    stopped = None                       # M179: the line of a delete the system refused part-way, said last
+    stopped = stays = None               # M179: the line of a delete the system refused part-way, said last; the
+                                         # line of the folder that stays, above the closing sentence
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
@@ -6334,7 +6360,7 @@ def cmd_uninstall(args):
             if refused is not None:
                 stopped, rc = not_deleted_line(p, refused, before, n), 1
             elif os.path.exists(p["data"]):
-                stopped = folder_stays_line(p, before)
+                stays = folder_stays_line(p, before)
         else:
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
@@ -6345,14 +6371,15 @@ def cmd_uninstall(args):
         if refused is not None:                                     # M179: never passed over here either
             stopped, rc = not_deleted_line(p, refused, before, n), 1
         elif os.path.exists(p["data"]):
-            stopped = folder_stays_line(p, before)
+            stays = folder_stays_line(p, before)
     if record == "read":
         take_made_folders(st, removed)
     uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
-                     unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(rc and stopped))
+                     unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(rc and stopped),
+                     stays=stays)
     if unreadable and holds_mirror(p):     # M158: the way to go on, named once, last
         say(USE_FOLDER_STEP + own_command(p, "setup", "--use-this-folder"))
-    if stopped:                            # M179: where the delete stopped and the one next step, or what stays, last
+    if stopped:                            # M179: where the delete stopped and the one next step, last
         say(stopped)
     return rc
 
@@ -6674,7 +6701,8 @@ def stayed_for(p, foreign):
 
 
 def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
-                     left_service=(), unread_service=None, kept_jobs=(), told_off=(), not_deleted=False):
+                     left_service=(), unread_service=None, kept_jobs=(), told_off=(), not_deleted=False,
+                     stays=None):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
     it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
@@ -6771,6 +6799,8 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         say("Still on this computer, and not uninstall's to take:")
         for x in left:
             say(f"  {x}")
+    if stays:                              # M179: the folder that stays, above the closing sentence (G9.12: the last
+        say(stays)                         # line says the mirror is off this computer and that what stayed is named)
     if kept_jobs:
         say("What uninstall could not show to be this home's is named above, and was left as it is; it is yours, "
             "to keep or delete after you look at it.")
