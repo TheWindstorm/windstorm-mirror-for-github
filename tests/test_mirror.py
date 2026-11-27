@@ -6429,18 +6429,28 @@ class G6(unittest.TestCase):
         # sha256 85971716290afec1): with no WSM_HOME, a folder the skill did not make in the settings folder (keys,
         # made by hand) was said to be in the folder of copies, and the step said to move it out of "it". The stop
         # names the folder that holds the entry; with entries in both, both folders, and each entry by its path.
+        # On a Mac with no WSM_HOME the settings folder lies inside the data folder (the maintainer's ruling,
+        # 2026-11-27; seen on GitHub's macOS 26 runner image): an entry in the settings folder is in both, and both
+        # are named. The paths decide here, never the system's name.
         with Home(linger="yes") as h:
             os.environ.pop("WSM_HOME")                            # put back by Home on its way out
             p = mirror.paths()
+            nested = mirror.inside(os.path.abspath(p["conf"]), os.path.abspath(p["data"]))
             full_setup(h)
             theirs = os.path.join(p["conf"], "keys")
             os.makedirs(theirs, mode=0o700)
             rc, out = h.setup()
             self.assertEqual(rc, 2, out)
-            self.assertIn(f"Stopped: {p['conf']} already holds things the skill did not make: {theirs}. ", out)
-            self.assertNotIn(f"Stopped: {p['data']} ", out)
-            self.assertIn("The one next step: move those out of it (into a folder of your own, to keep them), and run "
-                          "setup again.", out)
+            if nested:
+                self.assertIn(f"Stopped: {p['data']} and {p['conf']} already hold things the skill did not make: "
+                              f"{theirs}. ", out)
+                self.assertIn("The one next step: move those out of the folder each is in (into a folder of your own, "
+                              "to keep them), and run setup again.", out)
+            else:
+                self.assertIn(f"Stopped: {p['conf']} already holds things the skill did not make: {theirs}. ", out)
+                self.assertNotIn(f"Stopped: {p['data']} ", out)
+                self.assertIn("The one next step: move those out of it (into a folder of your own, to keep them), and "
+                              "run setup again.", out)
             mine = os.path.join(p["data"], "my-notes.txt")
             with open(mine, "w") as f:
                 f.write("mine\n")
