@@ -15,13 +15,20 @@ if sys.version_info < (3, 9):
         "3.13.\n" % (sys.version_info[0], sys.version_info[1], sys.version_info[2], sys.executable or "python3"))
     sys.exit(3)
 import argparse
+import contextlib
+import errno
+import fcntl
 import base64
 import calendar
 import fnmatch
+import plistlib
+import xml.parsers.expat
 import shlex
+import unicodedata
 import getpass
 import urllib.parse
 import hashlib
+import random
 import json
 import os
 import platform
@@ -37,7 +44,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.0.0"
+VERSION = "0.1.0"
 USER_AGENT = f"windstorm-mirror-for-github/{VERSION} (+https://github.com/TheWindstorm/windstorm-mirror-for-github)"
 
 # G1.1: the forge is stock Gitea at one pinned version. The checksums were read on 2026-11-22 from Gitea's own
@@ -111,6 +118,10 @@ def say(msg=""):
     msg = str(msg)
     for s in SECRETS:
         msg = msg.replace(s, "<a key>")
+    # M120: a character this terminal's language cannot write (the bytes of a name that are not UTF-8, as run()
+    # reads them) is written as a backslash form; the print never raises, whatever the language.
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    msg = msg.encode(enc, "backslashreplace").decode(enc)
     try:
         print(msg, flush=True)
     except BrokenPipeError:
@@ -137,26 +148,174 @@ def load_json(path, default):
         return default
 
 
+class KeptUnread(Exception):
+    """A file the tool keeps that is there and could not be read (its third answer): the command stops before it
+    changes anything, naming the file, where the read stopped, and one step a person can take."""
+
+    def __init__(self, path, why):
+        # why None: a file the command needs that is not there (the system said so); said as that, never as a read
+        self.said = "is not there" if why is None else f"could not be read: {why}"
+        super().__init__(f"{path} {self.said}")
+        self.path, self.why = path, why
+
+
+def json_kind(v):
+    return {list: "list", str: "string", bool: "true or false", type(None): "null"}.get(type(v), "number")
+
+
+def blocked_folder(path):
+    """The first folder on a path's road that this account may not enter (search), or None. Named in a failed read's
+    why, so a folder at mode 000, or one another account owns, is said as that."""
+    road, d = [], os.path.dirname(os.path.abspath(path))
+    while True:
+        road.append(d)
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    for d in reversed(road):
+        if not os.path.isdir(d):
+            return None
+        if not os.access(d, os.X_OK):
+            return d
+    return None
+
+
+def opened_why(path, e):
+    """Why a kept file could not be opened: the error's class, and the folder that could not be entered when that is
+    the cause; never a byte of the file."""
+    why = f"it could not be opened ({type(e).__name__})"
+    d = blocked_folder(path) if isinstance(e, PermissionError) else None
+    return why + (f": the folder {d} could not be entered" if d else "")
+
+
+def open_kept(path):
+    """A kept file's bytes with its three answers: ('read', the bytes); ('not there', None) only when the system
+    itself said the name is not there (the open's own FileNotFoundError, and no link by that name); else ('could not
+    be read', why). Any other error (a folder that cannot be entered, a name that is a folder) is never said as an
+    absence."""
+    try:
+        with open(path, "rb") as f:
+            return "read", f.read()
+    except FileNotFoundError:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return "not there", None
+        except OSError as e:
+            return "could not be read", opened_why(path, e)
+        return "could not be read", "it is a link to a file that is not there"
+    except OSError as e:
+        return "could not be read", opened_why(path, e)
+
+
+def kept_read(path):
+    """M151, M154, M157 (G3.19, G6.21, G6.24): a kept JSON file's three answers: ('read', the object), ('not
+    there', None), or ('could not be read', why). Never taken as empty, never written over on that answer. The why
+    names the error's class or where the parser stopped (line, column), never a byte or a value of the file."""
+    answer, data = open_kept(path)
+    if answer != "read":
+        return answer, data
+    if not data.strip():
+        return "could not be read", "it is empty (0 bytes)" if not data else "it holds only blank space"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "could not be read", "it is not text (UnicodeDecodeError)"
+    try:
+        v = json.loads(text)
+    except ValueError as e:
+        return "could not be read", ("it is not well-formed JSON (cut short, or changed by hand; the read stopped at "
+                                     f"line {getattr(e, 'lineno', '?')}, column {getattr(e, 'colno', '?')})")
+    if not isinstance(v, dict):
+        return "could not be read", f"its top is a JSON {json_kind(v)}, where the tool keeps an object"
+    return "read", v
+
+
+def load_kept(path, check=None):
+    """The object a kept JSON file holds; {} when it is not there; KeptUnread when it could not be read, or when
+    `check` finds an entry of a kind the tool never writes there (its name only, never its value)."""
+    answer, got = kept_read(path)
+    if answer == "not there":
+        return {}
+    if answer == "could not be read":
+        raise KeptUnread(path, got)
+    wrong = check(got) if check else None
+    if wrong:
+        raise KeptUnread(path, f"its {wrong} is not of the kind the tool writes there")
+    return got
+
+
+def settings_wrong(s):
+    owners = s.get("owners")
+    if owners is not None and not (isinstance(owners, dict) and all(isinstance(v, dict) for v in owners.values())):
+        return "'owners' entry"
+    for k in ("include", "exclude"):
+        v = s.get(k)
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            return f"'{k}' entry"
+    return None
+
+
+def state_wrong(st):
+    for k in ("repos",):
+        v = st.get(k)
+        if v is not None and not (isinstance(v, dict) and all(isinstance(x, dict) for x in v.values())):
+            return f"'{k}' entry"
+    return None
+
+
+def load_settings(p):
+    return load_kept(p["settings"], settings_wrong)
+
+
+def load_state(p):
+    return load_kept(p["state"], state_wrong)
+
+
 def write_private(path, text):
     """A file only the person can read: made 0600 before anything is written into it."""
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     write_file(path, text, 0o600)
 
 
-def write_file(path, text, mode=0o644):
-    """Written whole, then put in place. Rule 28: the file is made with its own mode by name, before a byte is
-    written, whatever the umask; a .tmp left by an earlier run is never reused (its mode could be wider)."""
+def put_whole(path, text, mode):
+    """M161 (G4.10): written whole under a temporary name of this write's own, then put in place, so two writes of
+    one file at once never meet in one temporary file: the file holds one writer's bytes, whole. Whatever the umask, the
+    temporary file is made new (never one left by an earlier run) with its own mode, before a byte is written, so no
+    other account can read a key in it."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
-        os.remove(tmp)
-    except FileNotFoundError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        os.fchmod(f.fileno(), mode)
-        f.write(text)
-    os.replace(tmp, path)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+
+
+def copy_whole(src, path, mode=0o644):
+    """M161 (G4.10): the skill's own copy put in place as put_whole does it: copied under a temporary name of this
+    copy's own, then renamed whole, so two setups at once never meet in one temporary file; noted in the record."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        os.fchmod(fd, mode)
+        os.close(fd)
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+    claim(path)
+
+
+def write_file(path, text, mode=0o644):
+    """Written whole, then put in place (put_whole), and noted in the skill's record."""
+    put_whole(path, text, mode)
     claim(path)
 
 
@@ -187,20 +346,227 @@ def inside(path, folder):
     return (path + os.sep).startswith(folder + os.sep) and path != folder
 
 
+# M158 (G6.25): read once as a command starts, before it writes anything: whether the skill's own folders hold
+# nothing yet. Only then may a command start a record where none is; else only setup --use-this-folder makes one.
+_made_start = {"data": None, "fresh": None, "use": False}
+
+
+def home_fresh(p):
+    """The skill's own folders hold nothing yet (each is not there, or holds only another of them and the suite's
+    marker), and there is no record."""
+    roots = own_roots(p)
+    if os.path.lexists(os.path.join(p["data"], MADE_RECORD)):
+        return False
+    for r in roots:
+        try:
+            names = os.listdir(r)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        for n in names:
+            e = os.path.join(r, n)
+            if n == SUITE_MARKER or (e in roots and os.path.isdir(e) and not os.path.islink(e)):
+                continue
+            return False
+    return True
+
+
+class Why(str):
+    """A failed read's words, with its answer handed on as a value ("not there" or "could not be read"), so a
+    decision is never made from how a sentence ends (found 2026-11-26 in a read of the code: a link to a file that is
+    not there ends in the same words as an absence)."""
+    def __new__(cls, text, answer):
+        s = super().__new__(cls, text)
+        s.answer = answer
+        return s
+
+
 def read_made(p):
-    """(record, None) or (None, why): what the skill wrote in its own folders, path to kind ("file", "dir", or
-    "tree:<forge|git|other>"). No record is an empty one; a record that cannot be read is never taken as empty."""
+    """(record, None) or (None, why): what the skill wrote in its own folders, path to kind ("file", "dir",
+    "tree:<forge|git|other>", "service:<SHA-256>", or "set-aside record"). M158 (G6.25): the file has three answers;
+    "not there" is an empty record only in folders that held nothing as the command started (or once setup
+    --use-this-folder made a new one); a record that could not be read is never taken as empty, and its why names
+    where the read stopped, never a byte of it."""
     f = os.path.join(p["data"], MADE_RECORD)
-    if not os.path.exists(f):
+    answer, got = kept_read(f)
+    if answer == "not there":
+        if (_made_start["fresh"] is False and not _made_start["use"]
+                and _made_start["data"] == os.path.abspath(p["data"])):
+            return None, Why(f"{f} is not there", "not there")
         return {}, None
+    if answer != "read":
+        return None, Why(f"{f} could not be read: {got}", "could not be read")
+    made = got.get("made") or {}
+    if got.get("written_by") != "windstorm-mirror" or not isinstance(made, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in made.items()):
+        return None, Why(f"{f} could not be read: it is not the record the skill writes (its 'written_by' or 'made' "
+                         "entry)", "could not be read")
+    return dict(made), None
+
+
+def holds_mirror(p):
+    """M158: by paths, the skill's data folder holds a mirror: the forge's own settings file, or its data folder
+    (where the copies are)."""
+    return os.path.lexists(p["app_ini"]) or os.path.isdir(os.path.join(p["forge"], "data"))
+
+
+CACHE_REPO = re.compile(r"[0-9]+\.git")
+
+
+def service_expected(p):
+    """Each service file this home's setup writes, and the text it writes there now (None for one whose text needs a
+    setting that could not be read)."""
     try:
-        with open(f, encoding="utf-8") as fh:
-            rec = json.load(fh)
-        if not isinstance(rec, dict) or rec.get("written_by") != "windstorm-mirror":
-            return None, f"{f} is not the skill's record"
-        return dict(rec.get("made") or {}), None
-    except (OSError, ValueError) as e:
-        return None, f"{f} could not be read ({e})"
+        minutes = int(setting(load_settings(p), "interval_min"))
+    except (KeptUnread, TypeError, ValueError):
+        minutes = None
+    if system()[0] == "darwin":
+        return {p["plist"]: plist_text(p), os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"):
+                sync_plist_text(p, minutes) if minutes else None}
+    base = os.path.dirname(p["unit"])
+    return {p["unit"]: unit_text(p), os.path.join(base, SYNC_UNIT + ".service"): sync_unit_text(p),
+            os.path.join(base, SYNC_UNIT + ".timer"): sync_timer_text(minutes) if minutes else None}
+
+
+def service_as_written(p, f):
+    """True when the service file is byte for byte what this home's setup writes there now (so it runs this home's
+    own copy, and is the skill's), False when it is not, None when its bytes could not be read."""
+    want = service_expected(p).get(f)
+    if want is None or os.path.islink(f) or not os.path.isfile(f):
+        return False
+    try:
+        with open(f, "rb") as fh:
+            return fh.read() == want.encode("utf-8")
+    except OSError:
+        return None
+
+
+def made_by_place(p):
+    """M158 (G6.25), on the person's own word (setup --use-this-folder): a record built anew from what stands at the
+    skill's own places in the form the skill writes there: a file by its path (a plain file, never a link), a folder
+    a real one, the forge's tree and each cache's git tree by their top-level names, and a service file only while
+    it is byte for byte what setup writes there now. Anything else is left off it, and so is named, never taken.
+    Never by a name alone (the owner's ruling, 11-26): the forge's program only under the pinned version's name and
+    with the pin's own SHA-256; a key file only under a name the skill gives (each owner's in the settings, the
+    'mirror' account's key, the password), mode 0600, one line of text (and the forge's key in the form the forge
+    gives); none of it read out or printed."""
+    rec = {}
+
+    def key_(x, form=None):
+        try:
+            mode = stat.S_IMODE(os.lstat(x).st_mode)
+        except OSError:
+            return
+        if (os.path.isfile(x) and not os.path.islink(x) and mode == 0o600
+                and key_file_read(x, form)[0] == "read"):
+            rec[os.path.abspath(x)] = "file"
+
+    def file_(x):
+        if os.path.isfile(x) and not os.path.islink(x):
+            rec[os.path.abspath(x)] = "file"
+
+    def dir_(x):
+        ok = os.path.isdir(x) and not os.path.islink(x)
+        if ok:
+            rec[os.path.abspath(x)] = "dir"
+        return ok
+
+    def names(x):
+        try:
+            return sorted(os.listdir(x))
+        except OSError:
+            return []
+    if dir_(p["data"]):
+        for x in (p["script"], p["state"], p["first_copy_list"], os.path.join(p["data"], SERVICE_MEANT),
+                  os.path.join(p["data"], "sync.lock")):
+            file_(x)
+        if dir_(os.path.dirname(p["bin"])) and os.path.isfile(p["bin"]) and not os.path.islink(p["bin"]):
+            try:
+                if sha256_of(p["bin"]) == pin_for_this_system()[1]:
+                    file_(p["bin"])
+            except (OSError, SystemExit):
+                pass
+        if os.path.isdir(p["forge"]) and not os.path.islink(p["forge"]) and set(names(p["forge"])) & FORGE_NAMES:
+            rec[os.path.abspath(p["forge"])] = "tree:forge"
+        if dir_(p["cache"]):
+            for n in names(p["cache"]):
+                c = os.path.join(p["cache"], n)
+                inner = names(c)
+                if (CACHE_REPO.fullmatch(n) and os.path.isdir(c) and not os.path.islink(c) and "HEAD" in inner
+                        and all(x in GIT_NAMES or x.endswith(".lock") for x in inner)):
+                    rec[os.path.abspath(c)] = "tree:git"
+        for n in ("backups", "upgrade-rollback"):
+            c = os.path.join(p["data"], n)
+            if os.path.isdir(c) and not os.path.islink(c):
+                rec[os.path.abspath(c)] = "tree:other"
+    if dir_(p["conf"]):
+        file_(p["settings"])
+        key_(p["mirror_key"], FORGE_KEY_FORM)
+        key_(p["password"])
+        if dir_(p["keys"]):
+            try:
+                owners = load_settings(p).get("owners") or {}
+            except KeptUnread:
+                owners = {}
+            for owner in owners:
+                key_(key_path(p, owner))
+    for f in service_files(p):
+        if service_as_written(p, f):
+            rec[f] = "service:" + sha256_of(f)
+    return rec
+
+
+def setup_writes(p):
+    """Every place in the skill's own folders that setup, sync, key set or config writes a file of its own at."""
+    owners = []
+    with contextlib.suppress(KeptUnread):
+        owners = list(load_settings(p).get("owners") or {})
+    return {os.path.abspath(x) for x in (
+        p["bin"], p["script"], p["state"], p["first_copy_list"], os.path.join(p["data"], SERVICE_MEANT),
+        os.path.join(p["data"], "sync.lock"), os.path.join(p["data"], "backups"),
+        os.path.join(p["data"], "upgrade-rollback"), p["settings"], p["mirror_key"], p["password"],
+        os.path.join(p["data"], MADE_RECORD), *[key_path(p, o) for o in owners])}
+
+
+def writes_there(p, x):
+    """An entry at a place the skill writes: one of setup_writes, a cache in the form the sync names one, or the
+    forge's own folders (a name Gitea writes there)."""
+    x = os.path.abspath(x.split(" (could not be read", 1)[0])
+    return (x in setup_writes(p) or (os.path.dirname(x) == os.path.abspath(p["cache"])
+                                     and CACHE_REPO.fullmatch(os.path.basename(x)) is not None)
+            or (os.path.dirname(x) == os.path.abspath(p["forge"]) and os.path.basename(x) in FORGE_NAMES)
+            or x in (os.path.abspath(p["data"]), os.path.abspath(p["conf"]), os.path.abspath(p["keys"]),
+                     os.path.abspath(p["cache"]), os.path.abspath(p["forge"]), os.path.dirname(os.path.abspath(p["bin"]))))
+
+
+def take_folder_on(p, lost, rec):
+    """setup --use-this-folder on a folder that holds a mirror whose record is lost, once every check before setup's
+    first write has passed against `rec` (made_by_place's): the record that could not be read is set aside under a
+    name of its own (kept, never deleted or written over), and `rec` is written as the new record, with the
+    set-aside one on it as its own kind. Says what it did."""
+    f = os.path.join(p["data"], MADE_RECORD)
+    with made_lock(p):
+        aside = None
+        if os.path.lexists(f):
+            aside = f + ".could-not-be-read-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            os.rename(f, aside)
+            rec[aside] = "set-aside record"
+        _made_start["use"] = True
+        write_made(p, rec)
+    say(f"Taken on again, on your word (--use-this-folder): {lost}. "
+        + (f"It is set aside, as it was, as {aside}. " if aside else "")
+        + "A new record holds what setup can show by its place and its form to be the skill's own here. Nothing was "
+        "deleted or written over.")
+    took = sorted(k for k, v in rec.items() if v != "dir" and v != "set-aside record")
+    left = not_ours(p, rec)
+    say(f"Taken on as the skill's ({len(took)}), each named here, and each goes with uninstall as the skill's own:")
+    for k in took:
+        say(f"  {k}" + (" (the forge's own folder, with the copies)" if rec[k] == "tree:forge" else
+                        " (a cache of one copy)" if rec[k] == "tree:git" else ""))
+    say(f"Not taken ({len(left)}): " + ("none." if not left else "they stay where they are, as yours:"))
+    for k in left:
+        say(f"  {k}")
 
 
 def service_files(p):
@@ -212,16 +578,64 @@ def service_files(p):
     return [p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")]
 
 
+def service_file_state(p, rec, f):
+    """M150 (a reviewer's trial, 11-26): is this service file exactly as this home wrote it (its recorded SHA-256):
+    ('yes', None), ('no', None), or ('could not be read', why) when its bytes could not be read (mode 000, an error
+    in the read). The third is never this home's (never written over, never removed) and never "not there"."""
+    if os.path.islink(f) or not os.path.isfile(f):
+        return "no", None
+    try:
+        got = sha256_of(f)
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    return ("yes" if rec is not None and rec.get(f) == "service:" + got else "no"), None
+
+
 def service_file_ours(p, rec, f):
-    return rec is not None and os.path.isfile(f) and not os.path.islink(f) and rec.get(f) == "service:" + sha256_of(f)
+    return service_file_state(p, rec, f)[0] == "yes"
 
 
 def write_made(p, rec):
     f = os.path.join(p["data"], MADE_RECORD)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
-    with open(f + ".tmp", "w", encoding="utf-8") as fh:
-        json.dump({"written_by": "windstorm-mirror", "made": rec}, fh, indent=1)
-    os.replace(f + ".tmp", f)
+    put_whole(f, json.dumps({"written_by": "windstorm-mirror", "made": rec}, indent=1), 0o600)
+
+
+_made_held = [0]
+
+
+@contextlib.contextmanager
+def made_lock(p, make=True):
+    """M162 (G4.11): the record is read and written under one lock, so an entry one command notes is never lost to
+    another's write (a key set while the first sync runs, the day a person sets up). The lock is the data folder's
+    own (flock on the folder itself: no file is added); it is held once per process (a claim inside a write takes
+    no second lock), and only while the record is read and written. With no data folder and make False, there is
+    no record to keep, and nothing is locked."""
+    if _made_held[0]:
+        _made_held[0] += 1
+        try:
+            yield
+        finally:
+            _made_held[0] -= 1
+        return
+    if make:
+        os.makedirs(p["data"], mode=0o700, exist_ok=True)
+    try:
+        fd = os.open(p["data"], os.O_RDONLY)
+    except FileNotFoundError:
+        if make:
+            raise
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _made_held[0] = 1
+        try:
+            yield
+        finally:
+            _made_held[0] = 0
+    finally:
+        os.close(fd)
 
 
 def claim(path, kind="file"):
@@ -232,13 +646,20 @@ def claim(path, kind="file"):
     path = os.path.abspath(path)
     roots = own_roots(p)
     if path in service_files(p):
-        rec, why = read_made(p)
-        if rec is not None:
-            rec[path] = "service:" + sha256_of(path)
-            write_made(p, rec)
+        with made_lock(p):
+            rec, why = read_made(p)
+            if rec is not None:
+                rec[path] = "service:" + sha256_of(path)
+                write_made(p, rec)
         return
     if not any(inside(path, r) for r in roots) or os.path.basename(path) == MADE_RECORD:
         return
+    with made_lock(p):
+        claim_noted(p, path, kind, roots)
+
+
+def claim_noted(p, path, kind, roots):
+    """claim's own read and write of the record, under made_lock."""
     rec, why = read_made(p)
     if rec is None:
         return                       # never written over: an unreadable record stays as it is, and is said
@@ -256,19 +677,23 @@ def claim(path, kind="file"):
 
 
 def unclaim(p, gone):
-    rec, why = read_made(p)
-    if rec is None or not any(g in rec for g in gone):
-        return
-    for g in gone:
-        rec.pop(g, None)
-    if os.path.exists(p["data"]):
-        write_made(p, rec)
+    with made_lock(p, make=False):
+        rec, why = read_made(p)
+        if rec is None or not any(g in rec for g in gone):
+            return
+        for g in gone:
+            rec.pop(g, None)
+        if os.path.exists(p["data"]):
+            write_made(p, rec)
 
 
-def not_ours(p):
+def not_ours(p, rec=None):
     """Every entry in the skill's own folders that its record does not hold (at most 50), or [why] when the record
-    cannot be read. Checked at the moment a command runs: a person's file may have arrived since setup."""
-    rec, why = read_made(p)
+    cannot be read. Checked at the moment a command runs: a person's file may have arrived since setup. `rec`: a
+    record to read the folders against (setup --use-this-folder --dry-run's own, never written)."""
+    why = None
+    if rec is None:
+        rec, why = read_made(p)
     if rec is None:
         return [why]
     found = []
@@ -490,8 +915,58 @@ def open_folders(p, close=False):
     return lines
 
 
-def home_is_not_ours(p):
-    """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it."""
+UNSEEN = ("Cc", "Cf", "Cs", "Zl", "Zp")       # the family's rule 31 (vi): cannot be seen, or not text
+
+
+def service_value_stop(p):
+    """G1.24 (M148): a value the service files carry that no service manager can be handed as one whole value (a
+    character that cannot be seen, a line or paragraph separator, or bytes that are not text): setup stops before
+    its first write. None, or the sentence that stops it. The value itself is not printed: it holds such a character."""
+    for what, value, step in (
+            ("the path of the Python this runs with", sys.executable,
+             "run setup with a Python whose path has none (for example /usr/bin/python3)"),
+            ("the folder this skill keeps its things in", p["data"],
+             "set WSM_HOME to a folder of your own whose path has none, and run setup again"),
+            ("WSM_HOME", os.environ.get("WSM_HOME") or "",
+             "set WSM_HOME to a folder of your own whose path has none, and run setup again")):
+        if what.startswith("the path of the Python") and not value:
+            return ("Stopped: this Python does not say where its own program is, so the service could not be told "
+                    "what to run. Nothing was changed. The one next step: run setup with /usr/bin/python3.")
+        if any(unicodedata.category(c) in UNSEEN for c in value):
+            return (f"Stopped: {what} holds a character that cannot be seen, or bytes that are not text, so it "
+                    "cannot be written into the service file as one whole value. Nothing was changed. The one next "
+                    f"step: {step}.")
+        if what.startswith("the path of the Python") and system()[0] != "darwin" and any(c in SD_PATH_REFUSED for c in value):
+            found = [SD_PATH_NAMES[c] for c in SD_PATH_REFUSED if c in value]     # each by its name (rule 31 v.5)
+            return (f"Stopped: the path of the Python this runs with holds {' and '.join(found)}, and systemd does "
+                    f"not take a program's path holding {'it' if len(found) == 1 else 'them'} as one whole value. "
+                    f"Nothing was changed. The one next step: {step}.")
+    return None
+
+
+USE_FOLDER_STEP = "If this folder is your mirror and you want to go on with it, the one next step is yours to take: "
+
+
+def lost_record_stop(p, lost):
+    """M158 (G6.25): setup's stop on a folder that holds a mirror whose record is lost: the record named with why,
+    then the need-you block, printed last, with the one step that is the person's own."""
+    return (f"Stopped: {lost}, and {p['data']} holds a mirror (the forge's own files, and the copies in them). So "
+            "setup cannot tell which files there are the skill's own, and changes nothing: nothing was copied, written "
+            "or taken away, and the copies, the forge's settings and your keys are still there as they were.\n"
+            "Needs you: going on with this folder is the person's own word.\n"
+            f"tell the person 1 of 2: {USE_FOLDER_STEP}{own_command(p, 'setup', '--use-this-folder')}\n"
+            "tell the person 2 of 2: It keeps that record, set aside under a name of its own, and makes a new one of "
+            "what setup can show by its place and its form to be the skill's own; anything else in these folders "
+            "stays where it is, off that record, and is named. Nothing is deleted or written over.")
+
+
+def home_is_not_ours(p, use=False, dry=False):
+    """Setup's word on the skill's own folders before it writes anything: None, or the sentence that stops it.
+    `use`: the person's --use-this-folder (M158)."""
+    _take_on_pending.clear()
+    stop = service_value_stop(p)
+    if stop:
+        return stop
     h = os.environ.get("WSM_HOME")
     if h and os.path.realpath(h) == os.path.realpath(os.path.expanduser("~")):
         return (f"Stopped: WSM_HOME is your home folder ({h}). The skill makes its folders only in a folder of its "
@@ -511,30 +986,138 @@ def home_is_not_ours(p):
                     "could change them. Nothing was changed. The one next step: "
                     + ("set WSM_HOME to a folder of your own that does not exist yet" if h else
                        f"make {d} yours alone (run chmod go-w {shlex.quote(d)} as its owner)") + ", and run setup again.")
-    rec, why = read_made(p)
-    changed = [f for f in service_files(p) if os.path.lexists(f) and not service_file_ours(p, rec, f)]
+    lost = read_made(p)[1]
+    rec, taken_on = None, False
+    if lost and holds_mirror(p):
+        if not use:
+            return lost_record_stop(p, lost)
+        rec = made_by_place(p)        # written only once every check below has passed
+        if dry:
+            say(f"With --use-this-folder, setup would set {os.path.join(p['data'], MADE_RECORD)} aside (kept, as it "
+                f"is) and make a new record of {len(rec)} entries, of what it can show by its place and its form to "
+                "be the skill's own; nothing would be deleted or written over.")
+        taken_on = True
+    elif use:
+        here = os.path.lexists(os.path.join(p["data"], MADE_RECORD))
+        say("--use-this-folder changes nothing here: " + (
+            f"the record of what the skill made, {os.path.join(p['data'], MADE_RECORD)}, was read whole, so setup goes "
+            "on from it as it always does." if not lost and here else
+            "the skill's folders held nothing yet, so there is nothing of a mirror's to go on with; setup goes on as "
+            "it would without it." if not lost else
+            f"{p['data']} holds no mirror (no forge settings file at {p['app_ini']}, and no forge data folder), so "
+            "there is nothing of a mirror's to go on with; setup goes on as it would without it."))
+    record_unread = []
+    if rec is None:
+        rec, why = read_made(p)
+        if rec is None:
+            # No mirror here (holds_mirror is False), so nothing of the skill's is lost with the record: each entry
+            # in its folders is named by its path, as one the skill did not make, and a record that is there but
+            # could not be read is named with them (it is moved out with them; nothing is deleted or written over)
+            rec = {}
+            if getattr(why, "answer", None) != "not there":
+                record_unread = [why.replace(" could not be read: ", " (could not be read: ", 1) + ")"]
+    states = {f: service_file_state(p, rec, f) for f in service_files(p) if os.path.lexists(f)}
+    unread = [(f, w) for f, (a, w) in states.items() if a == "could not be read"]
+    if unread:
+        return ("Stopped: this computer already has " + "; and ".join(f"{f}, and it could not be read: {w}"
+                                                                      for f, w in unread)
+                + ". So setup cannot tell whether " + ("it is" if len(unread) == 1 else "they are") + " as the "
+                "skill wrote " + ("it" if len(unread) == 1 else "them") + ", and does not write over "
+                + ("it" if len(unread) == 1 else "them") + ". Nothing was changed. The one next step: move "
+                + ("that file" if len(unread) == 1 else "those files") + f" out of {os.path.dirname(unread[0][0])} "
+                f"(into a folder of your own, to keep it), then run {own_command(p, 'setup')}")
+    changed = [f for f, (a, _) in states.items() if a == "no"]
     if changed:
-        return ("Stopped: this computer already has " + ", ".join(changed) + ", and not as the skill wrote it (it "
-                "was changed since, or something else wrote it), so setup does not write over it. Nothing was "
-                "changed. The one next step: move it out of that folder, and run setup again.")
-    others = not_ours(p)
+        return ("Stopped: this computer already has " + ", ".join(changed) + (
+                    ", and not what setup writes there now, so setup cannot show it is the skill's own (the record "
+                    "of what the skill wrote was not read)" if taken_on else
+                    ", and not as the skill wrote it (it was changed since, or something else wrote it)")
+                + ", so setup does not write over it. Nothing was changed. The one next step: move it out of that "
+                "folder, and run setup again.")
+    others = record_unread + not_ours(p, rec)
+    if taken_on:
+        # M158 (the owner's ruling, 11-26): on the way back, what setup does not take on stays where it is and is
+        # named as the person's; only an entry at a place setup itself writes stops it (never written over)
+        others = [x for x in others if writes_there(p, x)]
     if others:
-        where = h or p["data"]
-        return (f"Stopped: {where} already holds things the skill did not make: " + ", ".join(others[:8])
+        # A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest: an entry in
+        # the settings folder was said to be in the folder of copies): the stop names the folder that holds them
+        roots = [r for r in own_roots(p) if any(x == r or x.startswith(r.rstrip("/") + "/") for x in others)]
+        where = h or (" and ".join(roots) if roots else p["data"])
+        two = not h and len(roots) > 1
+        # M158: a folder that holds a mirror is never left for a second home: what is in it is moved out of it
+        second = h and not holds_mirror(p)
+        return (f"Stopped: {where} already " + ("hold" if two else "holds") + " things the skill did not make: "
+                + ", ".join(others[:8])
                 + (f" and {len(others) - 8} more" if len(others) > 8 else "") + ". The skill writes only into "
                 "folders that are its own, so nothing of yours is written over or taken away. Nothing was changed. "
                 "The one next step: " + ("set WSM_HOME to a folder that does not exist yet, or is empty"
-                                         if h else "move those out of it") + ", and run setup again.")
+                                         if second else "move those out of " + ("the folder each is in" if two else
+                                                                                "it")
+                                         + " (into a folder of your own, to keep them)") + ", and run setup again.")
+    if taken_on and not dry:
+        _take_on_pending[:] = [(p, lost, rec)]     # taken on at setup's first write, after its last stop (a stock Ubuntu 24.04 guest, 2026-11-26)
     return None
+
+
+_take_on_pending = []
+
+
+def take_on_now():
+    """setup --use-this-folder's take-on, made only once no stop of setup's is left before its first write: a stop
+    after it (lingering not chosen, a sync holding the lock) would else say "Nothing was changed" over a record
+    already set aside and written anew (seen 2026-11-26 on a stock Ubuntu 24.04 guest)."""
+    while _take_on_pending:
+        take_folder_on(*_take_on_pending.pop())
 
 
 def run(cmd, **kw):
     """Every outside command goes through here, so tests can stand in for the ones a CI machine lacks. A program
-    that is not installed answers 127 with a plain sentence, never a traceback (seen: a computer with no git)."""
+    that is not installed answers 127 with a plain sentence, never a traceback (seen: a computer with no git).
+    M120: its words are read as bytes and decoded by text_of with the codec Python itself encodes every argument and
+    environment value with, so a name read from git and handed back to git is the same bytes under any language."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+        out = subprocess.run(cmd, capture_output=True, **kw)
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]} is not installed on this computer")
+    return subprocess.CompletedProcess(out.args, out.returncode, text_of(out.stdout), text_of(out.stderr))
+
+
+def lines_of(text):
+    """A program's lines, split at the line feed only (M120): a ref's name may hold U+0085, U+2028 or U+2029, where
+    Python's splitlines also breaks."""
+    return [x for x in (text or "").split("\n") if x.strip()]
+
+
+def text_of(data):
+    """A program's bytes as text, never raising (M120), and with every byte kept: a carriage return stays one, so
+    a line ends only where the program wrote a line feed (family rule 31 (vi)). Decoded as os.fsdecode does, which is
+    the codec subprocess encodes each argument with (UTF-8 with stand-in characters on a UTF-8 language and on a Mac;
+    the language's own on another, seen: ISO-8859-1), so what is read goes back as the same bytes by construction."""
+    if data is None:
+        return None
+    return os.fsdecode(data)
+
+
+def program_lines(text):
+    """A program's words cut into lines at a carriage return too (M120), as they came: read, never shown."""
+    return [x for x in re.split(r"\r\n|\r|\n", text or "") if x.strip()]
+
+
+def shown_lines(text):
+    """A program's words as lines for a PERSON (M120, the owner's ruling 11-24): cut at a carriage return too, so
+    words after one never reach the screen over the words before it. Records are read with lines_of. M134 (family
+    rule 31(B), the owner's ruling 11-25): git and the forge quote a name somebody else chose in their own words, so
+    each line goes through shown_line; nothing decides by these lines."""
+    return [shown_line(x) for x in program_lines(text)]
+
+
+def shown_line(line):
+    """One line of a program's words for a person: a backtick and each of the two characters of a dollar-parenthesis
+    are put as a ?, every other character stays as it came (so the words can be searched for), and a line where one
+    was put says so. No line is dropped for it."""
+    out = line.replace(BACKTICK, "?").replace(DOLLAR_PAREN, "??")
+    return line if out == line else out.rstrip() + "; " + SHOWN_CHANGED
 
 
 # ---------------------------------------------------------------- G1.1 the pinned binary
@@ -586,14 +1169,6 @@ def fetch_forge(p, base=None):
 
 
 # ---------------------------------------------------------------- G1.3 the forge's settings
-
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
 
 def port_is_free(port):
     s = socket.socket()
@@ -664,6 +1239,33 @@ ROOT_PATH = {f}/log
 """
 
 
+# M159 (G6.26): what the forge itself needs from its settings file to start as an installed forge, by section and
+# name (Gitea 28.4.0 stopped at its start, in a stand-in trial, 2026-11-26, without [security] INSTALL_LOCK).
+FORGE_INI_NEEDS = (("server", "HTTP_PORT"), ("database", "DB_TYPE"), ("database", "PATH"), ("security", "INSTALL_LOCK"))
+
+
+def forge_ini_read(p):
+    """M159 (G6.26): the forge's settings file's three answers: ('read', None), ('not there', None) or ('could not
+    be read', why); the why names the error's class or the setting that is missing, never a value of the file."""
+    f = p["app_ini"]
+    answer, data = open_kept(f)
+    if answer != "read":
+        return answer, data
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "could not be read", "it is not text (UnicodeDecodeError)"
+    if not data.strip():
+        return "could not be read", "it is empty (0 bytes)" if not data else "it holds only blank space"
+    for sec, key in FORGE_INI_NEEDS:
+        if not ini_value(f, sec, key):
+            return "could not be read", (f"it holds no {key} in its [{sec}] part, which the forge needs to start (cut "
+                                         "short, or changed by hand)")
+    if not ini_value(f, "server", "HTTP_PORT").isdigit():
+        return "could not be read", "its HTTP_PORT in its [server] part is not a number"
+    return "read", None
+
+
 def ini_value(path, section, key):
     """Read one setting by its name; a config file is never printed whole (G6.4)."""
     cur = ""
@@ -677,7 +1279,7 @@ def ini_value(path, section, key):
                     k, _, v = s.partition("=")
                     if k.strip() == key:
                         return v.strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return None
 
@@ -722,11 +1324,92 @@ def person_name():
 def forge_users(p):
     out = gitea(p, "admin", "user", "list")
     names = []
-    for line in out.stdout.splitlines()[1:]:
+    for line in lines_of(out.stdout)[1:]:
         cols = line.split()
         if len(cols) >= 2:
             names.append(cols[1])
     return names
+
+
+def new_forge_password(p, st, name):
+    """M175 (G6.34), on the person's own word (setup --new-password): their Gitea account gets a new password. A token
+    of the forge's own command, read from its standard output (Gitea 28.4.0's change-password takes the password on
+    its command line only, where other accounts on the computer can read it); the password in a request's body to
+    127.0.0.1; the token taken away with the new password before setup ends, and read gone. The password is kept
+    first under a name of its own and takes the file's name only once the forge has it. Every request goes through
+    Forge.call, the one road to the forge (G8.7: it reads the door first), with this change's own authorization in
+    place of the mirror account's key. Gives (the line, done)."""
+    try:
+        forge = Forge(p, st)
+    except KeptUnread:                         # before any token is made: nothing is left on the account
+        return (f"Your Gitea account '{name}' was not given a new password: the '{MIRROR_USER}' account's key file "
+                f"{p['mirror_key']} could not be read just now, and nothing of your account was changed. Run the same "
+                f"command again: {own_command(p, 'setup', '--new-password')}", False)
+
+    def ask(method, path, body=None, auth=None):
+        try:
+            return forge.call(method, path, body, auth=auth)
+        except DoorShut:
+            return 0, None
+    tag = password_token_tag()
+    out = gitea(p, "admin", "user", "generate-access-token", "--username", name, "--token-name", tag,
+                "--scopes", "write:admin,write:user", "--raw")
+    token = out.stdout.strip() if out.returncode == 0 else ""
+    if out.returncode != 0 and "access token name has been used already" in (out.stderr or ""):
+        # not made by this run (one an earlier run left when it broke off, or one made by hand): left as it is
+        return (f"Your Gitea account '{name}' was not given a new password: a key named {tag} already stands on that "
+                "account, one this run of setup did not make, so setup left it as it is and changed nothing of the "
+                f"account. Run the same command again (it makes a key of another name): "
+                f"{own_command(p, 'setup', '--new-password')}", False)
+    if not token or any(c.isspace() for c in token):
+        return (f"Your Gitea account '{name}' was not given a new password: the forge did not give the key it needs "
+                "for that, and nothing of the account was changed. Run the same command again: "
+                f"{own_command(p, 'setup', '--new-password')}", False)
+    word = secrets.token_urlsafe(24)
+    held = p["password"] + ".new"
+    write_private(held, word + "\n")
+    code, _ = ask("PATCH", f"/admin/users/{name}", {"login_name": name, "source_id": 0, "password": word,
+                                                 "must_change_password": False}, auth=f"token {token}")
+    if code != 200:
+        os.remove(held)
+        unclaim(p, [os.path.abspath(held)])
+        left = ask("GET", "/user", auth=f"token {token}")[0] == 200
+        return (f"Your Gitea account '{name}' was not given a new password: the forge answered {code or 'nothing'}, "
+                "and its password is as it was."
+                + (f" A key named {tag} is still on that account, which setup could not take away without the "
+                   "password: take it away in Gitea's settings of that account (Applications)." if left else "")
+                + f" Run the same command again: {own_command(p, 'setup', '--new-password')}", False)
+    os.replace(held, p["password"])
+    claim(p["password"])                       # in the record under its own name (seen: setup after it stopped on it)
+    unclaim(p, [os.path.abspath(held)])
+    said = (f"Your Gitea account '{name}' has a new password, in {p['password']} (readable by you only). A password "
+            "you set for it yourself no longer works.")
+    step = "take it away in Gitea's settings of that account (Applications), signing in with the new password."
+    # Only the key this run made is taken away: read from the account's own list, by its name and the last eight
+    # characters of the key this run was given, and taken away by its number, never by its name alone
+    basic = "Basic " + base64.b64encode(f"{name}:{word}".encode()).decode()
+    code, listed = ask("GET", f"/users/{name}/tokens", auth=basic)
+    if code != 200 or not isinstance(listed, list):
+        return (said + f" Whether the key named {tag} that setup made for the change still stands could not be read "
+                f"(the forge {'answered ' + str(code) if code else 'did not answer'}), so nothing was taken away: "
+                + step, False)
+    mine = [t for t in listed if isinstance(t, dict) and t.get("name") == tag
+            and t.get("token_last_eight") == token[-8:] and isinstance(t.get("id"), int)]
+    if len(mine) != 1:
+        return (said + f" The key named {tag} that setup made for the change was not found as this run's own on that "
+                "account's list, so nothing was taken away: " + step, False)
+    number = mine[0]["id"]
+    gone = ask("DELETE", f"/users/{name}/tokens/{number}", auth=basic)[0] == 204   # G3.6: one of two deletes
+    gone = gone and ask("GET", "/user", auth=f"token {token}")[0] == 401
+    if not gone:
+        return (said + f" A key named {tag} that setup made for the change is still on that account: " + step, False)
+    return said, True
+
+
+def password_token_tag():
+    """M175: the name of the key setup --new-password makes for the change, new for every run: the second it was made
+    (UTC) and 24 random bits."""
+    return "windstorm-mirror-password-" + time.strftime("%Y%m%d%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex()
 
 
 def create_user(p, name, admin):
@@ -747,8 +1430,8 @@ def create_user(p, name, admin):
 
 
 def last_line(text):
-    lines = [x for x in (text or "").strip().splitlines() if x.strip()]
-    return redact(lines[-1]) if lines else ""
+    lines = shown_lines(text)
+    return redact(lines[-1].rstrip()) if lines else ""
 
 
 def redact(text):
@@ -763,7 +1446,7 @@ Description=Windstorm Mirror for GitHub: the forge (stock Gitea {GITEA_VERSION},
 
 [Service]
 Type=simple
-{env_line()}ExecStart={sys.executable} -I {p['script']} run-forge
+{env_line()}ExecStart={sd_line(forge_argv(p))}
 Restart=on-failure
 RestartSec=10
 
@@ -772,31 +1455,118 @@ WantedBy=default.target
 """
 
 
-def env_line():
-    """The service runs with the same home setup used (WSM_HOME, when setup ran with one)."""
+# G1.24 (M148): every value in a service file is written as that manager's grammar takes one whole value, and what
+# the manager parsed is read back word for word before anything is started (service_read_back).
+
+def forge_argv(p):
+    return [sys.executable, "-I", p["script"], "run-forge"]
+
+
+def sync_argv(p):
+    return [sys.executable, "-I", p["script"], "sync", "--from-timer"]
+
+
+def service_env():
+    """What the services carry in their environment: WSM_HOME, when setup ran with one."""
     h = os.environ.get("WSM_HOME")
-    return f'Environment="WSM_HOME={h}"\n' if h else ""
+    return [f"WSM_HOME={h}"] if h else []
+
+
+# G1.24: what setup wrote into each service file, the read-back's "meant" side
+SERVICE_MEANT = "service-meant.json"
+# set by launchd itself in a loaded job's environment block, never by the person (seen 2026-11-25 on a Mac, macOS
+# 27.2.1, a test account: `launchctl print` showed these two beside the job file's own variables)
+LAUNCHD_OWN_ENV = ("OSLogRateLimit", "XPC_SERVICE_NAME")
+
+
+def record_meant(p, which, argv):
+    """Before setup writes a service file: what it writes there, kept in the skill's own folder, so the read-back
+    compares with what setup wrote and never with what a later terminal's environment says (the family's rule 31
+    (v.5) (3))."""
+    path = os.path.join(p["data"], SERVICE_MEANT)
+    held = load_json(path, {})
+    held = held if isinstance(held, dict) else {}
+    held[which] = {"argv": list(argv), "env": dict(e.split("=", 1) for e in service_env())}
+    write_file(path, json.dumps(held, indent=1, ensure_ascii=False) + "\n", 0o600)
+
+
+def read_meant(p, which):
+    """(argv, {name: value}) setup wrote for the forge's ('forge') or the sync's ('sync') service, or None."""
+    got = load_json(os.path.join(p["data"], SERVICE_MEANT), {})
+    m = got.get(which) if isinstance(got, dict) else None
+    try:
+        argv, env = list(m["argv"]), dict(m["env"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    if not all(isinstance(w, str) for w in argv) or not all(isinstance(k, str) and isinstance(v, str)
+                                                            for k, v in env.items()):
+        return None
+    return argv, env
+
+
+# Seen 2026-11-25 on two stock Ubuntu 24.04 guests (systemd 255): an argument written as sd_word reached the started
+# program whole for a space, two spaces, a leading space, %, %h, $, ${X}, ", \, a trailing \, ', ;, & < > and a
+# non-ASCII letter, each alone and all at once, and the bus held each $ as $$ (expanded at start, not at parse). The
+# program's own path takes no ", ' or \ (the unit is refused), and no one spelling carried every such path holding a $
+# whole; SD_PATH_REFUSED is refused by setup before its first write, so the path's word needs only the percent sign
+# doubled.
+SD_PATH_REFUSED = "$\"'\\"
+SD_PATH_NAMES = {"$": "a dollar sign", '"': "a double quote", "'": "an apostrophe", "\\": "a backslash"}
+
+
+def sd_word(s):
+    """One argument of a systemd start line: in double quotes, with the backslash, the double quote, the percent
+    sign and the dollar sign each in systemd's own form for them."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+
+
+def sd_line(argv):
+    """The start line: the program's path (it holds none of SD_PATH_REFUSED), then each argument as sd_word."""
+    return " ".join(['"' + argv[0].replace("%", "%%") + '"'] + [sd_word(w) for w in argv[1:]])
+
+
+def sd_parsed_form(argv):
+    """What systemd's bus holds for argv written by sd_line: the program, then argv, each argument's $ as $$."""
+    return [argv[0], argv[0]] + [w.replace("$", "$$") for w in argv[1:]]
+
+
+def env_line():
+    """The service runs with the same home setup used. One Environment= word, quoted: systemd takes the backslash,
+    the double quote and the percent sign there in its own forms, and no dollar sign."""
+    return "".join('Environment="' + e.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"\n'
+                   for e in service_env())
+
+
+def xml_text(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def plist_strings(words):
+    return "".join(f"<string>{xml_text(w)}</string>" for w in words)
 
 
 def env_plist():
-    h = os.environ.get("WSM_HOME")
-    if not h:
+    env = service_env()
+    if not env:
         return ""
-    return f"  <key>EnvironmentVariables</key><dict><key>WSM_HOME</key><string>{h}</string></dict>\n"
+    return ("  <key>EnvironmentVariables</key><dict>"
+            + "".join(f"<key>{xml_text(k)}</key><string>{xml_text(v)}</string>" for k, v in (e.split("=", 1) for e in env))
+            + "</dict>\n")
 
 
 def plist_text(p):
+    log = xml_text(os.path.join(p["forge"], "log", "launchd.log"))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{sys.executable}</string><string>-I</string><string>{p['script']}</string><string>run-forge</string></array>
+  <array>{plist_strings(forge_argv(p))}</array>
 {env_plist()}  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>{p['forge']}/log/launchd.log</string>
-  <key>StandardErrorPath</key><string>{p['forge']}/log/launchd.log</string>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
 </dict>
 </plist>
 """
@@ -812,7 +1582,7 @@ Description=Windstorm Mirror for GitHub: one sync of the copies
 
 [Service]
 Type=oneshot
-{env_line()}ExecStart={sys.executable} -I {p['script']} sync --from-timer
+{env_line()}ExecStart={sd_line(sync_argv(p))}
 Nice=10
 """
 
@@ -831,34 +1601,400 @@ WantedBy=timers.target
 
 
 def sync_plist_text(p, minutes):
+    log = xml_text(os.path.join(p["forge"], "log", "sync.log"))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{SYNC_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{sys.executable}</string><string>-I</string><string>{p['script']}</string><string>sync</string><string>--from-timer</string></array>
+  <array>{plist_strings(sync_argv(p))}</array>
 {env_plist()}  <key>StartInterval</key><integer>{minutes * 60}</integer>
-  <key>StandardOutPath</key><string>{p['forge']}/log/sync.log</string>
-  <key>StandardErrorPath</key><string>{p['forge']}/log/sync.log</string>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
 </dict>
 </plist>
 """
 
 
+SD_DEST = "org.freedesktop.systemd1"
+# seconds each read of a service manager is given; past it, it "could not be read" (the owner's ruling, 11-25)
+BUS_WAIT = 10
+
+
+def bus_json(*args):
+    """One answer of the user manager over its bus (busctl's JSON form), its data, or None when it could not be read
+    (an error is never an absence), within BUS_WAIT."""
+    try:
+        out = run(["busctl", "--user", "--json=short", *args], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout)["data"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def systemd_version():
+    """systemd's own version number as `systemctl --version` prints it on its first line (no bus needed), or ''."""
+    try:
+        out = run(["systemctl", "--version"], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return ""
+    m = re.match(r"systemd (\d+)\b", (out.stdout or "").split("\n")[0]) if out.returncode == 0 else None
+    return m.group(1) if m else ""
+
+
+BUS_ROAD = "and setup reads back over that bus what systemd takes from each service file it writes"
+
+
+# The oldest systemd the skill was seen to run on: a stock Ubuntu 24.04 guest's, 2026-11-25 (setup, its read-back over
+# the bus, a restart). An older one may hold everything setup needs; it was not seen.
+OLDEST_SEEN_SYSTEMD = 255
+# busctl's own refusal of the JSON form setup reads with, RECORDED on stock systemd 237 (Ubuntu 18.04) and 239
+# (AlmaLinux 8.10), in every shell, with a bus too (the family's record of five systems, 2026-11-25): "busctl:
+# unrecognized option '--json=short'". 245 and 249 answered the read in that form, as 255 does.
+NO_JSON_FORM = re.compile(r"unrecognized option\W+--json")
+
+
+def bus_floor(p):
+    """G1.24 (the owner's ruling, 11-25: the read-back's road is a floor, and a floor is checked before the first
+    write): on Linux, one harmless read over the user bus in busctl's JSON form, the manager's own version. None when
+    it answers in that form; otherwise the line that stops setup and its dry run, with what was found and the one
+    next step. What the tool can read itself decides first: a shell with neither XDG_RUNTIME_DIR nor
+    DBUS_SESSION_BUS_ADDRESS has no road to the user bus (busctl said so in its own words there, seen on Ubuntu
+    24.04, systemd 255.4, 2026-11-25). Then busctl's own answers as recorded: no bus (NO_USER_BUS), and its refusal
+    of the JSON form (NO_JSON_FORM, an older systemd's). Any answer no one recorded says what was read, busctl's
+    exit code, on every version, and nothing about a form unless JSON came back that could not be parsed: no line
+    names a cause the tool did not read (the owner's ruling, 11-25)."""
+    if system()[0] == "darwin":
+        return None
+    if not os.environ.get("XDG_RUNTIME_DIR") and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return ("Stopped: this shell cannot reach your account's own systemd: it has neither XDG_RUNTIME_DIR nor "
+                f"DBUS_SESSION_BUS_ADDRESS, the two that lead to its bus, {BUS_ROAD}. Setup made nothing. The one "
+                "next step: run setup from a login of your own to this computer, such as ssh or a terminal at the "
+                f"screen, which sets them: {own_command(p, 'setup')}")
+    try:
+        out = run(["busctl", "--user", "--json=short", "get-property", SD_DEST, "/org/freedesktop/systemd1",
+                   SD_DEST + ".Manager", "Version"], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return (f"Stopped: your account's own systemd did not answer over its bus within {BUS_WAIT} s, {BUS_ROAD}. "
+                "Setup made nothing. The one next step: run setup again in a minute.")
+    if out.returncode == 0:
+        try:
+            if isinstance(json.loads(out.stdout)["data"], str):
+                return None
+        except (ValueError, KeyError, TypeError):
+            pass
+        ver = systemd_version()
+        return (f"Stopped: {'systemd ' + ver if ver else 'this computer' + chr(39) + 's systemd'} answered over your "
+                f"account's bus in a form setup does not read (busctl's JSON form), {BUS_ROAD}. Setup made nothing. "
+                "The one next step: open an issue with this line.")
+    if NO_USER_BUS.search(out.stderr or "") or NO_USER_BUS.search(out.stdout or ""):
+        return ("Stopped: this shell cannot reach your account's own systemd: busctl found no bus where XDG_RUNTIME_DIR "
+                f"or DBUS_SESSION_BUS_ADDRESS leads, {BUS_ROAD}. Setup made nothing. The one next step: run setup "
+                f"from a login of your own to this computer, such as ssh or a terminal at the screen: "
+                f"{own_command(p, 'setup')}")
+    if out.returncode == 127:
+        return (f"Stopped: this computer has no busctl, systemd's own tool for its bus, {BUS_ROAD}. Setup made "
+                "nothing. The one next step: open an issue with this line.")
+    if NO_JSON_FORM.search(out.stderr or ""):
+        ver = systemd_version()
+        return (f"Stopped: {'this computer' + chr(39) + 's systemd is ' + ver if ver else 'this computer has a systemd'}"
+                f" whose busctl does not know the JSON form setup reads with (busctl answered that the option is not "
+                f"one it knows); the skill was seen to run on systemd {OLDEST_SEEN_SYSTEMD}, {BUS_ROAD}. Setup made "
+                f"nothing. The one next step: set the skill up on a computer whose busctl answers in that form, such "
+                f"as one with systemd {OLDEST_SEEN_SYSTEMD}, as the README says.")
+    return (f"Stopped: busctl answered exit {out.returncode} when setup read your account's own systemd over its bus, "
+            f"{BUS_ROAD}. Setup made nothing. The one next step: run setup from a login of your own to this computer, "
+            "such as ssh or a terminal at the screen, and if this line comes back there, open an issue with this "
+            f"line: {own_command(p, 'setup')}")
+
+
+def dropin_count(which):
+    """How many drop-in files stand on the job's unit, as the user manager lists them over its bus (DropInPaths):
+    a number, or None when that could not be read. Only the count is kept: the files are the person's."""
+    unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+    obj = bus_json("call", SD_DEST, "/org/freedesktop/systemd1", SD_DEST + ".Manager", "LoadUnit", "s", unit)
+    if not (isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], str)):
+        return None
+    got = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Unit", "DropInPaths")
+    return len(got) if isinstance(got, list) else None
+
+
+def unit_type(which):
+    """The job's unit type as the user manager holds it (a drop-in may set it too): "oneshot", "simple", ..., or None
+    when that could not be read."""
+    unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+    obj = bus_json("call", SD_DEST, "/org/freedesktop/systemd1", SD_DEST + ".Manager", "LoadUnit", "s", unit)
+    if not (isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], str)):
+        return None
+    got = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Service", "Type")
+    return got if isinstance(got, str) else None
+
+
+def systemd_parsed(unit):
+    """G1.24: ([each start line's words], [each Environment entry]) as the user manager holds them for unit, read
+    over its bus one word at a time, never from the line `systemctl show` prints (it joins the words with spaces, so
+    one word and two read the same); None when that could not be read."""
+    obj = bus_json("call", SD_DEST, "/org/freedesktop/systemd1", SD_DEST + ".Manager", "LoadUnit", "s", unit)
+    if not (isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], str)):
+        return None
+    ex = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Service", "ExecStart")
+    env = bus_json("get-property", SD_DEST, obj[0], SD_DEST + ".Service", "Environment")
+    try:
+        starts = [[e[0]] + list(e[1]) for e in ex]          # the program, then its argument list
+        if not all(isinstance(w, str) for s in starts for w in s) or not all(isinstance(e, str) for e in env):
+            return None
+    except (TypeError, IndexError):
+        return None
+    return starts, list(env)
+
+
+# The macOS versions launchctl print's form for a job was seen on (row M148): 27.2.1 on a Mac, a test account, and
+# 15.7.9, 15.8.2, 26.6.1 and 26.7.2 on GitHub's standard runners with a made-up job, 2026-11-25 (tests/launchd-print).
+MACOS_PRINT_SEEN = "15.7.9, 15.8.2, 26.6.1, 26.7.2 and 27.2.1"
+
+
+def launchd_parsed(label):
+    """G1.24: (the loaded job's arguments, one by one, {each environment name: its value}) as launchd holds them, read from
+    `launchctl print` (seen 2026-11-25 on macOS MACOS_PRINT_SEEN, the same form: one argument to a line after two tabs inside
+    "arguments = {", as written, spaces, &, <, a quote and a backslash alike; each variable as "NAME => value" inside
+    "environment = {", beside the "inherited environment" and "default environment" blocks, which are not the
+    job's); None when that could not be read, and "absent" when launchd has no such job. A print with no arguments
+    block of that form (another macOS's) is None too: could not be read, never "differs" (the owner's ruling, 11-25).
+    The environment is None when no block of that form stands (seen only for a job that sets variables: whether
+    launchd prints one for a job that sets none is not seen), and service_read decides."""
+    try:
+        out = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], timeout=BUS_WAIT)
+    except subprocess.TimeoutExpired:
+        return None
+    if out.returncode == 113:                      # the family's rule 24: no such job
+        return "absent"
+    if out.returncode != 0:
+        return None
+    lines, args, env, block = out.stdout.split("\n"), None, None, None
+    for line in lines:
+        if line in ("\targuments = {", "\tenvironment = {"):
+            block = line[1:].split(" ")[0]
+            if block == "arguments":
+                args = []
+            elif env is None:
+                env = {}
+            continue
+        if block and line == "\t}":
+            block = None
+            continue
+        if block == "arguments" and line.startswith("\t\t"):
+            args.append(line[2:])
+        elif block == "environment" and line.startswith("\t\t") and " => " in line:
+            k, v = line[2:].split(" => ", 1)
+            env[k] = v
+    if args is None:
+        return None
+    return args, env
+
+
+def service_read(p, which):
+    """G1.24: (answer, the names of the person's own environment entries, the parts that differ by name: "its start
+    line" or "its arguments", "its WSM_HOME entry") for the forge's ('forge') or the sync's
+    ('sync') job. answer: 'equal' when what the service manager parsed is, word for word, what setup wrote (its
+    record, never this terminal's environment): the start line, and for each variable setup set exactly one entry
+    with its value; 'differs'; 'unread' when what the manager holds could not be read; 'unrecorded' when setup's own
+    record of what it wrote is not there or not readable (the owner's ruling, 11-25: not a bus that did not answer);
+    'absent' (a Mac) when launchd holds no such job. An entry for a variable setup did not set is the person's own
+    (a drop-in of theirs):
+    never a fault of ours, and only its name is kept (rule 31 (v.5) (3): it may hold a password). So is a start line
+    of theirs on a one-shot unit beside ours, where ours is held once, as written, and first (the same rule, 4:22 PM
+    ET 11-25): the list holds them in order, ours first, and that the manager runs them in that order is recorded
+    on five systems, the user manager (4:52 PM ET); a line still says only what the tool read. It is kept by its
+    count alone, a number at the end of the names (a start line can hold a secret as a value can)."""
+    meant = read_meant(p, which)
+    if system()[0] == "darwin":
+        got = launchd_parsed(LAUNCHD_LABEL if which == "forge" else SYNC_LABEL)
+        if got in (None, "absent"):
+            return ("unread" if got is None else "absent"), [], []
+        if meant is None:
+            return "unrecorded", [], []
+        args, env = got
+        if env is None:                 # no environment block of the seen form: another form where setup set some
+            if meant[1]:
+                return "unread", [], []
+            env = {}
+        theirs = sorted(k for k in env if k not in meant[1] and k not in LAUNCHD_OWN_ENV)
+        parts = (["its arguments"] if args != meant[0] else []) + [
+            f"its {k} entry" for k, v in meant[1].items() if env.get(k) != v]
+        return ("differs" if parts else "equal"), theirs, parts
+    if meant is None:
+        return "unrecorded", [], []
+    got = systemd_parsed((SERVICE if which == "forge" else SYNC_UNIT) + ".service")
+    if got is None:
+        return "unread", [], []
+    starts, entries = got
+    pairs = [e.split("=", 1) if "=" in e else [e, None] for e in entries]
+    theirs, parts, ours = sorted({k for k, _ in pairs if k not in meant[1]}), [], sd_parsed_form(meant[0])
+    if starts != [ours]:
+        # Ours not held, held changed, held more than once or not first is a stop; a start line of theirs on a unit of
+        # another type is seen by no one, so it is a stop too (rule 31 (v.5) (3), its LIMIT): the forge's is written
+        # simple, and only the sync's, written one-shot and held so by the manager, may carry theirs.
+        typ = unit_type(which) if which == "sync" and starts[:1] == [ours] and starts.count(ours) == 1 else ""
+        if typ is None:                             # the type could not be read: a read that failed, never a fault
+            return "unread", [], []
+        if typ == "oneshot":
+            theirs.append(len(starts) - 1)
+        else:
+            parts.append("its start line")
+    for name, want in meant[1].items():
+        held = [v for k, v in pairs if k == name]
+        # the count where setup wrote one entry, and no more (never which one wins). More than one was produced by
+        # none of the five systemd versions the family tried (rule 31 (v.5) (3), 4:03 PM ET 11-25): a stop kept for
+        # a form not seen, said by its count; no promise leans on it.
+        if held != [want]:
+            parts.append(f"its {name} entry" if len(held) == 1 else f"its {name} entry ({len(held)} found where "
+                         "setup wrote one)")
+    return ("differs" if parts else "equal"), theirs, parts
+
+
+def service_read_back(p, which):
+    """G1.24: service_read's answer alone."""
+    return service_read(p, which)[0]
+
+
+def theirs_line(p, reads=None):
+    """The family's rule 31 (v.5) (3): environment entries the person set in the skill's services themselves, named
+    (never their values) as theirs, a warning: '' when there are none or nothing could be read. reads: service_read's
+    answers already read, by job, so nothing is read twice (the owner's ruling, 11-25)."""
+    names, starts = [], {}
+    for which in ("forge", "sync"):
+        for n in (reads[which] if reads else service_read(p, which))[1]:
+            if isinstance(n, int):
+                starts[which] = n
+            elif n not in names:
+                names.append(n)
+    if not names and not starts:
+        return ""
+    said = []
+    if names:
+        said.append(f"Your own setting is in the skill's service too, set by you, not by this tool: "
+                    f"{shown_names(names)}. It is left as it is; this tool reads only the values it set itself.")
+    for which, n in starts.items():               # rule 31 (v.5) (3): by its count, never its words; the listing
+        unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+        it, is_ = ("them", "they are") if n != 1 else ("it", "it is")
+        said.append(f"{n} start line{'s' if n != 1 else ''} of your own {'are' if n != 1 else 'is'} in the {which}'s "
+                    f"service, set by you, not by this tool; {'they stand' if n != 1 else 'it stands'} after the "
+                    f"skill's own in systemd's list, and {is_} left as {is_}. To read {it}: systemctl --user cat {unit}")
+    return " ".join(said)          # a command, where one is given, stands last (rule 31 (v.5) (3))
+
+
+# (seen 2026-11-26 on a stock Ubuntu 24.04 guest: uninstall took the skill's own files and left a service file
+# changed by hand, named; "which takes its files away" was not true there)
+COMES_BACK = ("if this line comes back after that, run uninstall, which takes away the skill's own files and names "
+              "any it leaves, and open an issue with this line")
+
+
+def read_back_step(which, answer, where="setup"):
+    """G1.24 (the owner's ruling, 11-25: nobody is sent to uninstall over their own setting, or over the moment's):
+    the one next step after read_back_words. First what may be the person's own or the moment's; uninstall and an
+    issue only if the line comes back after that."""
+    if answer == "unrecorded":
+        return "Run setup again, which writes that record again and reads the service back; " + COMES_BACK
+    if answer == "unread":
+        if system()[0] == "darwin":
+            # Seen on the macOS versions in MACOS_PRINT_SEEN only (the owner's rulings, 11-25: the README names
+            # them): another macOS may print the job in a form not read here, so this answer may come back; never a
+            # road to uninstall.
+            first = ("Run status from a terminal window of your own" if where == "status" else
+                     "Run setup again in a minute")
+            return (f"{first}; if this line comes back, launchd's answer on this Mac may be in a form this tool does "
+                    f"not read yet (it was seen on macOS {MACOS_PRINT_SEEN}): open an issue with this line and this "
+                    "Mac's version, "
+                    "which this prints: sw_vers -productVersion")
+        if where == "status":
+            return ("Run status from a terminal window of your own; if this line comes back there, open an issue "
+                    "with this line")
+        return ("Run setup again (setup twice is one setup: what was done is read back, never done twice); "
+                + COMES_BACK)
+    if system()[0] == "darwin":
+        return "Run setup again, which writes it again and reads it back; " + COMES_BACK
+    unit = (SERVICE if which == "forge" else SYNC_UNIT) + ".service"
+    n = dropin_count(which)
+    if n:
+        # The family's rule 31 (v.5) (3), 4:03 PM ET 11-25: a drop-in that sets a variable the tool set, or a start
+        # line, is the person's own; what it holds is never said. Setup again would write the same file under the
+        # same drop-in, so the step is the manager's own listing, never uninstall or setup again.
+        return (f"{n} drop-in file{'s' if n != 1 else ''} stand{'s' if n == 1 else ''} on it beside the skill's own "
+                "file: a setting there is not this tool's, so it is left as it is. The one next step: read the "
+                "manager's own listing of it and its drop-ins, and take off by your own hand the setting that changes "
+                f"it: systemctl --user cat {unit}")
+    return ("A setting of your own that changes it comes off first, then run setup again; " + COMES_BACK
+            + f". Every file systemd read for it, yours too: systemctl --user cat {unit}")
+
+
+def not_set_up(answer):
+    """What status and the restart line say was done about a read-back that is not equal: a parse that could not be
+    read is never called not set up (the owner's ruling, 11-25), only not said to be."""
+    return "it is not said to be set up" if answer == "unread" else "it is not set up"
+
+
+def read_back_words(which, answer, then, step=None, parts=()):
+    """What setup and status say when the read-back is not 'equal' (the family's rule 31 (v.5): THAT a value is not
+    read as setup wrote it, never what it is read as instead, and no value the tool did not write: the parts are
+    named, never their values). then: what was done about it ("it was not started"); step: the one next step, for
+    where it is said (read_back_step's for setup when not given)."""
+    step = step if step is not None else read_back_step(which, answer)
+    job = "the forge's service" if which == "forge" else "the sync's service"
+    mgr = "launchd" if system()[0] == "darwin" else "systemd"
+    if answer == "differs":
+        named = " and ".join(parts) if parts else "a value in it"
+        verb = "are" if len(parts) > 1 or list(parts) == ["its arguments"] else "is"
+        return (f"{mgr} does not hold {job} as setup wrote it: {named} {verb} not read as setup wrote it, so "
+                f"{then}. {step}")
+    if answer == "unrecorded":
+        return f"what setup wrote for {job} could not be read from setup's own record, so {then}. {step}"
+    return f"whether {mgr} holds {job} as setup wrote it could not be read, so {then}. {step}"
+
+
+def launchd_checked(p, which, label, out):
+    """G1.24 on a Mac: a job launchd loaded is read back; one that is not what setup wrote is taken off again at
+    once. (True, '') or (False, the words)."""
+    back, _, parts = service_read(p, which)
+    if back == "equal":
+        return True, ""
+    back = back if back in ("differs", "unrecorded") else "unread"
+    answer, waited, code = launchd_off(p, label)        # G1.17: off by the one function, and read gone
+    if answer == "gone":
+        return False, read_back_words(which, back, "it was taken off again, and launchd reads it gone", parts=parts)
+    seen = (f"launchd still had it {waited:.0f} s later" if answer == "there" else
+            f"whether launchd let go of it could not be read (launchctl print answered code {code})")
+    again = "Run setup again in a minute, which takes it off first and reads it gone; " + COMES_BACK
+    return False, read_back_words(which, back, f"it was told to come off again, and {seen}", again, parts)
+
+
 def install_timer(p, minutes):
     if system()[0] == "darwin":
         path = os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+        record_meant(p, "sync", sync_argv(p))
         write_file(path, sync_plist_text(p, minutes))
-        uid = str(os.getuid())
-        run(["launchctl", "bootout", f"gui/{uid}/{SYNC_LABEL}"])
-        out = run(["launchctl", "bootstrap", f"gui/{uid}", path])
-        return out.returncode == 0
+        out, words = launchd_load(p, SYNC_LABEL, path)
+        if out is None:
+            return False, words
+        if out.returncode != 0:
+            return False, (f"this Mac did not load the sync's launch agent (code {out.returncode}); run setup again, "
+                           "and if it stops here again, run status")
+        return launchd_checked(p, "sync", SYNC_LABEL, out)
     base = os.path.dirname(p["unit"])
+    record_meant(p, "sync", sync_argv(p))
     write_file(os.path.join(base, SYNC_UNIT + ".service"), sync_unit_text(p))
     write_file(os.path.join(base, SYNC_UNIT + ".timer"), sync_timer_text(minutes))
     run(["systemctl", "--user", "daemon-reload"])
-    return run(["systemctl", "--user", "enable", "--now", SYNC_UNIT + ".timer"]).returncode == 0
+    back, _, parts = service_read(p, "sync")           # G1.24: read back before anything is switched on
+    if back != "equal":
+        return False, read_back_words("sync", back, "its timer was not switched on", parts=parts)
+    if run(["systemctl", "--user", "enable", "--now", SYNC_UNIT + ".timer"]).returncode == 0:
+        return True, ""
+    return False, "systemd did not switch the sync's timer on; run setup again, and if it stops here again, run status"
 
 
 def next_sync():
@@ -871,7 +2007,7 @@ def next_sync():
         return (f"every {int(m.group(1)) // 60} min (launchd keeps no next-run time)" if m else "loaded"), ""
     out = run(["systemctl", "--user", "show", SYNC_UNIT + ".timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime",
                "-p", "NextElapseUSecMonotonic"])
-    vals = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+    vals = dict(line.split("=", 1) for line in lines_of(out.stdout) if "=" in line)
     if vals.get("ActiveState") != "active":
         return "", "the sync timer is not running"
     nxt = vals.get("NextElapseUSecRealtime", "").strip()
@@ -900,10 +2036,60 @@ def span_seconds(text):
 
 def linger_state():
     """'yes', 'no' or 'unknown' for this account's systemd lingering."""
+    return linger_read()[0]
+
+
+def linger_read():
+    """This account's systemd lingering, three answers: ('yes', ''), ('no', ''), or ('unknown', what loginctl
+    answered)."""
     out = run(["loginctl", "show-user", getpass.getuser(), "-p", "Linger"])
     if out.returncode != 0:
-        return "unknown"
-    return "yes" if out.stdout.strip().endswith("=yes") else "no"
+        said = [x.strip() for x in shown_lines(out.stderr or "")]
+        return "unknown", f"code {out.returncode}" + (f": {said[0]}" if said else "")
+    return ("yes" if out.stdout.strip().endswith("=yes") else "no"), ""
+
+
+def uninstall_linger(st, record, left_running):
+    """A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest: setup said
+    "Lingering is now on ... uninstall switches it off again", and an uninstall with the state file at mode 000 ended
+    0 with no line on lingering): the one sentence every Linux uninstall road says of lingering. Uninstall switches
+    it off only where its record says setup switched it on and nothing is left running (as before); whenever
+    lingering is on, or could not be read, and uninstall did not switch it off, it says so: the state as read, why
+    it was left, and the person's own command for later. Lingering read off, and not switched off here, is not
+    said."""
+    user = getpass.getuser()
+    later = f"To switch it off yourself, if you want: loginctl disable-linger {user}"
+    by_setup = st.get("linger_by_setup") if record == "read" else None
+    if by_setup and not left_running:
+        if run(["loginctl", "disable-linger", user]).returncode == 0:
+            return "Lingering was switched on by setup, and is switched off again."
+        return f"Lingering was switched on by setup, and could not be switched off: run loginctl disable-linger {user}"
+    state, said = linger_read()
+    if state == "no":
+        return ""
+    if by_setup:            # M163: what is left running as another copy's keeps running past a logout
+        why = ("setup switched it on, and " + " and ".join(left_running) + " "
+               + ("is" if len(left_running) == 1 else "are") + " left running, and would stop at your logout without "
+               "it")
+        if state == "yes":
+            return ("Lingering was switched on by setup, and is left on, because " + why[len("setup switched it on, "
+                    "and "):] + f". To switch it off yourself later: loginctl disable-linger {user}")
+    elif by_setup is False:
+        why = "it was already on before setup"
+        if state == "yes":
+            return f"Lingering was already on before setup, so it is left on. {later}"
+    elif record == "unreadable":
+        why = ("the record of what setup did here could not be read, so uninstall cannot tell whether setup "
+               "switched it on")
+    elif record == "read":
+        why = "the record of what setup did here does not say that setup switched it on"
+    else:
+        why = ("no record of what setup did here is on this computer, so uninstall cannot tell whether setup "
+               "switched it on")
+    if state == "yes":
+        return f"Lingering is on for your account, and is left on: {why}. {later}"
+    return (f"Whether lingering is on for your account could not be read (loginctl answered {said}), and uninstall did "
+            f"not switch it off: {why}. {later}")
 
 
 def comes_back_by_itself(dry=False):
@@ -960,7 +2146,7 @@ def linger_step(st, dry=False, allow=True):
     the state (st["linger_by_setup"]) so that uninstall switches off only what setup switched on."""
     user = getpass.getuser()
     admin = (f"On this computer {NO_LOGIN_NOTE}. To have it start at boot, the computer's administrator runs one "
-             f"command: {LINGER_COMMAND.format(user=user)} ({LINGER_MEANS}).")
+             f"command: {LINGER_COMMAND.format(user=shlex.quote(user))} ({LINGER_MEANS}).")
     state = linger_state()
     if state == "yes":
         if st is not None and "linger_by_setup" not in st:
@@ -979,7 +2165,7 @@ def linger_step(st, dry=False, allow=True):
         if may == "unknown":
             return False, (f"Lingering means {LINGER_MEANS}. This computer did not say whether you may switch it on "
                            f"yourself, so setup --linger tries without asking for a password; if the computer "
-                           f"refuses, its administrator runs one command: {LINGER_COMMAND.format(user=user)}. "
+                           f"refuses, its administrator runs one command: {LINGER_COMMAND.format(user=shlex.quote(user))}. "
                            f"{say_no}")
         return False, f"{admin} {say_no}"
     # Never a password prompt the person did not expect: refused means the administrator's one command.
@@ -1012,7 +2198,7 @@ def service_path():
     if kind == "linux":
         try:
             out = run(["systemctl", "--user", "show-environment"], timeout=10)
-            for line in (out.stdout or "").splitlines() if out.returncode == 0 else []:
+            for line in lines_of(out.stdout) if out.returncode == 0 else []:
                 if line.startswith("PATH="):
                     return line[5:]
         except (OSError, subprocess.TimeoutExpired):
@@ -1079,6 +2265,39 @@ def git_missing_sentence():
 
 LFS_NOT_IN_COPY = ("its large files are NOT in the copy, because git lfs was not installed when it was copied; "
                    "install git lfs, and the next sync copies them")
+LFS_UNREAD = ("whether it keeps files with Git LFS could not be read from its .gitattributes, so its copy was not "
+              "refreshed; the next sync tries again")
+NOT_TEXT = ("{n} branch or tag name(s) on GitHub are not UTF-8 text, which the forge cannot hold, so they are not in "
+            "the copy ({names}); every other branch and tag is copied")
+NOT_AS_LISTED = ("{n} branch or tag name(s) in the copy would not be what GitHub lists ({names}), so the copy was not "
+                 "moved; it stays as it was until a sync shows every name at GitHub's commit")
+FORGE_NOT_AS_LISTED = ("after the push, {n} branch or tag name(s) in the copy in the forge are not what GitHub lists "
+                       "({names}), so it is not called whole; the next sync tries again")
+KEPT_CLASH = ("GitHub holds {n} branch(es) named kept/... ({names}), the name this version gives the copy's own kept "
+              "refs, so it copies such a project once and cannot refresh it; nothing in its copy was changed. To have "
+              "it refreshed again, give that branch another name on GitHub; the copy as it was stays in your forge")
+RESTORE_HIDDEN = ("{n} of those name(s) hold a character this tool does not print as it is (each such character is put "
+                  "as a ?), so no line is given for them here; this line lists every kept/ name the copy holds, as git "
+                  "holds it:")
+RESTORE_LACKS = ("but {n} branch or tag name(s) GitHub held when the sync last read its list are not in the new home, "
+                 "because the copy in your forge does not hold them ({names}){why}. Run restore --check, which names "
+                 "each difference; a sync brings over what has changed on GitHub since, where the forge can hold it.")
+RESTORE_LIST_UNREAD = ("but what GitHub held when the sync last read its list could not be read from this computer's record "
+                       "of {full}, so whether the new home lacks a branch or tag GitHub held is not known. Run sync, then "
+                       "restore --check, which compares the copy with that list.")
+RESTORE_TO_HIDDEN = ("The new home's address holds a character this tool does not print as it is, so no line is given "
+                     "to bring them over here; this line lists every kept/ name the copy holds, as git holds it:")
+RESTORE_LEFT_OUT = ("but {n} GitHub branch(es) named kept/..., which the copy in your forge holds, are not in the new "
+                    "home ({names}): such a branch shares its name with the copy's own kept refs, so restore --to does "
+                    "not bring it back yet. To bring them over yourself:")
+TAG_NOT_KEPT = ("{full}: {short} was {what} on GitHub; it pointed at {at}, not a commit, so nothing of it could be "
+                "kept (a kept ref is a branch, and a branch holds only a commit)")
+LISTING_UNREAD = ("GitHub's list of its branches and tags could not be read ({why}), so its copy was not refreshed and is "
+                  "not called whole; nothing in it is called wrong, and the next sync tries again")
+UNFORESEEN = ("the tool met something in this project it was not built for, so its copy was not refreshed; every other "
+              "project went on, and the next sync tries again")
+
+
 def lfs_missing():
     return ("git lfs is not installed here, so projects with large files are copied without them until it is "
             f"({install_words('git-lfs')}; setup and sync find it by themselves once it is installed).")
@@ -1089,21 +2308,300 @@ MAC_NO_SESSION = ("this account is not logged in at this Mac's screen, and on a 
                   "Mac's screen, then run setup again")
 
 
-def install_service(p):
+LAUNCHD_WAIT = 30      # seconds launchd is given to let go of a job it was told to take off
+# What `launchctl print gui/<uid>` answers in an account that is not logged in at the Mac's screen: seen 2026-11-24
+# over ssh on macOS 13.7.8 (x86_64), a test account with no desktop process; the job's own print and bootout
+# answered 125 there too. Only this code is read as "no domain, so nothing of this account is loaded".
+LAUNCHD_NO_SCREEN = 125
+
+
+def mac_no_screen():
+    """M143 (G1.16): True only on a Mac whose account's own domain answers LAUNCHD_NO_SCREEN to `launchctl print
+    gui/<uid>` (seen with no session at the screen: 2026-11-24 on macOS 13.7.8, 2026-11-25 on macOS 27.2.1). Any
+    other answer, or none, is False, so every line built on it stays as it was; off a Mac nothing is read."""
+    return system()[0] == "darwin" and run(["launchctl", "print", f"gui/{os.getuid()}"]).returncode == LAUNCHD_NO_SCREEN
+
+
+def forge_no_screen(p):
+    """M143 (G1.16): the cause and the one step for a forge that does not answer while this account has no session
+    at the Mac's screen, a step that works there. Setup not finished (the sync's job file not written): log in at
+    the screen, then setup again. Both jobs' files in place (a restart, or a logout, since setup): the login is the
+    step, and status read after it says what is still owed; that the jobs load by themselves at the login is not
+    said, because it has not been seen."""
+    sync = os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+    if os.path.exists(p["plist"]) and os.path.exists(sync):
+        return ("this account is not logged in at this Mac's screen, and on a Mac the forge runs only in a login "
+                "session at the screen. Log in to this account at this Mac's screen, then run status again; if the "
+                f"forge still does not answer there, run setup again: {own_command(p, 'setup')}")
+    return f"{MAC_NO_SESSION}: {own_command(p, 'setup')}"
+
+
+def launchd_off(p, label):
+    """G1.17 (seen 2026-11-24 on a Mac, macOS 27.2.1: setup run while the forge ran answered "code 5" and left it
+    unloaded): take the job off and read it gone. 'gone' when `launchctl print` answers 113 (the family's rule 24),
+    'there' when it still names the job at LAUNCHD_WAIT, 'unread' when it answered neither; with the seconds waited
+    and the last code. The wait is written in the forge's own log folder, launchd.log, when that folder is there.
+    The account's domain is read first: answered LAUNCHD_NO_SCREEN, the job is gone with no wait (0 reads)."""
+    job = f"gui/{os.getuid()}/{label}"
+    start, reads = time.monotonic(), 0
+    if run(["launchctl", "print", f"gui/{os.getuid()}"]).returncode == LAUNCHD_NO_SCREEN:
+        answer, code = "gone", LAUNCHD_NO_SCREEN        # no domain at the screen: nothing of this account is loaded
+    else:
+        run(["launchctl", "bootout", job])
+        answer = None
+    while answer is None:
+        out = run(["launchctl", "print", job])
+        reads += 1
+        code = out.returncode
+        answer = "gone" if code == 113 else ("there" if code == 0 and out.stdout.strip() else "unread")
+        if answer != "gone" and time.monotonic() - start < LAUNCHD_WAIT:
+            answer = None
+            time.sleep(0.2)
+    waited = time.monotonic() - start
+    log = os.path.join(p["forge"], "log")
+    if os.path.isdir(log):
+        try:
+            with open(os.path.join(log, "launchd.log"), "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {label}: {answer} after "
+                        f"{waited:.1f} s, {reads} read(s), last code {code}"
+                        f"{' (no domain at the screen)' if reads == 0 else ''}\n")
+        except OSError:
+            pass
+    return answer, waited, code
+
+
+def launchd_not_off(label_words, answer, waited, code, again):
+    """The words for a job launchd did not let go of: the true state and the one next step."""
+    if answer == "there":
+        return (f"launchd still had {label_words} {waited:.0f} s after it was told to take it off, so it was not "
+                f"loaded again. Run {again} again in a minute, and if it stops here again, run status")
+    return (f"whether launchd let go of {label_words} could not be read (launchctl print answered code {code}), so "
+            f"it was not loaded again. Run {again} again, and if it stops here again, run status")
+
+
+def launchd_load(p, label, plist):
+    """Off and read gone first (above), then loaded; (CompletedProcess of the load, or None, and the words when it
+    was not loaded because launchd did not let go of the old job)."""
+    answer, waited, code = launchd_off(p, label)
+    if answer != "gone":
+        words = "the forge's job" if label == LAUNCHD_LABEL else "the sync's job"
+        return None, launchd_not_off(words, answer, waited, code, "setup")
+    return run(["launchctl", "bootstrap", f"gui/{os.getuid()}", plist]), ""
+
+
+SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told it to stop
+# systemctl --user's words in a shell with no user bus: "Failed to connect to bus: No medium found" (systemd 255, a
+# stock Ubuntu 24.04, 2026-11-24) and "Failed to connect to user scope bus via local transport: ..." (systemd 262,
+# another skill's log the same day). busctl's, recorded 2026-11-25 on Ubuntu 24.04, systemd 255.4, with
+# XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS set and no bus where it leads: "Failed to connect to bus: No such file
+# or directory", and "...: Connection refused" for an address that is not one. "Failed to connect to", then "bus" in
+# the same line. (With neither set, busctl says "Failed to set bus address: ...", read by bus_floor from the two
+# variables themselves, not from words.)
+NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
+SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
+SYSTEMD_LINK_LEFT = []  # (unit, systemctl's own line) for each unit whose link systemctl did not take off at uninstall
+# unit: systemctl's own line of why it did not stop the unit, from the last stop call uninstall made for it
+SYSTEMD_STOP_SAID = {}
+
+
+def wants_link(p, unit):
+    """The link systemctl makes at setup (enable) so that a unit starts by itself."""
+    timer = unit.endswith(".timer")
+    return os.path.join(os.path.dirname(p["unit"]), "timers.target.wants" if timer else "default.target.wants",
+                        unit if timer else unit + ".service")
+
+
+def unit_state(unit):
+    """One unit's ActiveState as systemd reads it now: (state, '') or (None, what systemctl answered)."""
+    out = run(["systemctl", "--user", "show", unit, "-p", "ActiveState"])
+    state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
+    if out.returncode != 0 or not state:
+        said = [x.strip() for x in shown_lines(out.stderr or out.stdout)]
+        return None, f"code {out.returncode}" + (f": {said[0]}" if said else "")
+    return state, ""
+
+
+def stop_said(unit, out):
+    """M107: systemctl's own line where it says it did not stop a unit it was told to, kept for the words.
+    RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26, a person's RefuseManualStop=yes on the forge's
+    unit): `disable --now` of the forge and the timer ENDED WITH CODE 0, took both links, stopped the timer, and said
+    on standard error "Failed to stop windstorm-mirror-forge.service: Operation refused, unit
+    windstorm-mirror-forge.service may be requested by dependency only (it is configured to refuse manual
+    start/stop)."; `stop` alone said the same and ended 4. No code tells the refusal from a stop done, so systemctl's
+    own words for that unit are kept (its "Failed to stop <unit>" line, as the masked line is read), or, for a call
+    that ended not 0, its first line that names the unit. The last call for a unit decides: one that says neither
+    takes the word away."""
+    name = unit if unit.endswith((".service", ".timer")) else unit + ".service"
+    said = [x.strip() for x in shown_lines((out.stderr or "") + "\n" + (out.stdout or ""))]
+    mine = [x for x in said if x.startswith(f"Failed to stop {name}")] or (
+        [x for x in said if name in x] if out.returncode != 0 else [])
+    if mine:
+        SYSTEMD_STOP_SAID[unit] = mine[0]
+    else:
+        SYSTEMD_STOP_SAID.pop(unit, None)
+
+
+def systemd_off(p, only=None):
+    """G1.18 (M107, seen 2026-11-24 on a stock Ubuntu 24.04: uninstall run from a shell with no user bus, after
+    `su -` from root and with XDG_RUNTIME_DIR unset, said "Gone now" and ended 0 while systemd still ran the forge
+    from its removed program): tell systemd to stop the skill's units, then read each stopped. Per unit (its words,
+    'stopped' | 'running' | 'unread', seconds waited, what systemctl answered): 'stopped' when its ActiveState reads
+    inactive or failed; 'running' when it still reads active (or on its way) at SYSTEMD_WAIT; 'unread' at once when
+    systemctl --user does not answer (no user bus in this shell) or answers no state. M163: `only`, when given, is
+    the units (SYSTEMD_UNITS' suffixes) uninstall showed to be this home's; no other is told off or read."""
+    pick = [(x, w) for x, w in SYSTEMD_UNITS if only is None or x in only]
+    told = [SERVICE if x is None else SYNC_UNIT + x for x, _ in pick if x != ".service"]
+    del SYSTEMD_LINK_LEFT[:]
+    SYSTEMD_STOP_SAID.clear()
+    if told:
+        off = run(["systemctl", "--user", "disable", "--now", *told])
+        answered = {u: off for u in told}
+        for u in told:
+            stop_said(u, off)
+        if off.returncode != 0:
+            # Seen 2026-11-26 on systemd 255 (a stock Ubuntu 24.04 guest, the forge's unit file at mode 000 while
+            # systemd held it loaded): disable refuses the whole call ("Failed to disable unit: Unit file ... does
+            # not exist.", code 1) and stops nothing, the timer in the same call too; stop needs no file. So each
+            # unit is told off alone, and one whose disable is refused is stopped, its refusal kept in its own words.
+            for u in told:
+                one = run(["systemctl", "--user", "disable", "--now", u]) if len(told) > 1 else off
+                answered[u] = one
+                stop_said(u, one)
+                if one.returncode != 0:
+                    stop_said(u, run(["systemctl", "--user", "stop", u]))
+        # A link setup's enable made that is still there is named, in systemctl's own line for that unit, whichever
+        # call told it off. RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): with the forge's unit
+        # masked (a link to /dev/null in its place), disable --now ends with code 0, says "Unit <its file> is
+        # masked, ignoring.", stops it, and leaves its link; the timer's link it takes.
+        for u in told:
+            one = answered[u]
+            if one.returncode != 0 or os.path.lexists(wants_link(p, u)):
+                said = [x.strip() for x in shown_lines((one.stderr or "") + "\n" + (one.stdout or ""))]
+                mine = [x for x in said if (u if u.endswith(".timer") else u + ".service") in x]
+                SYSTEMD_LINK_LEFT.append((u, (mine or said or [f"code {one.returncode}, and no word of it"])[0]))
+    seen = []
+    for suffix, words in pick:
+        unit = SERVICE if suffix is None else SYNC_UNIT + suffix
+        start = time.monotonic()
+        while True:
+            out = run(["systemctl", "--user", "show", unit, "-p", "ActiveState"])
+            state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
+            if out.returncode != 0 or not state:
+                said = [x.strip() for x in shown_lines(out.stderr or out.stdout)]
+                seen.append((words, "unread", time.monotonic() - start,
+                             f"code {out.returncode}" + (f": {said[0]}" if said else "")))
+                break
+            if state in ("inactive", "failed"):
+                seen.append((words, "stopped", time.monotonic() - start, state))
+                break
+            if time.monotonic() - start >= SYSTEMD_WAIT:
+                seen.append((words, "running", time.monotonic() - start, state))
+                break
+            time.sleep(0.2)
+    return seen
+
+
+def unit_enabled(unit):
+    """Whether systemd starts a unit by itself at a restart, read now (`systemctl --user is-enabled`), three
+    answers: 'on' for "enabled", 'off' for "disabled", and None for any other answer, with systemd's own word, said
+    as that word (it is systemd's answer, not a failed read), or, where systemd gave no word, its code and line
+    (the maintainer's ruling of 11-26: RECORDED on systemd 255, a stock Ubuntu 24.04 guest, log sha256
+    85971716290afec1, "not-found" with code 4 for a running unit whose file is at mode 000, loaded or not, while
+    its link stands; "static" for the sync's service, which has no install section)."""
+    out = run(["systemctl", "--user", "is-enabled", unit])
+    word = (lines_of(out.stdout) or [""])[0].strip()
+    if word == "enabled":
+        return "on", word
+    if word == "disabled":
+        return "off", word
+    if word:
+        return None, f"systemd: {word}"
+    said = [x.strip() for x in shown_lines(out.stderr or "")]
+    return None, f"systemctl --user answered code {out.returncode}" + (f": {said[0]}" if said else "")
+
+
+def systemd_not_now(p, units, again):
+    """M107 (G1.18), the maintainer's ruling of 11-26 on a guest's finding (a person's own RefuseManualStop=yes on the
+    forge's unit: the tool's own disable took the forge's and the timer's links, the timer was stopped, the forge
+    kept running, and the words said "Nothing was removed"): after uninstall told systemd anything and a unit is
+    not read stopped, what stands now is said unit by unit, read from systemd after the calls, never from what was
+    meant: running or stopped, and switched on for restarts or not, or systemd's own word where it is neither, or
+    that either could not be read; that no file of the mirror was removed; systemctl's own line where it said why a
+    stop was not done; the one step that brings the mirror back to running as before; and the step on, never "in a
+    minute" where systemd refused. Each command stands last on a line of its own."""
+    why, now, own, refused = [], [], [], None
+    for words, answer, waited, what in units:
+        unit = SERVICE if words == "the forge's service" else SYNC_UNIT + (".timer" if "timer" in words else
+                                                                           ".service")
+        if unit in SYSTEMD_STOP_SAID and answer != "stopped":
+            why.append(f"systemd did not stop {words}")
+            line = SYSTEMD_STOP_SAID[unit]
+            own.append(f"systemctl's own words for {words}: {line}" + ("" if line.endswith(".") else "."))
+            refused = refused or (words, unit)
+        elif answer == "running":
+            why.append(f"systemd still had {words} {what} {waited:.0f} s after it was told to stop it")
+        elif answer == "unread":
+            why.append(f"whether systemd stopped {words} could not be read (systemctl --user answered {what})")
+        state, said = unit_state(unit)
+        running = ("stopped" if state in ("inactive", "failed") else f"running ({state})" if state else
+                   f"whether it runs could not be read (systemctl --user answered {said})")
+        on, word = unit_enabled(unit)
+        boot = ("switched on for restarts" if on == "on" else "not switched on for restarts" if on == "off" else
+                f"for restarts systemd answers: {word[len('systemd: '):]}" if word.startswith("systemd: ") else
+                f"whether it is switched on for restarts could not be read ({word})")
+        now.append(f"{words}: {running}, {boot}")
+    on_word = ("To go on leaving: systemd answers so while that stands, so uninstall run again ends the same way. "
+               f"What systemd holds for {refused[0]} shows with: systemctl --user cat "
+               + (refused[1] if refused[1].endswith(".timer") else refused[1] + ".service")
+               + f"\nOnce it can be stopped, run uninstall again: {again}" if refused else
+               f"To go on leaving: run uninstall again in a minute: {again}")
+    return ("Not now: " + "; ".join(why) + ". As systemd reads them now: " + "; ".join(now) + ". No file of the "
+            "mirror was removed." + "".join(" " + x for x in own) + "\n" + on_word + "\nTo have the mirror running "
+            f"as before instead, run setup again, which keeps every copy: {own_command(p, 'setup')}")
+
+
+_setup_held = [False]           # M159: setup holds the sync's lock (main lets it go when setup ends)
+
+
+def install_service(p, restart=False):
+    record_meant(p, "forge", forge_argv(p))
     if system()[0] == "darwin":
+        if restart:             # M159 limit (2): the loaded job is read as this home's own before it is replaced
+            got = launchd_held(LAUNCHD_LABEL)
+            if got is None or (got != "absent" and not job_is_ours(p, LAUNCHD_LABEL, got[0])):
+                return False, (f"its settings file {p['app_ini']} is written new, and the forge was not started "
+                               f"again with it: what launchd holds for the forge's job ({LAUNCHD_LABEL}) "
+                               + ("could not be read" if got is None else "is not this home's own copy")
+                               + ", so setup takes nothing off. Run setup again; if it stops here again, run status")
         write_file(p["plist"], plist_text(p))
         uid = str(os.getuid())
         # G1.16 (M58): a launch agent loads only into a login session at the screen. Over ssh into an account that
         # is not logged in there, nothing can start: said in the person's words, never launchctl's.
         if run(["launchctl", "print", f"gui/{uid}"]).returncode != 0:
             return False, MAC_NO_SESSION
-        run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"])
-        out = run(["launchctl", "bootstrap", f"gui/{uid}", p["plist"]])
-        return out.returncode == 0, ("" if out.returncode == 0 else
-                                     f"this Mac did not load the forge's launch agent (code {out.returncode}); run "
-                                     "setup again, and if it stops here again, run status")
+        out, words = launchd_load(p, LAUNCHD_LABEL, p["plist"])         # G1.17: setup again, while the forge runs
+        if out is None:
+            return False, words
+        if out.returncode != 0:
+            return False, (f"this Mac did not load the forge's launch agent (code {out.returncode}); run setup "
+                           "again, and if it stops here again, run status")
+        return launchd_checked(p, "forge", LAUNCHD_LABEL, out)
     write_file(p["unit"], unit_text(p))
     run(["systemctl", "--user", "daemon-reload"])
+    back, _, parts = service_read(p, "forge")          # G1.24: read back before anything is started
+    if back != "equal":
+        return False, read_back_words("forge", back, "it was not started", parts=parts)
+    if restart:                 # M159: a forge still running from the settings file as it was reads the new one
+        # the owner's limit (2), 11-26: only the skill's own forge service, read as this home's (M163's read) just
+        # before; any other is never stopped, and that is said
+        held = systemd_parsed(SERVICE + ".service")
+        if held is None or not unit_is_ours(p, "forge", held[0]):
+            return False, (f"its settings file {p['app_ini']} is written new, and the forge was not started again "
+                           "with it: what systemd runs for the forge's service ("
+                           + (f"{SERVICE}.service) could not be read" if held is None else
+                              f"{SERVICE}.service) is not this home's own copy") + ", so setup stops nothing. Run "
+                           "setup again; if it stops here again, run status")
+        run(["systemctl", "--user", "stop", SERVICE])
     out = run(["systemctl", "--user", "enable", "--now", SERVICE])
     return out.returncode == 0, last_line(out.stderr)
 
@@ -1120,7 +2618,8 @@ OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 # only on this computer's loopback, so no setting ever sends a key to another host.
 # The family's rule 27 keeps three lists of what the tool reads from its environment; a test fails on any other name.
 PERSON_SETTINGS = ("WSM_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME")     # named in the README; said when they move a folder
-HOST_FACTS = ()                                                        # none read
+HOST_FACTS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",           # bus_floor: whether each is set, never its value
+              "SUDO_UID")                                              # root_door (M177): the number sudo came from
 OWN_MARKERS = ()                                                       # none
 TEST_SETTINGS = ("WSM_GITHUB_API", "WSM_GITHUB_GIT", "WSM_PAGE_SIZE", "WSM_GITEA_BASE")
 TEST_SETTING_DEFAULT = {"WSM_GITHUB_API": "GitHub itself", "WSM_GITHUB_GIT": "GitHub itself",
@@ -1159,14 +2658,16 @@ def settings_lines():
     lines, stop = [], False
     h = os.environ.get("WSM_HOME")
     if h:
-        lines.append(f"WSM_HOME is set: this skill's folders are under {h}.")
+        shown, note = shown_one(h)
+        lines.append(f"WSM_HOME is set: this skill's folders are under {shown}{note}.")
     elif system()[0] == "linux":
         home = os.path.expanduser("~")
         for name, usual, what in (("XDG_DATA_HOME", os.path.join(home, ".local", "share"), "data"),
                                   ("XDG_CONFIG_HOME", os.path.join(home, ".config"), "settings and service")):
             v = os.environ.get(name)
             if v and os.path.abspath(v) != usual:
-                lines.append(f"{name} is set: this skill's {what} folders are under {v}, not {usual}.")
+                shown, note = shown_one(v)
+                lines.append(f"{name} is set: this skill's {what} folders are under {shown}{note}, not {usual}.")
     for name in TEST_SETTINGS:
         v = os.environ.get(name)
         if not v:
@@ -1234,6 +2735,36 @@ def stamp_of(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
+# M156 (G6.23): the form of the key the pinned Gitea gives the mirror account (seen 2026-11-26 on Gitea 28.4.0 in a
+# made home: 40 lowercase hexadecimal characters, one line); a kept key of another form was cut short or changed.
+FORGE_KEY_FORM = re.compile(r"^[0-9a-f]{40}$")
+
+
+def key_file_read(path, form=None):
+    """M155, M156 (G6.22, G6.23): a kept key file's three answers: ('read', the key), ('not there', None), or ('could
+    not be read', why). The why names the error's class or what is wrong with its form, never a byte of it."""
+    answer, data = open_kept(path)
+    if answer != "read":
+        return answer, data
+    try:
+        key = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return "could not be read", "it is not text (UnicodeDecodeError)"
+    if not key:
+        return "could not be read", "it is empty"
+    if any(c.isspace() for c in key):
+        return "could not be read", "it is not one line"
+    if form is not None and not form.match(key):
+        return "could not be read", "it is not a key of the form the forge gives (cut short, or changed by hand)"
+    return "read", secret(key)
+
+
+def key_unread_line(p, owner, kp, why):
+    return (f"{owner}: its key file {kp} could not be read: {why}, so nothing of {owner}'s was asked of GitHub. The "
+            f"one next step: run key set {owner} again, pasting the key when it asks: "
+            f"{own_command(p, 'key', 'set', owner)}")
+
+
 def key_path(p, owner):
     return os.path.join(p["keys"], owner.lower() + ".key")
 
@@ -1287,7 +2818,7 @@ def cmd_key_set(args):
     if not OWNER_RE.match(owner):
         say(f"'{owner}' is not a GitHub account or organisation name.")
         return 2
-    if not load_json(p["state"], {}).get("port"):
+    if not load_state(p).get("port"):
         # G2.6: setup comes first, so every key lands where uninstall and the key scan already look. Nothing is read.
         # G10.7: it names the one next step and whose it is.
         say(f"Setup comes first, and it has not run on this computer: setup is your agent's step (or run setup "
@@ -1302,13 +2833,24 @@ def cmd_key_set(args):
     if not kind:
         say(why.replace(key, "<the key>"))
         return 1
-    write_private(key_path(p, owner), key + "\n")
-    s = load_json(p["settings"], {})
+    kp = key_path(p, owner)
+    if os.path.isdir(kp) and not os.path.islink(kp):
+        # M155 (seen 2026-11-26 in a stand-in trial: a traceback, and a file of its own left beside it): a folder
+        # where the key file belongs is never written into or removed; it is said, with its step
+        say(f"Stopped: {kp} is a folder, where the key file for {owner} belongs, so the key cannot be kept there. "
+            f"Nothing was changed. The one next step: move that folder out of {os.path.dirname(kp)} (into a folder "
+            f"of your own, to keep it), then run key set {owner} again: {own_command(p, 'key', 'set', owner)}")
+        return 2
+    old_answer, old_why = key_file_read(kp)
+    write_private(kp, key + "\n")
+    if old_answer == "could not be read":       # M155: the person's own typed key replaces it, and that is said
+        say(f"The key file it replaced could not be read ({old_why}); it holds the key you typed now.")
+    s = load_settings(p)
     s.setdefault("owners", {})[owner] = {"kind": kind}
     write_file(p["settings"], json.dumps(s, indent=1) + "\n", 0o600)
     say(f"The key for {owner} ({'your account' if kind == 'user' else 'organisation'}) is kept in "
         f"{key_path(p, owner)}, readable by you only. It is used for {owner}'s repositories and nothing else.")
-    if not load_json(p["state"], {}).get("go"):
+    if not load_state(p).get("go"):
         say("Once a key is kept for every owner to copy, the go for the first copy is yours, here in this window: run "
             f"{own_command(p, 'go')}. It shows what will be copied and waits for your Enter.")
     return 0
@@ -1336,12 +2878,12 @@ GIT_TIMEOUT = 600
 
 
 ADDRESS_UNREAD = ("the address git would use for GitHub could not be read ({why}), so nothing was fetched and this copy "
-                  "was not refreshed. `git config --global --list` shows the git setting it stops at; with that "
-                  "line mended, the next sync refreshes it.")
+                  "was not refreshed. This command shows the git setting it stops at; with that line mended, the "
+                  "next sync refreshes it:\n    git config --global --list")
 REWRITTEN = ("your git settings send GitHub's address for this repository to {where} (a url.<...>.insteadOf line in "
              "your git config, for this repository's whole address); the mirror reads GitHub only over HTTPS with its "
-             "read-only key, so this copy was not refreshed. `git config --global --get-regexp insteadof` lists those "
-             "lines; with that one taken out, the next sync refreshes it.")
+             "read-only key, so this copy was not refreshed. This command lists those lines; with that one taken out, "
+             "the next sync refreshes it:\n    git config --global --get-regexp insteadof")
 
 
 def github_git():
@@ -1419,19 +2961,340 @@ class CouldNotRead(RuntimeError):
     """G5.4: a read that failed. It is a third answer, never taken for "not there"."""
 
 
+# ---------------------------------------------------------------- G8.7 the forge's door (M102)
+# Nothing that carries the forge's key or a copy goes to 127.0.0.1:<port> until this computer has said who holds
+# that port. Three answers, and a fourth for no listener at all: "mine" (every listener on the port is of this
+# account AND is this mirror's own forge: our binary, started on our settings file), "other" (certainly not: another
+# account's, or a program of this account that is not our forge), "unread" (the computer did not say: a table not
+# there or with columns this release does not know, a process gone between two reads). Only "mine" is sent to; an
+# "other" is never said on a guess, since setup acts on it. Every road reaches the port through Forge.call,
+# forge_call or wait_forge, and each reads the door first (the suite lists every caller).
+# On "none" nothing is sent either (the owner's ruling F1): no listener is exactly when another program can take the
+# number, so a request then could only fail or reach a stranger; it is answered as no answer, from the read itself.
+# THE EDGE, written down and not solved (the owner's ruling, 11-24): one case only. Our own forge, read as "mine",
+# dies while a call is under way (a push makes more than one connection, and a read is reused for up to
+# DOOR_FRESH_S seconds), and another program takes its number in that moment. The port is picked below the system's
+# short-lived range, so the system never hands it out by itself; only a program that asks for it by name can.
+
+DOOR_FRESH_S = 2.0
+DOOR_SEEN = {}
+PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
+LINUX_TCP_HEADS = ("sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode",
+                   "sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode")
+# netstat -anv -p tcp on macOS, by its header: only the headers read on a real Mac are known; any other = unread.
+# Read 2026-11-24 on macOS 27.2.1 arm64 (process:pid) and on macOS 13.7.8 Intel (pid, then epid).
+MAC_NETSTAT_HEADS = (
+    "Proto Recv-Q Send-Q Local Address Foreign Address (state) rxbytes txbytes rhiwat shiwat process:pid state "
+    "options gencnt flags flags1 usecnt rtncnt fltrs",
+    "Proto Recv-Q Send-Q Local Address Foreign Address (state) rhiwat shiwat pid epid state options gencnt flags "
+    "flags1 usscnt rtncnt fltrs",
+)
+NETSTAT = ["netstat", "-anv", "-p", "tcp"]
+
+
+class DoorUnread(Exception):
+    """Who holds the port could not be read. never=True: not on this computer at all (the read itself is not
+    there); never=False: not this time."""
+
+    def __init__(self, never, why):
+        super().__init__(why)
+        self.never = never
+
+
+class DoorShut(HardStop):
+    """The forge's port is held by another program, or who holds it could not be read: nothing was sent."""
+
+    def __init__(self, kind, line, never=False):
+        super().__init__(line)
+        self.kind, self.never = kind, never
+
+
+def linux_listeners(port, files=None):
+    """[(uid, inode)] of every TCP listener on this port, from the kernel's own tables."""
+    rows = []
+    for f in files or PROC_TCP:
+        try:
+            with open(f, encoding="ascii") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            if f.endswith("6"):
+                continue                        # a computer without IPv6 has no tcp6 table
+            raise DoorUnread(True, f"{f} is not there")
+        except (OSError, UnicodeError):
+            raise DoorUnread(False, f"{f} could not be read")
+        lines = lines_of(text)
+        if not lines or " ".join(lines[0].split()) not in LINUX_TCP_HEADS:
+            raise DoorUnread(True, f"{f} has columns this release does not know")
+        for line in lines[1:]:
+            c = line.split()
+            try:
+                lport, uid, inode = int(c[1].rsplit(":", 1)[1], 16), int(c[7]), int(c[9])
+            except (IndexError, ValueError):
+                raise DoorUnread(True, f"{f} has a row this release does not know")
+            if c[3] == "0A" and lport == port:
+                rows.append((uid, inode))
+    return rows
+
+
+def linux_proc(pid):
+    """(uid, exe, args) of one process; DoorUnread when it could not be read (gone, or not ours to read)."""
+    try:
+        uid = os.stat(f"/proc/{pid}").st_uid
+        exe = os.readlink(f"/proc/{pid}/exe")
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            args = fh.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        raise DoorUnread(False, "a process holding it could not be read")
+    return uid, exe[:-len(" (deleted)")] if exe.endswith(" (deleted)") else exe, [a for a in args if a]
+
+
+def linux_holders(inodes, first=()):
+    """{inode: [pid]} for the listening sockets held by this account's processes. The pids in `first` (our own
+    forge's, by its binary) are looked at before the rest."""
+    want, found, me = {f"socket:[{i}]": i for i in inodes}, {}, os.getuid()
+    try:
+        pids = [x for x in os.listdir("/proc") if x.isdigit()]
+    except OSError:
+        raise DoorUnread(False, "the list of processes could not be read")
+    for pid in [*first, *[x for x in pids if x not in first]]:
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != me:
+                continue
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                link = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if link in want:
+                found.setdefault(want[link], []).append(int(pid))
+        if found and set(found) == set(inodes):
+            break
+    return found
+
+
+def mac_listeners(port, text):
+    """[(pid)] of every TCP listener on this port, from netstat -anv's own columns, read by their header."""
+    lines = lines_of(text)
+    head = next((i for i, x in enumerate(lines) if x.split()[:1] == ["Proto"]), None)
+    if head is None or " ".join(lines[head].split()) not in MAC_NETSTAT_HEADS:
+        raise DoorUnread(True, "netstat names columns this release does not know")
+    cols = lines[head].split()
+    col = "process:pid" if "process:pid" in cols else "pid"
+    after = len(cols) - cols.index(col) - 1
+    pids = []
+    for line in lines[head + 1:]:
+        c = line.split()
+        if len(c) < after + 7 or not c[0].startswith("tcp"):
+            continue
+        if c[5] != "LISTEN" or c[3].rsplit(".", 1)[-1] != str(port):
+            continue
+        try:
+            pids.append(int(c[-(after + 1)].rsplit(":", 1)[-1]))
+        except (IndexError, ValueError):
+            raise DoorUnread(True, "netstat named a process this release cannot read")
+    return pids
+
+
+def mac_proc(pid):
+    try:
+        a = subprocess.run(["ps", "-ww", "-o", "uid=", "-o", "comm=", "-p", str(pid)], capture_output=True,
+                           text=True, timeout=10)
+        b = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise DoorUnread(False, "ps could not be asked")
+    uid, _, exe = a.stdout.strip().partition(" ")
+    # macOS prints the account `nobody` as uid -2 (seen 2026-11-24 on a Mac and in GitHub's Mac runner, M102's
+    # stranger): a uid with its sign is a uid, another account's.
+    if a.returncode != 0 or not re.fullmatch(r"-?\d+", uid) or not exe.strip():
+        raise DoorUnread(False, "a process holding it could not be read")
+    return int(uid), exe.strip(), b.stdout.strip()
+
+
+def our_forge(p, exe, args):
+    """Is this process this mirror's own forge: our pinned binary (any version beside it: upgrade-forge keeps both),
+    started on our own settings file. args: a list (Linux, exact) or the one line ps prints (macOS)."""
+    d, name = os.path.split(exe)
+    if not re.fullmatch(r"gitea-\d+(?:\.\d+)*(?:[-+][0-9A-Za-z]+)?", name):
+        return False
+    try:
+        if os.path.realpath(d) != os.path.realpath(os.path.dirname(p["bin"])):
+            return False
+    except OSError:
+        return False
+    if isinstance(args, list):
+        return any(args[i:i + 2] == ["--config", p["app_ini"]] for i in range(len(args)))
+    return f"--config {p['app_ini']}" in args
+
+
+def read_door(p, port):
+    """('mine' | 'other' | 'none', why); DoorUnread when the computer did not say. Never cached."""
+    me = os.getuid()
+    if system()[0] == "darwin":
+        try:
+            out = subprocess.run(NETSTAT, capture_output=True, text=True, errors="replace", timeout=20)
+        except FileNotFoundError:
+            raise DoorUnread(True, "netstat is not there")
+        except (OSError, subprocess.SubprocessError):
+            raise DoorUnread(False, "netstat did not answer")
+        if out.returncode != 0:
+            raise DoorUnread(False, "netstat did not answer")
+        pids = mac_listeners(port, out.stdout)
+        if not pids:
+            return "none", "no program listens on it"
+        procs = [mac_proc(x) for x in sorted(set(pids))]
+    else:
+        rows = linux_listeners(port)
+        if not rows:
+            return "none", "no program listens on it"
+        if any(uid != me for uid, _ in rows):
+            return "other", "a program of another account holds it"
+        first = []
+        try:
+            for x in os.listdir("/proc"):
+                if x.isdigit():
+                    try:
+                        if os.path.dirname(os.readlink(f"/proc/{x}/exe")) == os.path.dirname(p["bin"]):
+                            first.append(x)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        held = linux_holders([i for _, i in rows], first)
+        if set(held) != {i for _, i in rows}:
+            raise DoorUnread(False, "a listener of this account was not found among its processes")
+        procs = [linux_proc(x) for x in sorted({x for v in held.values() for x in v})]
+    if any(uid != me for uid, _, _ in procs):
+        return "other", "a program of another account holds it"
+    if not all(our_forge(p, exe, args) for _, exe, args in procs):
+        return "other", "a program of this account that is not this mirror's forge holds it"
+    return "mine", "this mirror's own forge holds it"
+
+
+def door_line(kind, port, why, never=False, again="status"):
+    if kind == "other":
+        return (f"problem: another program answers on the forge's port 127.0.0.1:{port}, not this mirror's own forge "
+                f"({why}), so nothing was sent to it: no key, no copy. Run setup: it moves the forge to a free port "
+                "and starts it again; every copy stays.")
+    if never:
+        return (f"problem: who holds the forge's port 127.0.0.1:{port} cannot be read on this computer ({why}), so "
+                "nothing was sent to it: no key, no copy. The mirror needs that read to run; the README's section "
+                "\"What it runs\" says where it can.")
+    return (f"problem: who holds the forge's port 127.0.0.1:{port} could not be read this time ({why}), so nothing "
+            f"was sent to it: no key, no copy. Run {again} again.")
+
+
+def door(p, port, fresh=False, again="status"):
+    """The one place every road to the forge passes: 'mine' or 'none' (no listener: nothing is sent, and the old
+    "does not answer" lines stay; the owner's ruling F1); DoorShut on 'other' or unread, with its one line. A read is reused for DOOR_FRESH_S seconds."""
+    key = (int(port), p["app_ini"])
+    seen = DOOR_SEEN.get(key)
+    if fresh or not seen or time.monotonic() - seen[0] > DOOR_FRESH_S:
+        try:
+            kind, why = read_door(p, int(port))
+            never = False
+        except DoorUnread as e:
+            kind, why, never = "unread", str(e), e.never
+        seen = DOOR_SEEN[key] = (time.monotonic(), kind, why, never)
+    _, kind, why, never = seen
+    if kind in ("mine", "none"):
+        return kind
+    raise DoorShut(kind, door_line(kind, port, why, never, again), never)
+
+
+def door_floor():
+    """Setup's first act (the owner's ruling: a floor is checked, not only named): a listener of its own for a
+    moment, and the door read on it. None when this computer says who holds a port; otherwise the line, by kind
+    (the owner's ruling F3, 11-24): a read that is not there or names columns this release does not know "cannot be
+    read on this computer"; a read that did not answer this time "could not be read this time", run setup again."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        me = os.getuid()
+        try:
+            if system()[0] == "darwin":
+                out = subprocess.run(NETSTAT, capture_output=True, text=True, errors="replace", timeout=20)
+                if out.returncode != 0:
+                    raise DoorUnread(False, "netstat did not answer")
+                pids = mac_listeners(port, out.stdout)
+                ok = pids == [os.getpid()] and mac_proc(os.getpid())[0] == me
+            else:
+                rows = linux_listeners(port)
+                held = linux_holders([i for _, i in rows], [str(os.getpid())])
+                ok = (len(rows) == 1 and rows[0][0] == me and held.get(rows[0][1]) == [os.getpid()]
+                      and linux_proc(os.getpid())[0] == me)
+            if not ok:
+                raise DoorUnread(True, "a listener of setup's own was not named as its own")
+        except FileNotFoundError:
+            return door_line("unread", port, "netstat is not there", True)
+        except DoorUnread as e:
+            return door_line("unread", port, str(e), e.never, again="setup")
+        except subprocess.TimeoutExpired:
+            return door_line("unread", port, "netstat did not answer", False, again="setup")
+        except (OSError, subprocess.SubprocessError):
+            return door_line("unread", port, "the read could not be made", False, again="setup")
+        return None
+    finally:
+        s.close()
+
+
+def short_lived_start():
+    """Where this system's short-lived ports begin: the ones it hands out by itself, for a bind to port 0 and for
+    outgoing connections (Linux: ip_local_port_range, 32768 by default; macOS: net.inet.ip.portrange.first, 49152)."""
+    try:
+        if system()[0] == "darwin":
+            out = subprocess.run(["sysctl", "-n", "net.inet.ip.portrange.first"], capture_output=True, text=True, errors="replace",
+                                 timeout=10)
+            return int(out.stdout.strip())
+        with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as fh:
+            return int(fh.read().split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return 49152
+
+
+PORT_FLOOR = 20000
+
+
+def free_port():
+    """A free port on 127.0.0.1 below the system's short-lived range, at random from 20000 (G8.7): the system never
+    hands such a number to a program by itself, so only one that asks for it by name can take it. Seen on a GitHub
+    runner (11-24): a number from that range was handed to another program between the check and Gitea's bind."""
+    hi = short_lived_start()
+    if hi - PORT_FLOOR < 200:
+        raise SystemExit(f"This computer hands out every port from {hi} up to any program that asks, which leaves "
+                         f"too little room between {PORT_FLOOR} and {hi} for the forge's own. Nothing was changed. "
+                         "Open an issue with this line.")
+    for _ in range(200):
+        port = random.randrange(PORT_FLOOR, hi)
+        if port_is_free(port):
+            return port
+    raise SystemExit(f"No free port was found between {PORT_FLOOR} and {hi} in 200 tries. Nothing was changed. Run "
+                     "setup again.")
+
+
 class Forge:
     """The person's own forge, through its API, as the mirror account."""
 
     def __init__(self, p, st):
+        self.p, self.port = p, int(st["port"])
         self.base = f"http://127.0.0.1:{st['port']}"
-        with open(p["mirror_key"], encoding="utf-8") as f:
-            self.key = secret(f.read().strip())
+        answer, got = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
+        if answer != "read":                    # M155, M156: said as that, with its one step; never "does not answer"
+            raise KeptUnread(p["mirror_key"], got if answer == "could not be read" else None)
+        self.key = got
         self.user = st.get("mirror_user", MIRROR_USER)
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, auth=None):
+        if door(self.p, self.port) != "mine":    # G8.7: the key goes only to our own forge; on "none" nothing is
+            return 0, {"message": f"nothing listens on 127.0.0.1:{self.port}"}   # sent (F1), as no answer
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + "/api/v1" + path, data=data, method=method,
-                                     headers={"Authorization": f"token {self.key}", "Content-Type": "application/json",
+                                     headers={"Authorization": auth or f"token {self.key}",
+                                              "Content-Type": "application/json",
                                               "User-Agent": USER_AGENT})
         try:
             with forge_opener().open(req, timeout=30) as r:
@@ -1516,6 +3379,10 @@ def forge_call(forge, cache, *args, env=None, timeout=GIT_TIMEOUT):
     forge is on this computer, so no proxy of the person's is asked to reach it: no_proxy names this computer, and
     git and git-lfs both keep to it, for a proxy in git's settings and one in the environment alike; the forge's
     key only in this one process's environment."""
+    if door(forge.p, forge.port) != "mine":      # G8.7: the key and a copy go only to our own forge; on "none"
+        return subprocess.CompletedProcess(       # nothing is sent (F1): git's own no-answer shape, nothing run
+            ["git"] + list(args), 128, "",
+            f"fatal: unable to access 'http://127.0.0.1:{forge.port}/': nothing listens on 127.0.0.1:{forge.port}")
     e = dict(forge.git_env(), **(env or {}))
     e.update(no_proxy=THIS_COMPUTER, NO_PROXY=THIS_COMPUTER)     # the call reaches only this computer
     return git(cache, *args, env=e, timeout=timeout)
@@ -1556,10 +3423,24 @@ def where_to(url):
     return f"an ssh address on {m.group(1)}" if m else "another address"
 
 
+def forge_refusal(text):
+    """M120: why the forge refused a push, in its own words: its error lines and the first refused ref's reason
+    (seen from Gitea 28.4.0: "Internal Server Error (no message for end users)", "pre-receive hook declined")."""
+    ls = [x.strip() for x in shown_lines(text)]
+    said = [re.sub(r"^remote:\s*(error:|fatal:)\s*", "", x) for x in ls if re.match(r"^remote:\s*(error:|fatal:)", x)]
+    said = [x.strip() for x in said if x.strip()]
+    # The refused ref's reason is read from the line as it came (the shown line can end in the sentence about a ?),
+    # then shown on its own.
+    refused = next((x.strip() for x in program_lines(text) if x.strip().startswith("! [remote rejected]")), "")
+    why = re.search(r"\(([^()]*)\)\s*$", refused)
+    words = said[:2] + ([shown_line(why.group(1))] if why else [])
+    return redact("; ".join(words)) if words else git_reason(text)
+
+
 def git_reason(text):
     """Why git failed, in its own words: its first fatal or error line (its last line can be the tail of a
     sentence), with anything that looks like a credential hidden."""
-    lines = [x.strip() for x in (text or "").splitlines() if x.strip()]
+    lines = [x.strip() for x in shown_lines(text)]
     first = next((x for x in lines if x.startswith(("fatal:", "error:"))), lines[-1] if lines else "")
     return redact(first)
 
@@ -1587,16 +3468,38 @@ def has_git_lfs():
 
 
 def uses_lfs(cache):
-    """Does any branch or tag tip say, in its top .gitattributes, that files are kept with Git LFS?"""
-    for ref in git(cache, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags").stdout.split():
-        if "filter=lfs" in git(cache, "show", f"{ref}:.gitattributes").stdout:
+    """Does any branch or tag tip say, in its top .gitattributes, that files are kept with Git LFS? Decided on the
+    file's bytes; a read that fails answers None, never no (M120: an error is never an absence)."""
+    refs = git(cache, "for-each-ref", "--format=%(objecttype) %(*objecttype) %(refname)", "refs/heads", "refs/tags")
+    if refs.returncode != 0:
+        return None
+    for line in lines_of(refs.stdout):
+        kind, peeled, ref = line.split(" ", 2)
+        kind = peeled or kind
+        if kind == "tag":                              # a tag of a tag: what it comes to at the end
+            out = git(cache, "cat-file", "-t", ref + "^{}")
+            if out.returncode != 0:
+                return None
+            kind = out.stdout.strip()
+        if kind not in ("commit", "tree"):
+            continue                                   # a tag at a file (a blob): by its kind, no top .gitattributes
+        there = git(cache, "ls-tree", "--name-only", ref, ".gitattributes")
+        if there.returncode != 0:
+            return None
+        if not there.stdout.strip():
+            continue                                   # this tip has no top .gitattributes
+        out = git(cache, "cat-file", "blob", f"{ref}:.gitattributes")
+        if out.returncode != 0:
+            return None
+        if "filter=lfs" in out.stdout:
             return True
     return False
 
 
 def refs_of(cache):
+    """The branches and tags as written down in the state (written(): one form under any language)."""
     out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags")
-    return dict(reversed(line.split(" ", 1)) for line in out.stdout.splitlines() if line.strip())
+    return {written(r): s for s, r in (line.split(" ", 1) for line in lines_of(out.stdout))}
 
 
 def place_copy(forge, rec, full, gid, report):
@@ -1644,12 +3547,15 @@ def twice(step):
 
 def refs_under(cache, *prefixes):
     out = git(cache, "for-each-ref", "--format=%(objectname) %(refname)", *prefixes)
-    return {r: s for s, r in (line.split(" ", 1) for line in out.stdout.splitlines() if line.strip())}
+    return {r: s for s, r in (line.split(" ", 1) for line in lines_of(out.stdout))}
 
 
 def keep_before_moving(cache, report, full):
     """G5.1: before a branch or tag of the copy moves backwards, is rewritten or is deleted, keep its old commit
-    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). Returns the new kept refs, or None on a failure."""
+    under kept/<date>/<name> (a tag under kept/<date>/tags/<name>). For a tag, its old commit is the commit it
+    pointed at, through any tag objects (M126): an annotated tag's own message is not kept. A tag that pointed at no
+    commit (a file or a tree) cannot be kept as a branch, and its line says so. Returns the new kept refs, or None on
+    a failure."""
     now = refs_under(cache, "refs/heads", "refs/tags")
     held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
     day = time.strftime("%Y-%m-%d", time.gmtime())
@@ -1664,17 +3570,31 @@ def keep_before_moving(cache, report, full):
         if new and name.startswith("heads/") and git(cache, "merge-base", "--is-ancestor", old, new).returncode == 0:
             continue                                           # moved forward: nothing is lost
         short = name[len("heads/"):] if name.startswith("heads/") else name
+        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
+        keep = old
+        if name.startswith("tags/"):                           # M126: the commit under any tag objects
+            peeled = git(cache, "rev-parse", "--verify", "-q", old + "^{}")
+            kind = git(cache, "cat-file", "-t", peeled.stdout.strip()) if peeled.returncode == 0 else peeled
+            if kind.returncode != 0:
+                return None                                    # a read that failed is never taken for a no (G5.4)
+            if kind.stdout.strip() != "commit":
+                at = {"blob": "a file", "tree": "a folder (a tree)"}.get(kind.stdout.strip(), kind.stdout.strip())
+                said, note = shown_one(short)
+                report.append(TAG_NOT_KEPT.format(full=full, short=said, what=what, at=at) + note)
+                continue
+            keep = peeled.stdout.strip()
         dest, n = f"refs/kept/{day}/{short}", 1
         while True:
             have = git(cache, "rev-parse", "--verify", "-q", dest).stdout.strip()
-            if not have or have == old:
+            if not have or have == keep:
                 break
             n += 1
             dest = f"refs/kept/{day}/{short}-{n}"
-        if git(cache, "update-ref", dest, old).returncode != 0:
+        if git(cache, "update-ref", dest, keep).returncode != 0:
             return None
-        what = "deleted" if not new else ("moved" if name.startswith("tags/") else "rewritten or moved back")
-        report.append(f"{full}: {short} was {what} on GitHub; its old commit is kept as kept/{dest[len('refs/kept/'):]}")
+        said, note = shown_one(short)
+        kept, more = shown_one(dest[len("refs/kept/"):])
+        report.append(f"{full}: {said} was {what} on GitHub; its old commit is kept as kept/{kept}" + (note or more))
         made.append(dest)
     return made
 
@@ -1691,7 +3611,8 @@ def drop_old_kept(cache, days):
             continue
         if not chosen:
             others = git(cache, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads", "refs/tags",
-                         "refs/kept").stdout.split()
+                         "refs/kept").stdout
+            others = lines_of(others)
             if not [r for r in others if r != ref]:
                 continue                                       # the only way to its commit: it stays
         if git(cache, "update-ref", "-d", ref, sha).returncode == 0:
@@ -1699,10 +3620,120 @@ def drop_old_kept(cache, days):
     return dropped
 
 
+def written(name):
+    """M120: a name as run() read it, in the one form the state holds under any language: its bytes decoded as UTF-8
+    with each byte that is not UTF-8 kept as a stand-in character. The same as the name on a UTF-8 language; so a
+    status in the person's language reads what a sync in the service's language wrote down as the same names."""
+    return os.fsencode(name).decode("utf-8", "surrogateescape")
+
+
+def not_text(name):
+    """M120: a name (as run() read it) whose bytes are not UTF-8. The forge cannot hold one (seen: Gitea 28.4.0's
+    pre-receive hook declined the whole atomic push), so it is left out."""
+    return written_not_text(written(name))
+
+
+def written_not_text(name):
+    """The same for a name in the state's form."""
+    return any("\udc80" <= c <= "\udcff" for c in name)
+
+
+BACKTICK, DOLLAR_PAREN = chr(96), "$" + chr(40)               # spelled so, as no string the tool prints holds them
+
+
+def shows_as_is(name):
+    """A name (the state's form) this tool prints as it is: every character printable, no stand-in for a byte, and
+    no backtick or dollar-parenthesis (family rule 31(B): a line relayed through a shell runs nothing, and names on
+    GitHub are chosen by whoever can push there)."""
+    return shown_as_is(name) == name
+
+
+def shown_as_is(name):
+    """The name as this tool prints it: each character that cannot be shown as it is, each backtick, and both
+    characters of each dollar-parenthesis put as a ?. Only the printed form; the name itself is stored, copied and
+    pushed as it is."""
+    out = "".join(c if c.isprintable() and not "\udc80" <= c <= "\udcff" and c != BACKTICK else "?" for c in name)
+    return out.replace(DOLLAR_PAREN, "??")
+
+
+SHOWN_CHANGED = "a ? stands for each character this tool does not print as it is"
+
+
+def shown_names(names, first=5):
+    """Names for a line a person reads (family rule 31(B)): the first few through shown_as_is, the rest counted, and
+    the line says when a shown name is not the name itself. Only for the eyes: nothing that decides reads it, and two
+    names that show the same stay two."""
+    shown = [shown_as_is(n) for n in names]
+    out = ", ".join(shown[:first]) + (f" and {len(shown) - first} more" if len(shown) > first else "")
+    return out + ("; " + SHOWN_CHANGED if shown[:first] != list(names[:first]) else "")
+
+
+def shown_one(name):
+    """One name for a line a person reads, with the same words when what is shown is not the name itself."""
+    return shown_as_is(name), ("" if shows_as_is(name) else f" ({SHOWN_CHANGED})")
+
+
+def forge_folder(p, forge, name):
+    """The folder in which the forge keeps one copy (stock Gitea: data/gitea-repositories/<owner>/<name>.git, each
+    in lower case), read from the disk; "" when it is not there."""
+    root = os.path.join(p["forge"], "data", "gitea-repositories", forge.user.lower())
+    path = os.path.join(root, name.lower() + ".git")
+    return path if os.path.isfile(os.path.join(path, "HEAD")) else ""
+
+
+def not_text_line(refs):
+    """The words for a copy without the names the forge cannot hold (refs as git gave them)."""
+    shown = [r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
+             for r in sorted(refs)]
+    return NOT_TEXT.format(n=len(shown), names=shown_names(shown))
+
+
+def github_listing(cache, url, key, limit):
+    """M123: GitHub's own list of the branches and tags the fetch asks for (FETCH_SPEC takes these two and nothing
+    else), by its bytes in the state's one form; {} for a project with none (read, and none); None when it could
+    not be read, which is never taken as none; and the words for why, when it could not be."""
+    out = twice(lambda: github_call(cache, url, "ls-remote", "--heads", "--tags", "github", key=key, timeout=limit))
+    if out is None:
+        return None, f"it took longer than {limit} s, and so did the retry"
+    if out.returncode != 0:
+        return None, git_reason(out.stderr).replace(key, "<the key>") if key else git_reason(out.stderr)
+    got = {}
+    for line in lines_of(out.stdout):
+        sha, tab, ref = line.partition("\t")
+        if not tab or not sha or ref.endswith("^{}") or not ref.startswith(("refs/heads/", "refs/tags/")):
+            continue
+        got[written(ref)] = sha
+    return got, ""
+
+
+def not_as_listed(held, first, second):
+    """M123: (wrong, seen). wrong: each name whose value in held (the cache, or the forge) is neither the first
+    listing's nor the second's (None: not read), with why; a name that moved or went on GitHub between the two
+    listings matches one of them. seen: what GitHub showed, per name the listing held agrees with."""
+    last = second if second is not None else first
+    wrong, seen = [], {}
+    for ref in sorted(set(held) | set(first) | set(last)):
+        if held.get(ref) in (first.get(ref), last.get(ref)):
+            if ref in held:
+                seen[ref] = held[ref]
+        else:
+            wrong.append((ref, "missing" if ref not in held else "not on GitHub" if ref not in last
+                          else "at another commit"))
+    return wrong, seen
+
+
+def not_as_listed_line(wrong, words=NOT_AS_LISTED):
+    """The words for names the copy would not hold (or, after the push, does not hold) as GitHub lists them, at
+    most five shown."""
+    shown = [(r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]) + ": " + why
+             for r, why in wrong]
+    return words.format(n=len(shown), names=shown_names(shown))
+
+
 def push_specs(cache):
     """What one atomic push sends: every branch and tag as GitHub has it, every kept ref, and a delete for each
     branch, tag or kept ref the copy holds that is gone here (each one already kept, or dropped by G5.2)."""
-    now = refs_under(cache, "refs/heads", "refs/tags")
+    now = {r: s for r, s in refs_under(cache, "refs/heads", "refs/tags").items() if not not_text(r)}   # M120
     kept = refs_under(cache, "refs/kept")
     held = refs_under(cache, "refs/forge/heads", "refs/forge/tags")
     specs = [f"+{r}:{r}" for r in sorted(now)] + [f"+{r}:refs/heads/kept/{r[len('refs/kept/'):]}" for r in sorted(kept)]
@@ -1737,12 +3768,23 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         return ADDRESS_UNREAD.format(why=said)
     if not same:
         return REWRITTEN.format(where=said)
+    first, why = github_listing(cache, url, key, limit)         # M123: GitHub's own list, read before the fetch
+    if first is None:
+        return LISTING_UNREAD.format(why=why)
     out = twice(lambda: github_call(cache, url, "fetch", "--prune", "--quiet", "github", key=key, timeout=limit))
     if out is None:
         return f"the fetch from GitHub took longer than {limit} s, and so did the retry"
     if out.returncode != 0:
         return "the fetch from GitHub failed: " + git_reason(out.stderr).replace(key, "<the key>")
-    rec.update(seen_refs=refs_of(cache), seen_at=now_utc())      # G7.1: what GitHub showed, written down
+    held = refs_of(cache)
+    second, why = (None, "") if held == first else github_listing(cache, url, key, limit)   # a name may have moved
+    if held != first and second is None:
+        return LISTING_UNREAD.format(why=why)
+    wrong, seen = not_as_listed(held, first, second)
+    # G7.1: what GitHub showed, written down from GitHub's own list, never from the cache (M123)
+    rec.update(seen_refs=seen if not wrong else (second if second is not None else first), seen_at=now_utc())
+    if wrong:                                  # M123: the forge is not given a set GitHub does not list
+        return not_as_listed_line(wrong)
     lfs = None
     if not refs_of(cache):
         pass                                   # an empty repository has no large files to fetch or push
@@ -1753,8 +3795,12 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         if out.returncode != 0:
             return "the large files could not be fetched: " + git_reason(out.stderr).replace(key, "<the key>")
         lfs = True
-    elif uses_lfs(cache):
-        lfs = False
+    else:
+        said = uses_lfs(cache)
+        if said is None:
+            return LFS_UNREAD
+        if said:
+            lfs = False
     cur = place_copy(forge, rec, full, gid, report)
     # Read the copy's name by its id again just before the push, and never follow a redirect (contract C7).
     check = forge.by_id(rec["forge_id"])
@@ -1764,10 +3810,19 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
     git(cache, "config", "remote.forge.url", url)
     for i, spec in enumerate(FORGE_SPEC):
         git(cache, "config", "--replace-all" if i == 0 else "--add", "remote.forge.fetch", spec)
-    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "forge", timeout=limit))
+    # M125: --no-tags, so git does not follow tags and write the forge's tags back into the cache's refs/tags, where
+    # the fetch from GitHub has just taken away every tag GitHub deleted. This fetch writes refs/forge/ and refs/kept/ only.
+    out = twice(lambda: forge_call(forge, cache, "fetch", "--quiet", "--prune", "--no-tags", "forge", timeout=limit))
     if out is None or out.returncode != 0:
         return "what the copy holds now could not be read from the forge" + (
             "" if out is None else ": " + last_line(out.stderr))
+    # M127 (due 0.1.1): a GitHub branch named kept/... shares its name with a kept ref of the copy once the copy holds
+    # it, and git refuses a push with two sources for one name. Said in plain words, before anything is pushed.
+    there = refs_under(cache, "refs/forge/heads")                 # the copy's names, as just read from the forge
+    clash = sorted(r for r in refs_under(cache, "refs/heads")
+                   if r.startswith("refs/heads/kept/") and "refs/forge/heads/" + r[len("refs/heads/"):] in there)
+    if clash:
+        return KEPT_CLASH.format(n=len(clash), names=shown_names([written(r)[len("refs/heads/"):] for r in clash]))
     kept = keep_before_moving(cache, report, full)
     if kept is None:
         return "an old commit could not be kept, so the copy was not moved"
@@ -1785,18 +3840,30 @@ def copy_one(p, forge, key, rec, gh, report, limit=GIT_TIMEOUT, kept_days=None):
         if out is None:
             return f"the push into the forge took longer than {limit} s, and so did the retry"
         if out.returncode != 0:
-            return "the push into the forge failed: " + last_line(out.stderr)
+            return "the push into the forge failed, so nothing in its copy was moved (the push is all or nothing): " + (
+                forge_refusal(out.stderr))
     if dropped:
         report.append(f"{full}: {len(dropped)} kept ref(s) older than the kept period were dropped")
-    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=refs_of(cache),
+    back = forge_refs_of(forge, check["name"])                    # M123: the copy is the forge; read it back
+    if back is None:
+        return "what the copy holds after the push could not be read from the forge, so it is not called whole"
+    # Both sides leave out refs/heads/kept/: in the forge that is where the tool's own kept refs live, so a GitHub
+    # branch named kept/... is checked in the cache (against GitHub's list, above), not here.
+    back = {written(r): s for r, s in back.items() if not r.startswith("refs/heads/kept/")}
+    want = {r: s for r, s in seen.items() if not written_not_text(r) and not r.startswith("refs/heads/kept/")}
+    if back != want:
+        return not_as_listed_line(not_as_listed(back, want, want)[0], FORGE_NOT_AS_LISTED)
+    # M120: a name the forge cannot hold is a known limit of this copy, not a failed refresh (the owner's ruling,
+    # 11-24): it goes the road lfs_missing goes, a flag said at every sync and in status.
+    rec.update(full_name=full, forge_name=cur["name"] if cur else copy_name(full), refs=seen,
                last_good=now_utc(), fetched_from=fetched_from, pushed_at=gh.get("pushed_at"), problem="",
-               lfs_missing=(lfs is False))
+               lfs_missing=(lfs is False), left_out=sorted(r for r in seen if written_not_text(r)))
     return ""
 
 
 def cmd_config(args):
     p = paths()
-    s = load_json(p["settings"], {})
+    s = load_settings(p)
     if args.clear:
         s.pop(args.what, None)
     else:
@@ -1876,9 +3943,245 @@ def cmd_sync(args):
     try:
         if note:
             say(note)
-        return sync(p, args)
+        try:
+            return sync(p, args)
+        except DoorShut as e:
+            door_stopped(p, e)
+            say(str(e))
+            return 1
     finally:
         drop_lock(p)
+
+
+def kept_step(p, e):
+    """The one step for a kept file that could not be read (KeptUnread): the file is moved out of its
+    folder, by the person, and what it held is chosen again or found again; never written over by the tool."""
+    blocked = blocked_folder(e.path)
+    if blocked:
+        ours, why, step = folder_words(p, blocked)
+        return (f"{blocked}" + ("" if ours else ", a folder above the skill's own,") + f" cannot be entered ({why}); "
+                f"{step}; then run the same command again")
+    d = os.path.dirname(e.path)
+    move = f"move that file out of {d} (into a folder of your own, to keep it)"
+    if e.path == p["settings"]:
+        try:
+            names = os.listdir(p["keys"])
+        except OSError:             # not there, or could not be read: no owner is named, and the step still stands
+            names = []
+        owners = sorted(f[:-4] for f in names if f.endswith(".key") and OWNER_RE.match(f[:-4]))
+        keys = "; ".join(own_command(p, "key", "set", o) for o in owners)
+        return (f"{move}; then, if you had chosen what is copied, choose it again ({own_command(p, 'config', 'include')} "
+                f"or {own_command(p, 'config', 'exclude')}), and run key set again for each owner whose key is kept "
+                "here, pasting the key when it asks" + (f": {keys}" if keys else "") + ". Until then nothing is copied")
+    if e.path == p["app_ini"]:
+        st = load_json(p["state"], {})
+        port = st.get("port") if isinstance(st, dict) else None
+        where = (f"the forge keeps its address, http://127.0.0.1:{port}/, while that port is free or the forge's "
+                 "own, and is given a new one otherwise, which setup then says" if port else
+                 "setup gives the forge its address and says it")
+        return (f"{move}: it is the forge's own settings as they were, yours to keep. Then run setup again: "
+                f"{own_command(p, 'setup')}. Setup writes the forge a new settings file and starts the forge with it; "
+                f"{where}; every copy and both Gitea accounts are kept")
+    if e.path == p["mirror_key"]:
+        return (f"run setup again: {own_command(p, 'setup')}. It gives the '{MIRROR_USER}' account a new key, kept in "
+                "that file, and keeps every copy")
+    if e.path == p["state"]:
+        # M157 (G6.24), 0.1.0's road as seen in a stand-in trial (2026-11-26): what follows is said, never a rebuild
+        return (f"{move}, then run setup again: {own_command(p, 'setup')}. What follows: setup finds the forge and "
+                "your Gitea accounts from before; the go for the first copy is asked again; each copy is then made "
+                "again from GitHub beside its old one, and the old one, with its kept history, stays on the forge "
+                "under a new name; so the disk the copies take doubles. Nothing is deleted")
+    return f"{move}, then run the same command again"
+
+
+def chown_name():
+    """The name a line that changes owners as an administrator gives for this account: taken from the account's
+    number (never from USER or LOGNAME, which the environment can set to anyone), else the number itself."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return str(os.getuid())
+
+
+def owner_words(uid):
+    """Whose a folder is, by its number, with the name where the system has one."""
+    name = account_name(uid)
+    return f"account {uid}" + ("" if name == f"number {uid}" else f" ({name})")
+
+
+def folder_words(p, d):
+    """M167 (G6.29): (ours, why, the one step) for a folder on the road to the skill's own that this account cannot
+    read, write and enter. A line that changes a folder's mode or owner is printed only for a folder of the skill's
+    own (WSM_HOME's, the data and settings folders, and what is in them), and only for a path the tool prints as it
+    is; a folder above them is named with whose it is, and no line. The mode is named as the cause only where its own
+    bits lack what is asked. Never a move of a file inside it (the person cannot reach one), never a write by the
+    tool. Each caller ends the step with "then run the same command again" in its own words (G6.8 reads them there)."""
+    d = os.path.abspath(d)
+    ours = any(d == r or inside(d, r) for r in own_roots(p))
+    try:
+        st_ = os.stat(d)
+    except OSError:
+        st_ = None
+    if not ours:
+        if st_ is None:
+            return False, "its owner could not be read, and it is not the skill's", (
+                "it is not the skill's, so the tool gives no line that changes it: this computer's administrator "
+                "lets this account into it")
+        if st_.st_uid == os.getuid():
+            return False, "it is yours, and not the skill's", (
+                "it is not the skill's, so the tool gives no line that changes it: let this account into it again, "
+                "as you choose")
+        return False, f"it belongs to {owner_words(st_.st_uid)}, and not to the skill", (
+            "it is not the skill's, so the tool gives no line that changes it: only its owner or this computer's "
+            "administrator can let this account into it")
+    if st_ is None:
+        return True, "its owner and its mode could not be read", (
+            "this computer's administrator finds why it cannot be read; the tool gives no line for it")
+    if st_.st_uid != os.getuid():
+        cmd = f"sudo chown -R {shlex.quote(chown_name())} {shlex.quote(d)}"
+        return True, f"another account owns it, {owner_words(st_.st_uid)}", (
+            "give it back to your account, as an administrator of this computer"
+            + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
+    if st_.st_mode & 0o700 != 0o700:
+        cmd = f"chmod u+rwx {shlex.quote(d)}"
+        return True, "it is yours, and its mode does not let you", (
+            "give it back its mode" + (f": {cmd}" if shows_as_is(d) else f" ({SHOWN_CHANGED}, so no line is given)"))
+    return True, ("it is yours, and its mode lets you, and this computer still refuses it, as a disk mounted "
+                  "read-only refuses writing"), (
+        "the cause is not the folder's mode, so the tool gives no line that changes it: this computer's "
+        "administrator finds why")
+
+
+def still_running(p):
+    """M167, at uninstall's stop on a folder it cannot enter: what of the skill's the service manager shows still
+    running, read without the skill's folders; or that it could not be read."""
+    if system()[0] == "darwin":
+        held = [(w, launchd_held(lab)) for w, lab in (("the forge's job", LAUNCHD_LABEL), ("the sync's job", SYNC_LABEL))]
+        if any(h is None for _, h in held):
+            return "What launchd holds of the skill's could not be read, so it may still run."
+        on = [w for w, h in held if h != "absent"]
+        return ("launchd still holds " + " and ".join(on) + " of the skill's loaded, and they go on running until "
+                "uninstall can go on." if on else "launchd holds no job of the skill's.")
+    on = []
+    for u, w in ((SERVICE, "the forge's service"), (SYNC_UNIT + ".timer", "the sync's timer")):
+        out = run(["systemctl", "--user", "show", u, "-p", "ActiveState"])
+        state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
+        if out.returncode != 0 or not state:
+            return "What systemd runs of the skill's could not be read, so it may still run."
+        if state not in ("inactive", "failed"):
+            on.append(f"{w} ({state})")
+    return ("systemd still shows " + " and ".join(on) + " of the skill's, and they go on running until uninstall "
+            "can go on." if on else "systemd shows nothing of the skill's running.")
+
+
+def link_left_line(link, unit, said):
+    """M163 and M153 (seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26): the link systemctl made at setup and did not take off (its disable
+    refused, or the unit masked), named with its step. The rm line is printed only for a path the tool prints as it
+    is (no backtick, no dollar-parenthesis, no character that cannot be seen), each part through shlex.quote, so the
+    line runs nothing else when pasted."""
+    return (f"Not taken: {shown_as_is(link)}, the link systemctl made at setup so that {unit} starts by itself. "
+            f"systemctl did not take it off (it answered: {said}); the service was told to stop, and read stopped; "
+            "the link stays where systemctl made it. With the service's program gone it starts nothing; "
+            "delete it as you delete any file, when you want" + (
+                f": rm {shlex.quote(link)}" if shows_as_is(link) else
+                f" ({SHOWN_CHANGED} in its path, so no line is given)"))
+
+
+ROOT_UID = 0                        # the administrator's account number (the suite moves it to its own)
+
+
+def root_door(p, cmd, typed=()):
+    """M177 (G6.35): a command started as root (account 0) whose folders, or whose sudo, are another account's
+    stops at the door, before it reads or writes anything (root started by sudo with no mirror of its own is
+    stopped too: the mirror it means is that account's). Seen on a stock Ubuntu 24.04 guest, 2026-11-26: with
+    sudo -E (the person's home kept) status and sync wrote the state file and the record of what the skill made as
+    root's, at mode 600, so the person's own commands could no longer read them. Root's own mirror, in root's own
+    home (a computer where root is the only account), runs as before. None, or the stop."""
+    if not hasattr(os, "geteuid") or os.geteuid() != ROOT_UID:
+        return None
+    theirs, roots = None, False
+    for d in [os.environ.get("WSM_HOME"), p["data"], p["conf"], p["keys"]]:
+        try:
+            uid = os.stat(d).st_uid if d else None
+        except OSError:
+            continue
+        if uid not in (ROOT_UID, None):
+            theirs = uid
+            break
+        roots = roots or uid == ROOT_UID
+    by = os.environ.get("SUDO_UID", "")
+    by = int(by) if by.isdigit() and int(by) != ROOT_UID else None
+    if theirs is None and (roots or by is None):
+        return None                 # root's own mirror (its folders root's), or root with no sudo and no mirror
+    who = owner_words(theirs if theirs is not None else by)
+    return (f"Stopped: {cmd} runs here as root (account 0)" + (f", started by sudo from {owner_words(by)}"
+            if by is not None else "") + ", and the skill runs as the account whose mirror it is, "
+            f"{who}: " + ("a run as root would leave files in that account's folders that it cannot read" if theirs
+                          is not None else "a run as root looks for a mirror in the home this run was given, where "
+                          "there is none, and would make one there as root's") + f". So {cmd} reads "
+            "nothing and changes nothing: nothing was copied, written or taken away. The one next step: run the "
+            f"same command again as {who}, without sudo" + (
+                f": {own_command(p, *map(shlex.quote, typed))}" if typed and all(shows_as_is(x) for x in typed) else
+                f", with the options you gave it ({SHOWN_CHANGED} in them, so no line is given)" if typed else
+                f": {own_command(p, cmd)}"))
+
+
+def folders_floor(p, cmd):
+    """M167 (G6.29): before any command reads or writes a kept file, each folder of the
+    skill's own that is there (WSM_HOME's, the data and settings folders, the keys folder) is one this account can
+    read, write and enter. Else the command stops before it reads or changes anything, naming the folder and why, so
+    a failed read is never said as an absence ("Run setup first") and never ends in a traceback. None, or the
+    stop."""
+    seen = []
+    for d in [os.environ.get("WSM_HOME"), p["data"], p["conf"], p["keys"]]:
+        if not d or os.path.abspath(d) in seen:
+            continue
+        d = os.path.abspath(d)
+        seen.append(d)
+        try:
+            st_ = os.stat(d)
+        except FileNotFoundError:
+            continue
+        except NotADirectoryError:
+            continue                  # a file where a folder goes: said by the step that reads that place
+        except OSError:
+            above = blocked_folder(os.path.join(d, "x"))
+            if above and above != d:
+                ours, why, step = folder_words(p, above)
+                if not ours:          # M167: a folder above is never "the skill's"
+                    return (f"Stopped: {above} is a folder above the skill's folder {d}, and this account cannot enter "
+                            f"it ({why}), so {cmd} cannot read what is kept there, and changes nothing: nothing was "
+                            f"copied, written or taken away. The one next step: {step}; then run the same command "
+                            "again." + (f" {still_running(p)}" if cmd == "uninstall" else ""))
+                d = above
+        else:
+            if not stat.S_ISDIR(st_.st_mode) or os.access(d, os.R_OK | os.W_OK | os.X_OK):
+                continue
+        ours, why, step = folder_words(p, d)
+        return (f"Stopped: {d} is a folder of the skill's that this account cannot read, write and enter ({why}), "
+                f"so {cmd} cannot read what is kept there, and changes nothing: nothing was copied, written or taken "
+                f"away. The one next step: {step}; then run the same command again."
+                # M167: uninstall stops here too (with a folder it cannot enter it cannot read what it made), and
+                # says what of the skill's still runs; row M176 (G9.20, due 0.1.1) has it switch that off
+                + (f" {still_running(p)}" if cmd == "uninstall" else ""))
+    return None
+
+
+def kept_stop_words(p, e, cmd):
+    what = {p["settings"]: "what you chose to copy", p["state"]: "what this computer's mirror holds"}.get(
+        e.path, "what that file holds")
+    return (f"Stopped: {e.path} {e.said}. So {cmd} cannot tell {what}, and changes nothing: "
+            f"nothing was copied, written or taken away. The one next step: {kept_step(p, e)}.")
+
+
+def door_stopped(p, e):
+    """G8.7: the sync's own record says why it stopped, as its line does."""
+    st = load_state(p)
+    st["last_sync"] = {"at": now_utc(), "calls": 0, "copied": 0, "problems": 1,
+                       "stopped": "another program holds the forge's port" if e.kind == "other" else
+                       "who holds the forge's port could not be read"}
+    save_state(p, st)
 
 
 def save_state(p, st):
@@ -1928,8 +4231,13 @@ def key_end_line(owner, exp):
             f"its end date is on GitHub's key page, {KEY_PAGE}.")
 
 
-def restart_line(st):
-    """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to."""
+def restart_line(p, st):
+    """G10.6: what happens after a restart, read now and changing nothing, for the block the person says go to.
+    G1.24: "starts by itself" only when the service manager holds the forge's service word for word as written."""
+    held, _, parts = service_read(p, "forge")
+    if held in ("differs", "unread", "unrecorded"):
+        return "After a restart: " + read_back_words("forge", held, not_set_up(held),
+                                                     read_back_step("forge", held, "status"), parts)
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
         return "After a restart it starts by itself." if back else f"After a restart: {note}"
@@ -1939,7 +4247,7 @@ def restart_line(st):
         return ("After a restart it waits until you log in: lingering is off, as you chose, so the mirror syncs only "
                 "while you are logged in. To change that, run setup --linger.")
     return (f"After a restart: lingering is off, so {NO_LOGIN_NOTE}. The computer's administrator can switch it on "
-            f"with one command: {LINGER_COMMAND.format(user=getpass.getuser())} ({LINGER_MEANS}).")
+            f"with one command: {LINGER_COMMAND.format(user=shlex.quote(getpass.getuser()))} ({LINGER_MEANS}).")
 
 
 def announce_first_copy(p, st, picked, complete, to_the_person=False):
@@ -1957,7 +4265,7 @@ def announce_first_copy(p, st, picked, complete, to_the_person=False):
           else "There are none to copy yet.",
           f"The copies go into the forge on this computer only, http://127.0.0.1:{st['port']}/, as private "
           f"repositories of its '{MIRROR_USER}' account. Nothing is ever written to GitHub.",
-          restart_line(st), lfs_missing() if not has_git_lfs() else "",
+          restart_line(p, st), lfs_missing() if not has_git_lfs() else "",
           *[key_end_line(o, (st.get("keys") or {}).get(o.lower(), {}).get("expires") or "") for o in sorted(complete, key=str.lower)],
           *open_folders(p), NOT_COPIED, PRIVATE_AS_THIS_COMPUTER], to_the_person)
     st["announced"] = st.get("announced") or now_utc()
@@ -2005,7 +4313,7 @@ def cmd_left_out(args):
     """G3.11: the names of what the include list and the exclude patterns leave out, asked for by the person. It
     reads GitHub's lists with the kept keys, and copies and changes nothing."""
     p = paths()
-    st, s = load_json(p["state"], {}), load_json(p["settings"], {})
+    st, s = load_state(p), load_settings(p)
     owners = s.get("owners") or {}
     if not owners:
         say("No GitHub key is kept yet. Run: key set <your GitHub account> (and one per organisation).")
@@ -2016,11 +4324,13 @@ def cmd_left_out(args):
     names, problems = [], []
     for owner, meta in owners.items():
         kp = key_path(p, owner)
-        if not os.path.exists(kp):
+        answer, key = key_file_read(kp)
+        if answer == "not there":
             problems.append(f"{owner}: no key is kept for it; run key set {owner}")
             continue
-        with open(kp, encoding="utf-8") as f:
-            key = secret(f.read().strip())
+        if answer != "read":                    # M155: this owner is said, and the others go on
+            problems.append(key_unread_line(p, owner, kp, key))
+            continue
         repos, why, _ = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), {})
         if repos is None:
             problems.append(f"{owner}: {why}")
@@ -2049,8 +4359,8 @@ def spent_line(st):
 
 
 def sync(p, args):
-    st = load_json(p["state"], {})
-    s = load_json(p["settings"], {})
+    st = load_state(p)
+    s = load_settings(p)
     owners = s.get("owners") or {}
     if getattr(args, "from_timer", False) and not st.get("go"):
         say("waiting for the person's go: nothing is copied until they give it in a terminal of their own (go) and "
@@ -2059,6 +4369,7 @@ def sync(p, args):
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
+    door(p, st["port"], fresh=True, again="sync")    # G8.7: before GitHub is asked anything
     wait = epoch_of(st.get("github_wait_until"))
     if wait > time.time():
         say(spent_line(st))
@@ -2089,11 +4400,13 @@ def sync(p, args):
     complete = set()
     for owner, meta in owners.items():
         kp = key_path(p, owner)
-        if not os.path.exists(kp):
+        answer, key = key_file_read(kp)
+        if answer == "not there":
             problems.append(f"{owner}: no key is kept for it")
             continue
-        with open(kp, encoding="utf-8") as f:
-            key = secret(f.read().strip())
+        if answer != "read":                    # M155: this owner is said, and the others go on
+            problems.append(key_unread_line(p, owner, kp, key))
+            continue
         info = {}
         repos, why, n = list_owner(owner, meta.get("kind", "user"), key, setting(s, "api_floor"), info)
         if info.get("spent_until"):
@@ -2210,6 +4523,10 @@ def sync(p, args):
         save_state(p, st)
         try:
             why = copy_one(p, forge, key, rec, r, report, limit, s.get("kept_days"))
+        except DoorShut:
+            rec.pop("copying_since", None)
+            save_state(p, st)
+            raise
         except HardStop as e:
             rec["problem"] = "cannot refresh: the sync stopped"
             rec.pop("copying_since", None)
@@ -2219,6 +4536,8 @@ def sync(p, args):
             return 1
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             why = str(e)
+        except Exception:                    # M120: nothing one project holds ends the sync for every other project
+            why = UNFORESEEN
         rec.pop("copying_since", None)
         if why:
             rec["problem"] = "cannot refresh: " + why
@@ -2245,10 +4564,16 @@ def sync(p, args):
     lfs_missing = sorted(rec["full_name"] for rec in state.values() if rec.get("lfs_missing") and not rec.get("gone_since"))
     for name in lfs_missing:
         say(f"problem: {name}: {LFS_NOT_IN_COPY}")
+    left_out = sorted(((rec["full_name"], rec["left_out"]) for rec in state.values()
+                       if rec.get("left_out") and not rec.get("gone_since")), key=lambda x: x[0].lower())
+    for name, refs in left_out:
+        say(f"problem: {name}: {not_text_line(refs)}")
     say(f"sync: {len(found)} on GitHub, {done} copied now, {unchanged} unchanged, {len(problems)} problem(s), "
         f"{calls} GitHub API call(s)" + (", a full pass" if full_due else "")
         + (f", {len(lfs_missing)} cop{'y' if len(lfs_missing) == 1 else 'ies'} without its large files"
-           if lfs_missing else ""))
+           if lfs_missing else "")
+        + (f", {len(left_out)} cop{'y' if len(left_out) == 1 else 'ies'} without branch or tag names the forge "
+           "cannot hold" if left_out else ""))
     say(NOT_COPIED)
     if plugin_removed(st):
         gone = PLUGIN_GONE.format(command=own_command(p, "uninstall"))
@@ -2263,30 +4588,133 @@ PLUGIN_GONE = ("Claude Code's plugin for this skill was removed; the mirror goes
                "computer and keeps every copy current. To take it off: {command}")
 
 
+def plist_read(f):
+    """M150 (G9.15), the family's rule 6: THE one reader of a property list in the tool; every place that parses one
+    goes through it. ('read', the dict at its top), ('not there', None) or ('could not be read', where the read
+    stopped): cannot be opened, 0 bytes, cut short, not well-formed, not a property list, or a top that is not a
+    dict. Where the read stopped is the parser's line and column where it gives them, else the error's class; never
+    a byte of the file (a parser's own message can quote one, so only expat's message for its code is said)."""
+    try:
+        with open(f, "rb") as fh:
+            data = fh.read()
+    except (FileNotFoundError, NotADirectoryError):
+        return "not there", None
+    except OSError as e:
+        return "could not be read", f"it could not be opened ({type(e).__name__})"
+    if not data:
+        return "could not be read", "it is empty (0 bytes)"
+    try:
+        top = plistlib.loads(data)
+    except xml.parsers.expat.ExpatError as e:
+        return "could not be read", (f"it is not a well-formed property list (the read stopped at line {e.lineno}, "
+                                     f"column {e.offset}: {xml.parsers.expat.ErrorString(e.code)})")
+    except Exception as e:          # every other way the parser stops (a binary list cut short, a value too large)
+        return "could not be read", f"it is not a property list this tool can read ({type(e).__name__})"
+    if not isinstance(top, dict):
+        return "could not be read", f"it holds no job: its top is {type(top).__name__}, not a dict"
+    return "read", top
+
+
+def plist_job_args(f):
+    """M150: the job's arguments in a launch agent file, through plist_read: ('read', a list of strings), ('not
+    there', None) or ('could not be read', where the read stopped). Arguments that are not a list of words are
+    "could not be read", never a job of anyone's."""
+    answer, got = plist_read(f)
+    if answer != "read":
+        return answer, got
+    args = got.get("ProgramArguments")
+    if not isinstance(args, list) or not args or not all(isinstance(w, str) for w in args):
+        return "could not be read", "its ProgramArguments is not a list of words"
+    return "read", args
+
+
 def other_install(p):
     """G9.12: the service file this computer has for the skill, when it runs another home's copy than p's.
-    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file)."""
+    None: there is none, or it runs p's own. Else (the copy it runs, or "" when that could not be read; the file;
+    M150: where the read of the file stopped, when launchd has not loaded the job and the file itself could not be
+    read, else "").
+    G1.24: what it runs is read as the service manager parsed it (systemd over its bus; launchd's loaded job, or,
+    when launchd has not loaded it, the file's own strings as the property-list format gives them), never by a
+    pattern over the file's text."""
     f = p["plist"] if system()[0] == "darwin" else p["unit"]
     if not os.path.exists(f):
         return None
-    try:
-        with open(f, encoding="utf-8") as fh:
-            txt = fh.read()
-    except (OSError, ValueError):
-        return "", f
-    m = (re.search(r"<string>-I</string><string>([^<]+)</string><string>run-forge</string>", txt)
-         or re.search(r"^ExecStart=\S+ -I (.+) run-forge$", txt, re.M))
-    if m and m.group(1) == p["script"]:
+    state, unread = service_file_state(p, read_made(p)[0], f)
+    if state == "yes":                               # this home wrote these very bytes: its own, whatever is parsed
         return None
-    return (m.group(1) if m else ""), f
+    argv = None
+    if system()[0] == "darwin":
+        got = launchd_held(LAUNCHD_LABEL)
+        if got == "absent":
+            answer, got = plist_job_args(f)
+            if answer != "read":
+                return "", f, got if answer == "could not be read" else "it went while it was read"
+            got = (got, None)
+        if isinstance(got, tuple) and isinstance(got[0], list) and all(isinstance(w, str) for w in got[0]):
+            argv = got[0]
+    else:
+        got = systemd_parsed(SERVICE + ".service")
+        if got is not None and not got[0] and state != "could not be read":
+            # M153 (G9.17; seen in a stand-in trial in a made home): systemd was read, and the unit shows no start
+            # line (masked, emptied, or cut down by hand): it runs nothing, so it is no other install, and the file's
+            # own bytes decide (named and left by uninstall, setup's stop to move it). Only that answer: one that
+            # could not be read stays below.
+            return None
+        if got and len(got[0]) == 1:
+            argv = got[0][0][1:]
+    if argv is None:
+        # M152: where the service manager's answer could not be read and the tool's own reader could not read the
+        # file either, the stop's step is the one that can be taken (move it out), never "read that file"
+        if state != "could not be read" and system()[0] == "darwin":
+            answer, why = plist_job_args(f)
+            unread = why if answer == "could not be read" else None
+        return "", f, unread or ""
+    if argv[1:] == ["-I", p["script"], "run-forge"]:
+        return None
+    return (argv[2] if len(argv) == 4 and argv[1] == "-I" and argv[3] == "run-forge" else ""), f, ""
 
 
-def other_install_stop(p, cmd):
-    """Setup and uninstall do nothing against another home's install: said with the home it uses and one step."""
-    found = other_install(p)
+def launchd_held(label):
+    """M152 (G9.16, seen in a stand-in trial in a made home, not on a Mac): launchd_parsed, but where this account's
+    domain answers LAUNCHD_NO_SCREEN (no login at the Mac's screen), read as launchd_off reads it: nothing of this
+    account is loaded, so the job counts as not held ("absent") and the file's own words decide. Only that answer:
+    every other answer launchd_parsed could not read stays None (G9.12's stop)."""
+    got = launchd_parsed(label)
+    if got is None and mac_no_screen():
+        return "absent"
+    return got
+
+
+def unit_is_ours(p, which, starts):
+    """M163 (G9.18), the Linux twin of job_is_ours: a unit systemd shows running this home's own copy of the skill,
+    one of its start lines word for word after the interpreter (forge_argv, sync_argv, in the form the bus holds)."""
+    want = sd_parsed_form(forge_argv(p) if which == "forge" else sync_argv(p))
+    return any(isinstance(x, list) and x[2:] == want[2:] for x in starts or [])
+
+
+def job_is_ours(p, label, args):
+    """M150: a loaded job launchd shows running this home's own copy of the skill, argument by argument after the
+    interpreter (forge_argv, sync_argv)."""
+    want = forge_argv(p) if label == LAUNCHD_LABEL else sync_argv(p)
+    return isinstance(args, list) and args[1:] == want[1:]
+
+
+def other_install_stop(p, cmd, found="read it"):
+    """Setup and uninstall do nothing against another home's install: said with the home it uses and one step.
+    M150: a launch agent file at the skill's path that could not be read stops setup with the one step that can be
+    taken (it is moved out of that folder); uninstall is not stopped by it (rule 8), and goes on within its limit."""
+    found = other_install(p) if found == "read it" else found
     if not found:
         return None
-    script, f = found
+    script, f, unread = found
+    if unread:
+        if cmd == "uninstall":
+            return None
+        kind = "a launch agent file" if system()[0] == "darwin" else "a service file"
+        return (f"Stopped: this computer already has {kind} at the skill's path ({f}), and it could not "
+                f"be read: {unread}. So {cmd} cannot tell whose it is: this home's, another home's, or something "
+                f"else's. Nothing was changed. The one next step: move that file out of {os.path.dirname(f)} (into a "
+                f"folder of your own, to keep it), then run {own_command(p, cmd)}")
     if not script:
         return (f"Stopped: this computer already has the skill's service ({f}), and which copy of the skill it runs "
                 f"could not be read, so {cmd} cannot tell whether it is this one ({p['script']}). Nothing was "
@@ -2302,37 +4730,94 @@ def other_install_stop(p, cmd):
             f"this {cmd} would use {p['data']}. Nothing was changed. The one next step, to run as printed: {step}")
 
 
+def path_there(path):
+    """True, False (read, and not there) or None (the read failed): M144's three answers. A read that failed is never
+    taken for "not there"."""
+    try:
+        os.stat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+
+
+def tool_copy(p):
+    """M144 (G6.12): the copy of the tool a printed command names. The skill's own copy while it is there, or while
+    whether it is there could not be read (every line as before); once it is read gone (uninstall takes it), the
+    copy that is running, when that is read there (the clone, or the plugin's folder); None when neither is."""
+    if path_there(p["script"]) is not False:
+        return p["script"]
+    here = os.path.abspath(__file__)
+    return here if here != p["script"] and path_there(here) is True else None
+
+
 def own_command(p, *args):
-    """G6.12 (M60): a command for the person to run, with this skill's own copy, as it runs when pasted whole into a
-    shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
-    return " ".join(["python3", "-I", shlex.quote(p["script"]), *args])
+    """G6.12 (M60, M144): a command for the person to run, with a copy of this skill that is there (tool_copy), as it
+    runs when pasted whole into a shell: the path is quoted (on a Mac it holds a space, 'Application Support')."""
+    return " ".join(["python3", "-I", shlex.quote(tool_copy(p) or p["script"]), *args])
 
 
-def plugin_registry_for(here):
+def plugin_place(here):
     """Claude Code keeps an installed plugin in <its folder>/plugins/cache/<catalog>/<plugin>/<version>/, and its
-    list of installed plugins in <its folder>/plugins/installed_plugins.json. None when `here` is not in such a
-    folder (a clone, or the copy setup made)."""
+    list of installed plugins in <its folder>/plugins/installed_plugins.json. (that list's path, the catalog's name)
+    when `here` is inside such a folder of this plugin; (None, None) otherwise (a clone, or the copy setup made)."""
     parts = os.path.abspath(here).split(os.sep)
     for i in range(len(parts) - 3, 0, -1):
         if parts[i] == "cache" and parts[i - 1] == "plugins" and parts[i + 2] == PLUGIN:
-            return os.sep.join(parts[:i] + ["installed_plugins.json"])
-    return None
+            return os.sep.join(parts[:i] + ["installed_plugins.json"]), parts[i + 1]
+    return None, None
 
 
-def plugin_removed(st):
-    """G9.6: True only when Claude Code's list of installed plugins, the one setup was run from, was READ and names
-    this plugin nowhere. A list that could not be read is never taken for 'removed' (a failed read is not a no)."""
-    reg = st.get("plugin_registry")
+def plugin_registry_for(here):
+    return plugin_place(here)[0]
+
+
+def plugin_record(st):
+    """G9.14 (M104, the family's rule 29 (e)): (the list's path, the catalog's name) as the record keeps them. A
+    record an earlier build wrote kept the plugin's version folder as setup_from; both are read from that path then,
+    and the path itself is never said."""
+    old = plugin_place(os.path.join(st["setup_from"], "scripts", "mirror.py")) if st.get("setup_from") else (None, None)
+    return st.get("plugin_registry") or old[0], st.get("plugin_catalog") or old[1]
+
+
+def plugin_read(st):
+    """G9.6 and G9.14: what Claude Code's list of installed plugins, the one setup was run from, says of this plugin:
+    (True, the list's own name for it, <plugin>@<catalog>) read, and it names it; (False, None) read, and it names it
+    nowhere; (None, None) there is no such list in the record, or it could not be read, or it is not on this
+    computer at all (a record brought from another computer): a failed read is not a no."""
+    reg = plugin_record(st)[0]
     if not reg:
-        return False
+        return None, None
     try:
         with open(reg, encoding="utf-8") as f:
             rows = json.load(f)["plugins"]
     except (OSError, ValueError, KeyError, TypeError):
-        return False
+        return None, None
     if not isinstance(rows, dict):
-        return False
-    return not any(k.split("@")[0] == PLUGIN and v for k, v in rows.items())
+        return None, None
+    ours = sorted((k, v) for k, v in rows.items() if isinstance(k, str) and k.split("@")[0] == PLUGIN)
+    if not ours:
+        return False, None
+    # The family's rule 29 (e), as seen 2026-11-24 (Claude Code 2.1.331): an install or an update leaves one row
+    # with its installPath; an uninstall takes the key away. A key whose list is empty, or a row with no
+    # installPath, was never seen: it is "could not be read", never "removed" and never "installed".
+    for k, v in ours:
+        if isinstance(v, list) and v and all(isinstance(r, dict) and isinstance(r.get("installPath"), str)
+                                             and r["installPath"] for r in v):
+            return True, k
+    return None, None
+
+
+def plugin_listed(st):
+    """True, False or None, as plugin_read says."""
+    return plugin_read(st)[0]
+
+
+def plugin_removed(st):
+    """G9.6: True only when Claude Code's list of installed plugins was READ and names this plugin nowhere. A list
+    that could not be read is never taken for 'removed'."""
+    return plugin_listed(st) is False
 
 
 def set_aside_folder(here):
@@ -2381,7 +4866,14 @@ def take_made_folders(st, removed):
             pass
 
 
-def setup_plan(p, st):
+def no_password_line(p, name):
+    """M175 (G6.34): the person's Gitea account is there from before and the skill holds no password for it."""
+    return (f"Your Gitea account '{name}' is there from before: setup did not change it or its password, and the "
+            "skill holds no password for it. If you do not know its password, the one step: "
+            f"{own_command(p, 'setup', '--new-password')} (a password you set for it yourself then stops working).")
+
+
+def setup_plan(p, st, new_password=False):
     plan = []
     made = folders_setup_makes(p)
     if made:
@@ -2397,17 +4889,33 @@ def setup_plan(p, st):
     if not st.get("person"):
         plan.append(f"make your Gitea account '{person_name()}' (administrator) and save its first password in "
                     f"{p['password']}, readable by you only")
+    elif new_password:
+        plan.append(f"give your Gitea account '{st['person']}' a new password, kept in {p['password']}, readable by "
+                    "you only; a password you set for it yourself stops working")
     elif not os.path.exists(p["password"]):
         plan.append(f"leave your Gitea account '{st['person']}' as it is, from before: setup does not change it or "
-                    "its password")
+                    "its password, and the skill holds no password for it; if you do not know its password, the one "
+                    f"step: {own_command(p, 'setup', '--new-password')}")
     if not st.get("mirror_user"):
         plan.append(f"make the '{MIRROR_USER}' account that owns the copies, with a key of its own in "
                     f"{p['mirror_key']}, readable by you only")
     elif not os.path.exists(p["mirror_key"]):
         plan.append(f"give the '{st['mirror_user']}' account that owns the copies a new key of its own in "
                     f"{p['mirror_key']}, readable by you only (its key went with uninstall)")
+    else:
+        # M156 (G6.23), its second case: the dry run names the write-over setup makes of a
+        # kept key that could not be read (seen 2026-11-26 in a made home: at mode 000, the dry run said nothing)
+        answer, why = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
+        if answer == "could not be read":
+            plan.append(f"give the '{st['mirror_user']}' account that owns the copies a new key of its own in "
+                        f"{p['mirror_key']}, readable by you only, in place of the key file there now, which could not "
+                        f"be read: {why}; that file is written over")
     plan.append(f"copy this script to {p['script']}")
-    if system()[0] == "darwin":
+    if system()[0] == "darwin" and mac_no_screen():                    # M143: a step that works there
+        plan.append("install the forge as your own service (a launch agent), which cannot start now: this account is "
+                    "not logged in at this Mac's screen, and on a Mac the forge starts only in a login session at the "
+                    "screen. Setup would stop there; log in to this account at this Mac's screen, then run setup")
+    elif system()[0] == "darwin":
         plan.append("install the forge as your own service (a launch agent) and start it")
     else:
         base = os.path.dirname(p["unit"])
@@ -2417,20 +4925,102 @@ def setup_plan(p, st):
     return plan
 
 
+def own_forge_running(p):
+    """True when a process of this account runs this mirror's forge binary on this folder; None when that could not
+    be read (taken as yes: setup then moves nothing)."""
+    me = os.getuid()
+    if system()[0] == "darwin":
+        try:
+            out = subprocess.run(["ps", "-ww", "-x", "-U", str(me), "-o", "args="], capture_output=True, text=True,
+                                 timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode != 0:
+            return None
+        return any(f"--config {p['app_ini']}" in x and os.path.dirname(p["bin"]) + "/gitea-" in x
+                   for x in lines_of(out.stdout))
+    try:
+        pids = [x for x in os.listdir("/proc") if x.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        try:
+            uid, exe, args = linux_proc(pid)
+        except DoorUnread:
+            continue
+        if uid == me and our_forge(p, exe, args):
+            return True
+    return False
+
+
+def move_forge_port(p, st):
+    """G8.7 (the owner's condition 5): the forge's port moves only on a certain "other", after its service is
+    stopped and no process of this account runs this forge's binary on this folder. Two forges on one data folder
+    are worse than a mirror that stands, so otherwise nothing moves and it is said. 0 when moved."""
+    old = st["port"]
+    service(p, "stop")
+    if own_forge_running(p) is not False:
+        say(f"problem: another program holds the forge's port 127.0.0.1:{old}, and this mirror's own forge may "
+            "still run on its folder, so setup did not move it: two forges on one folder would harm the copies. "
+            "Nothing else was changed. Run setup again in a minute.")
+        return 1
+    port = free_port()
+    with open(p["app_ini"], encoding="utf-8") as fh:
+        ini = fh.read()
+    ini = re.sub(r"^HTTP_PORT\s*=.*$", f"HTTP_PORT = {port}", ini, flags=re.M)
+    ini = re.sub(r"^ROOT_URL\s*=.*$", f"ROOT_URL = http://127.0.0.1:{port}/", ini, flags=re.M)
+    write_file(p["app_ini"], ini, 0o600)
+    st["port"] = port
+    save_state(p, st)
+    say(f"The forge's address changed: another program holds 127.0.0.1:{old}, so the forge moves to "
+        f"http://127.0.0.1:{port}/. Every copy stays.")
+    return 0
+
+
 def cmd_setup(args):
     p = paths()
-    other = other_install_stop(p, "setup") or home_is_not_ours(p)
+    # G8.7 (the owner's ruling: a floor is checked, not only named): before setup makes anything, it makes a
+    # listener of its own for a moment and reads who holds it. A computer that does not say makes nothing here, so
+    # no one finishes setup and then finds every sync stopped.
+    floor = door_floor()
+    if floor:
+        say(floor + " Setup made nothing.")
+        return 2
+    if os.path.isdir(p["mirror_key"]) and not os.path.islink(p["mirror_key"]):
+        # M156 (G6.23): a folder where the forge's key belongs is never written into or removed by setup
+        say(f"Stopped: {p['mirror_key']} is a folder, where the '{MIRROR_USER}' account's key file belongs, so setup "
+            f"cannot keep its key there. Nothing was changed. The one next step: move that folder out of "
+            f"{os.path.dirname(p['mirror_key'])} (into a folder of your own, to keep it), then run setup again: "
+            f"{own_command(p, 'setup')}")
+        return 2
+    pw_answer, pw_why = key_file_read(p["password"])
+    if pw_answer == "could not be read":
+        # M175 (G6.34): the kept password of the person's Gitea account is never written over on a read that failed,
+        # with or without --new-password
+        # (a folder of the skill's that cannot be entered stopped every command before this, at its floor)
+        say(f"Stopped: the password file of your Gitea account, {p['password']}, could not be read: {pw_why}. Setup "
+            "changed nothing, and never writes over that file. The one next step: move that file out of "
+            f"{os.path.dirname(p['password'])} (into a folder of your own, to keep it), then run the same command "
+            "again")
+        return 2
+    bus = bus_floor(p)                              # G1.24: the read-back's road, before the first write
+    if bus:
+        say(bus)
+        return 2
+    other = other_install_stop(p, "setup") or home_is_not_ours(p, getattr(args, "use_this_folder", False),
+                                                                args.dry_run)
     if other:
         say(other)
         return 2
     if getattr(args, "from_file", None):
+        take_on_now()
         return setup_from(p, args)
-    have = load_json(p["state"], {}).get("gitea")
+    have = load_state(p).get("gitea")
     if have and have != GITEA_VERSION:
         say(f"This forge runs Gitea {have}, and this release of the skill pins {GITEA_VERSION}. Setup does not move "
             "the forge: run upgrade-forge, which makes a backup first. Nothing was changed.")
         return 2
-    st = load_json(p["state"], {})
+    st = load_state(p)
     allow = not getattr(args, "no_linger", False)
     if not shutil.which("git"):
         say(git_missing_sentence() + " Nothing was changed.")
@@ -2439,7 +5029,8 @@ def cmd_setup(args):
     if far:
         say(far)
         return 2
-    plan = setup_plan(p, st)
+    new_password = getattr(args, "new_password", False)
+    plan = setup_plan(p, st, new_password)
     if args.dry_run:
         back, note = (comes_back_by_itself(dry=True) if system()[0] == "darwin"
                       else linger_step(None, dry=True, allow=allow))
@@ -2452,6 +5043,17 @@ def cmd_setup(args):
         tell([f"After a restart: {linger_step(None, dry=True)[1]}"])
         say(LINGER_CHOICE)
         return 2
+    if not os.path.exists(p["app_ini"]) and st.get("port"):
+        # M159 (the owner's limit (3), 11-26): the forge's settings file is written new and the forge started again
+        # only while no sync uses the forge: setup holds the sync's own lock across the write and the start again
+        ok, _ = take_lock(p)
+        if not ok:
+            say(f"Not now: a sync is running (process {lock_holder(p)}), and setup writes the forge's settings file "
+                "new and starts the forge again with it only while no sync is using the forge. Nothing was changed. "
+                f"The one next step: run setup again when the sync has ended: {own_command(p, 'setup')}")
+            return 3
+        _setup_held[0] = True
+    take_on_now()
     made = folders_setup_makes(p)
     os.makedirs(p["data"], mode=0o700, exist_ok=True)
     os.makedirs(p["conf"], mode=0o700, exist_ok=True)
@@ -2462,11 +5064,28 @@ def cmd_setup(args):
     else:
         say(f"Gitea {GITEA_VERSION} already here; checksum matches the pin.")
     claim(p["forge"], "tree:forge")
-    if not os.path.exists(p["app_ini"]):
-        port = free_port()
+    fresh_ini = not os.path.exists(p["app_ini"])
+    if fresh_ini:
+        # M159 (G6.26): a settings file written anew keeps the forge's address where its port is free or the forge's
+        # own (a forge still running from the file as it was), and the line says which
+        old = st.get("port") if isinstance(st.get("port"), int) and PORT_FLOOR <= st.get("port") < 65536 else None
+        keep = old and (port_is_free(old) or door(p, old) == "mine")
+        port = old if keep else free_port()
         write_file(p["app_ini"], app_ini(p, port), 0o600)
+        if old:
+            say(f"The forge's settings file {p['app_ini']} is written new; the forge "
+                + (f"keeps its address, http://127.0.0.1:{port}/." if keep else
+                   f"has a new address, http://127.0.0.1:{port}/, since {old} is taken now."))
         st["port"] = port
     st.setdefault("port", int(ini_value(p["app_ini"], "server", "HTTP_PORT") or 0))
+    try:
+        door(p, st["port"], fresh=True, again="setup")
+    except DoorShut as e:
+        if e.kind != "other":
+            say(str(e))
+            return 1
+        if move_forge_port(p, st):
+            return 1
     for d in ("data", "log", "custom/conf"):
         os.makedirs(os.path.join(p["forge"], d), exist_ok=True)
     out = gitea(p, "migrate")
@@ -2474,20 +5093,32 @@ def cmd_setup(args):
         raise SystemExit(f"Gitea could not prepare its database: {last_line(out.stderr)}. Run setup again; if it "
                          "stops here again, Gitea's words above are the reason.")
     users = forge_users(p)
+    give_password = pw_said = None
     if not st.get("person"):
         name = person_name()
         if name not in users:
             write_private(p["password"], create_user(p, name, admin=True) + "\n")
             say(f"Your Gitea account '{name}' is made. Its first password is in {p['password']} (readable by you "
                 "only).")
-        else:
+        elif not os.path.exists(p["password"]) and not new_password:
+            pw_said = no_password_line(p, name)           # M175: among setup's last lines, below
+        elif not new_password:
             say(f"Your Gitea account '{name}' is there from before: setup did not change it or its password.")
+        else:
+            give_password = name
         st["person"] = name
+    elif new_password:
+        give_password = st["person"]
     elif not os.path.exists(p["password"]):
-        say(f"Your Gitea account '{st['person']}' is there from before: setup did not change it or its password.")
+        pw_said = no_password_line(p, st["person"])       # M175: among setup's last lines, below
     # M84: the key is made whenever its file is missing (after an uninstall that kept the copies, or a cut one), under
     # a name of its own, since Gitea refuses a key name the account already holds.
-    if not st.get("mirror_user") or not os.path.exists(p["mirror_key"]):
+    key_answer, key_why = key_file_read(p["mirror_key"], FORGE_KEY_FORM)
+    if not st.get("mirror_user") or key_answer != "read":
+        # M156 (G6.23): a kept key that could not be read is made whole again from the forge, and said
+        if key_answer == "could not be read":
+            say(f"The '{MIRROR_USER}' account's key file {p['mirror_key']} could not be read: {key_why}. Setup gives "
+                "the account a new key in its place.")
         had = MIRROR_USER in users
         if not had:
             create_user(p, MIRROR_USER, admin=False)
@@ -2503,18 +5134,21 @@ def cmd_setup(args):
             f" in {p['mirror_key']}.")
     here = os.path.abspath(__file__)
     if os.path.abspath(p["script"]) != here:
-        shutil.copyfile(here, p["script"] + ".tmp")
-        os.replace(p["script"] + ".tmp", p["script"])
-        claim(p["script"])
-    if plugin_registry_for(here):
-        st["plugin_registry"] = plugin_registry_for(here)
+        copy_whole(here, p["script"])
     if os.path.abspath(p["script"]) != here:
         # G9.8 (M63): where the skill was downloaded to, so that uninstall can name it as still here. Setup run again
-        # from its own copy keeps the record.
-        kind, where = downloaded_from(here)
+        # from its own copy keeps the record. G9.14 (the family's rule 29 (e)): Claude Code's plugin is kept by
+        # Claude Code's own list and the plugin's name alone, never by its version folder, which Claude Code
+        # replaces at each update and removes later.
         st.pop("setup_from", None)
         st.pop("setup_from_file", None)
-        st["setup_from" if kind == "folder" else "setup_from_file"] = where
+        st.pop("plugin_registry", None)
+        st.pop("plugin_catalog", None)
+        if plugin_registry_for(here):
+            st["plugin_registry"], st["plugin_catalog"] = plugin_place(here)
+        else:
+            kind, where = downloaded_from(here)
+            st["setup_from" if kind == "folder" else "setup_from_file"] = where
     st.update(version=VERSION, gitea=GITEA_VERSION)
     save_state(p, st)
     missing = set_up_misses(p, st)
@@ -2522,15 +5156,36 @@ def cmd_setup(args):
         say(f"Setup did not finish: {missing} is not in place, so the other commands would say \"Run setup first.\" "
             "Nothing was started. Run setup again; if it stops here again, open an issue with this line.")
         return 1
-    ok, why = install_service(p)
-    if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
-        ok, why = False, "the sync timer could not be switched on"
+    ok, why = install_service(p, restart=fresh_ini)
+    timer_why = install_timer(p, int(setting(load_settings(p), "interval_min")))[1] if ok else ""
+    shut = None
+    if ok:
+        try:
+            up = wait_forge(p, st["port"], seconds=SETUP_WAIT, again="setup")
+        except DoorShut as e:
+            up, shut = False, str(e)
     if not ok:
         say(f"The forge's service did not start: {why}")
-    elif wait_forge(st["port"], seconds=SETUP_WAIT):
+    elif shut:
+        ok = False
+        say(shut)
+    elif up:
         say(f"The forge runs as your own service on http://127.0.0.1:{st['port']}/ (this computer only).")
     else:
         say(not_answering_yet(p, st["port"], SETUP_WAIT))
+    if give_password:
+        said, given = new_forge_password(p, st, give_password) if ok and up else (
+            f"Your Gitea account '{give_password}' was not given a new password: the forge did not answer. Run the "
+            f"same command again once it does: {own_command(p, 'setup', '--new-password')}", False)
+        say(said)
+        ok = ok and given
+    if timer_why:                                   # G1.17: the forge's own line stands; the sync's is its own
+        ok = False
+        say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
+    elif ok:                                        # G1.24: a person's own entry is theirs, a warning
+        warn = theirs_line(p)                       # read once, and what is said is what was read
+        if warn:
+            say(warn)
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
@@ -2542,7 +5197,7 @@ def cmd_setup(args):
         save_state(p, st)
     # G10.6: no block here. An agent goes straight on after setup and its block was lost in a cold start; what the
     # person must hear before the go is in the announcement's block, the one they say go to.
-    for line in ("After a restart it starts by itself." if back and ok else "", note,
+    for line in (pw_said, "After a restart it starts by itself." if back and ok else "", note,
                  lfs_missing() if not has_git_lfs() else "",
                  *open_folders(p, close=True), PRIVATE_AS_THIS_COMPUTER):
         if line:
@@ -2560,12 +5215,14 @@ def copy_state(rec, forge_refs, max_age):
     if rec.get("copying_since"):
         return False, f"a copy was stopped part-way at {rec['copying_since']}; the next sync does it again"
     if rec.get("problem"):              # the reason, and since when the copy stands still (never "current")
-        return False, rec["problem"] + (f"; not refreshed since {rec['last_good']}" if rec.get("last_good") else "")
+        return False, (f"not refreshed since {rec['last_good']}; " if rec.get("last_good") else "") + rec["problem"]
     if not rec.get("last_good"):
         return False, "never copied yet"
     if time.time() - epoch_of(rec["last_good"]) > max_age:
         return False, f"last good refresh {rec['last_good']}, older than twice the sync interval"
-    held = {r: s for r, s in (forge_refs or {}).items() if not r.startswith("refs/heads/kept/")}
+    held = {written(r): s for r, s in (forge_refs or {}).items() if not r.startswith("refs/heads/kept/")}
+    if rec.get("left_out") and held == {r: s for r, s in (rec.get("refs") or {}).items() if not written_not_text(r)}:
+        return False, not_text_line(rec["left_out"])        # M120: true, and said once; behind, never "not refreshed"
     if held != (rec.get("refs") or {}):
         return False, "the copy's branches and tags differ from what GitHub last showed"
     return True, ""
@@ -2575,7 +5232,7 @@ def forge_refs_of(forge, name):
     out = forge_call(forge, None, "ls-remote", f"{forge.base}/{forge.user}/{name}.git", timeout=60)
     if out.returncode != 0:
         return None
-    return {r: s for s, r in (line.split("\t", 1) for line in out.stdout.splitlines() if "\t" in line)
+    return {r: s for s, r in (line.split("\t", 1) for line in lines_of(out.stdout) if "\t" in line)
             if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
 
 
@@ -2584,11 +5241,9 @@ def key_scan(p, st):
     equal to one the skill holds. Returns (files read, [paths where one was found]). The key files are skipped."""
     known = set(SECRETS)
     for path in [p["mirror_key"]] + [os.path.join(p["keys"], f) for f in (os.listdir(p["keys"]) if os.path.isdir(p["keys"]) else [])]:
-        try:
-            with open(path, encoding="utf-8") as f:
-                known.add(secret(f.read().strip()))
-        except OSError:
-            pass
+        answer, key = key_file_read(path)       # M155: a key file that could not be read is said by status itself
+        if answer == "read":
+            known.add(key)
     known.discard("")
     skip = {os.path.realpath(p["mirror_key"]), os.path.realpath(p["password"])}
     if os.path.isdir(p["keys"]):
@@ -2659,11 +5314,11 @@ def release_check(st, force=False):
         return [f"newer release: not known (GitHub gave {rc['error']}; it is asked again tomorrow)"]
     lines = []
     if rc.get("tag") and vt(rc["tag"]) > vt(VERSION):
-        lines.append(f"newer release of this skill: {rc['tag']} (this is {VERSION}); `self-update` is your choice")
+        lines.append(f"newer release of this skill: {rc['tag']} (this is {VERSION}); self-update is your choice")
     if rc.get("gitea") and vt(rc["gitea"]) > vt(GITEA_VERSION):
         lines.append(f"that release pins Gitea {rc['gitea']} (this forge runs {GITEA_VERSION})"
                      + (", and names it a SECURITY FIX" if rc.get("security") else "")
-                     + "; `self-update` then `upgrade-forge` is your choice. Nothing was changed.")
+                     + "; self-update then upgrade-forge is your choice. Nothing was changed.")
     return lines or [f"newer release: none (latest {rc.get('tag') or 'none'})"]
 
 
@@ -2710,9 +5365,9 @@ EXPOSE_TEXT = """The forge listens on 127.0.0.1 only: no other computer can reac
 Opening it to other computers is your own choice and your own step. What it would mean:
 - Anyone who can reach it can try to sign in. Its accounts and every copy are then guarded by passwords and keys
   alone, and a forge open to the internet is found and tried within hours.
-- Gitea's updates become urgent: a security fix matters the day it is out (`status` says when one is pinned).
+- Gitea's updates become urgent: a security fix matters the day it is out (status says when one is pinned).
 - The usual roads are a private network of your own devices (a VPN), or a reverse proxy with TLS in front of
-  it. Both are outside this skill, and `status` reports the forge as reachable from outside each time it runs.
+  it. Both are outside this skill, and status reports the forge as reachable from outside each time it runs.
 Nothing was changed."""
 
 
@@ -2725,23 +5380,56 @@ def cmd_expose(args):
 def cmd_status(args):
     """G6: one line per problem, then the count of copies, then the forge, the keys, the disk and the syncs."""
     p = paths()
-    st = load_json(p["state"], {})
-    s = load_json(p["settings"], {})
+    try:
+        st = load_state(p)
+        s = load_settings(p)
+    except KeptUnread as e:          # M151, M154, M157: a problem line, with its one step; nothing else is read
+        say(f"problem: {e.path} {e.said}. The one next step: {kept_step(p, e)}.")
+        return 1
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
-    forge = Forge(p, st)
+    try:
+        answer, why = forge_ini_read(p)
+        if answer == "could not be read":
+            raise KeptUnread(p["app_ini"], why)
+        forge = Forge(p, st)
+    except KeptUnread as e:          # M155, M156, M159: the forge's key or settings, said with its one step
+        say(f"problem: {e.path} {e.said}. The one next step: {kept_step(p, e)}.")
+        return 1
     problems, notes = [], []
+    lost = read_made(p)[1]
+    if lost:                    # M158 (G6.25): said as that, never as another's files
+        problems.append(f"{lost}, so the tool cannot tell which files in its folders it made: setup and uninstall "
+                        "take nothing from them while it is so. The one next step: run "
+                        f"{own_command(p, 'setup')}, which says what this means and what is yours to choose")
+    for owner in sorted((s.get("owners") or {})):
+        kp = key_path(p, owner)
+        answer, why = key_file_read(kp)
+        if answer == "could not be read":
+            problems.append(key_unread_line(p, owner, kp, why))
     if not shutil.which("git"):
         problems.append("git is not installed on this computer, so no copy can refresh until it is")
     problems += open_folders(p)                     # rule 28: said again each time, until it is closed
-    code, ver = forge.call("GET", "/version")
-    up = code == 200
-    if not up:
-        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}")
+    try:
+        code, ver = forge.call("GET", "/version")
+        shut = shut_kind = None
+    except DoorShut as e:                           # G8.7: said in its one line, and nothing sent to that port
+        code, ver, shut, shut_kind = 0, None, str(e)[len("problem: "):], e.kind
+    up = code == 200                                # the door read mine AND the forge answered
+    no_screen = not up and not shut and mac_no_screen()     # M143: the cause is read, never guessed
+    if shut:
+        problems.append(shut)
+    elif no_screen:
+        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}: {forge_no_screen(p)}")
+    elif not up:
+        # M105 (the family's rule 7): the problem line ends with its one step. Setup starts the forge again and keeps
+        # every copy, or stops with its own reason (seen 2026-11-24 with the service's python3 taken away).
+        problems.append(f"the forge does not answer on 127.0.0.1:{st['port']}; run setup again, which starts it and "
+                        f"keeps every copy: {own_command(p, 'setup')}")
     elif (ver or {}).get("version") != GITEA_VERSION:
         problems.append(f"the forge runs Gitea {(ver or {}).get('version')}, and this release pins {GITEA_VERSION}"
-                        + ("; `upgrade-forge` moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
+                        + ("; upgrade-forge moves it, with a backup first" if vt((ver or {}).get("version")) < vt(GITEA_VERSION) else ""))
     max_age = 2 * setting(s, "interval_min") * 60
     on_gh = copied = behind = unreadable = no_lfs = 0
     for gid, rec in sorted((st.get("repos") or {}).items(), key=lambda x: (x[1].get("full_name") or "").lower()):
@@ -2759,7 +5447,8 @@ def cmd_status(args):
         refs = forge_refs_of(forge, cur["name"]) if cur else None
         if rec.get("last_good") and refs is None:
             unreadable += 1
-            problems.append(f"{name}: its copy could not be read from the forge")
+            if not shut:                            # G8.7: one line says why no copy was read; not one per copy
+                problems.append(f"{name}: its copy could not be read from the forge")
             continue
         ok, why = copy_state(rec, refs, max_age)
         if not ok:
@@ -2778,7 +5467,7 @@ def cmd_status(args):
         left = (when - time.time()) / 86400
         if left < 14:
             problems.append(f"the key for {owner} expires {exp}" + (" (it has expired)" if left < 0 else
-                            f", in {int(left)} day(s): make a new one, then `key set {owner}`"))
+                            f", in {int(left)} day(s): make a new one, then run key set {owner}"))
         notes.append(f"key for {owner}: expires {exp}")
     free_mb = shutil.disk_usage(p["data"]).free // (1024 * 1024)
     floor_mb = setting(s, "disk_floor_mb")
@@ -2787,10 +5476,41 @@ def cmd_status(args):
     addrs = own_addresses()
     outside = answers_on(addrs, st["port"])
     for a in outside:
-        problems.append(f"the forge answers on {a}, not only on 127.0.0.1: other computers may reach it")
+        # "the forge" is what answers only when the door read mine and the forge answered: then every listener on
+        # the port is ours (the owner's ruling, 11-24: the subject of the sentence is what was read)
+        problems.append(f"the forge answers on {a}, not only on 127.0.0.1: other computers may reach it" if up else
+                        f"a program answers on port {st['port']} at {a}, and it is not this mirror's forge as far as "
+                        "this computer says" if shut_kind == "other" else
+                        f"a program answers on port {st['port']} at {a}; whether it is this mirror's forge could not "
+                        "be read")
+    rec_s = read_made(p)[0]
+    for f in service_files(p):                      # M150: a service file whose bytes could not be read, any road
+        if os.path.lexists(f) and service_file_state(p, rec_s, f)[0] == "could not be read":
+            problems.append(f"the service file {f} could not be read: {service_file_state(p, rec_s, f)[1]}, so this "
+                            "tool cannot tell whether it is as setup wrote it, and never writes over it or removes it. "
+                            f"The one next step: move that file out of {os.path.dirname(f)} (into a folder of your "
+                            f"own, to keep it), then run {own_command(p, 'setup')}")
+    if not no_screen:                               # G1.24: what the manager parsed, read now
+        reads = {which: service_read(p, which) for which in ("forge", "sync")}     # each read once
+        for which, (held, _, parts) in reads.items():
+            if held in ("differs", "unread", "unrecorded"):
+                problems.append(read_back_words(which, held, not_set_up(held), read_back_step(which, held, "status"),
+                                                parts))
+            elif held == "absent" and system()[0] == "darwin":
+                # M150: the job's file, read by the one reader when launchd holds no job; one line, never a traceback
+                f = p["plist"] if which == "forge" else os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist")
+                answer, why = plist_job_args(f)
+                if answer == "could not be read" and not any(f in x for x in problems):
+                    problems.append(f"the {which}'s launch agent file {f} could not be read: {why}, so this tool "
+                                    "cannot tell whose it is, and launchd holds no job for it now. The one next step: "
+                                    f"move that file out of {os.path.dirname(f)} (into a folder of your own, to keep "
+                                    f"it), then run {own_command(p, 'setup')}")
+        warn = theirs_line(p, reads)
+        if warn:
+            notes.append("note: " + warn)
     when, tproblem = next_sync()
     if tproblem:
-        problems.append(tproblem)
+        problems.append(tproblem + (": this account is not logged in at this Mac's screen" if no_screen else ""))
     n, found = key_scan(p, st)
     if n == 0:
         problems.append("the key scan read no files, so it proves nothing")
@@ -2807,23 +5527,38 @@ def cmd_status(args):
     say(f"copies: {on_gh} on GitHub, {copied} copied, {behind} behind, {unreadable} unreadable"
         + (f", {no_lfs} without its large files" if no_lfs else ""))
     say(f"first copy: made on {local_time(st['go'])}, on your go" if st.get("go") else
+        "first copy: waiting for your go, which can be given once the forge answers (see the problem above)"
+        if no_screen else
         "first copy: waiting for your go: in a terminal window of your own, run " + own_command(p, "go")
         + " (it shows what will be copied and waits for your Enter); a sync then starts it")
     for x in notes:
         say(x)
-    say(f"forge: Gitea {(ver or {}).get('version') if up else '(not answering)'} on http://127.0.0.1:{st['port']}/ "
-        f"(pinned {GITEA_VERSION})")
+    said_ver = ((ver or {}).get("version") if up else "(not asked: another program answers on its port)"
+                if shut_kind == "other" else "(not asked: who holds its port could not be read)" if shut_kind else
+                "(not answering)")
+    say(f"forge: Gitea {said_ver} on http://127.0.0.1:{st['port']}/ (pinned {GITEA_VERSION})")
     say(f"disk: {free_mb} MB free (floor {floor_mb} MB)")
     others = [a for a in addrs if not (a == "::1" or a.startswith("127."))]
-    say(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es) of this computer)"
-        if not outside else f"network: the forge answers on {', '.join(outside)} too")
+    if up:
+        say(f"network: the forge answers on 127.0.0.1 only (tried {len(others)} other address(es) of this computer)"
+            if not outside else f"network: the forge answers on {', '.join(outside)} too")
+    else:
+        say(f"network: the forge was not reached, so where it answers was not checked (nothing answers on this port "
+            f"at the {len(others)} other address(es) of this computer)" if not outside else
+            f"network: the forge was not reached; a program answers on this port at {', '.join(outside)}")
     last = st.get("last_sync") or {}
     say(f"last good sync: {st.get('last_good_sync') or 'none yet'}")
     if last:
         say(f"last sync: {last.get('at')}, {last.get('copied', 0)} copied, {last.get('unchanged', 0)} unchanged, "
             f"{last.get('problems', 0)} problem(s), {last.get('calls', 0)} GitHub API call(s)"
             + (f"; stopped: {last['stopped']}" if last.get("stopped") else ""))
-    say(f"next sync: {when}" if not tproblem else "next sync: none (see the problem above)")
+    if tproblem:
+        say("next sync: none (see the problem above)")
+    elif not up:                                    # M105: a time is not a promise while the forge does not answer
+        say(f"next sync: {when if system()[0] == 'darwin' else 'will be tried at ' + when}; it cannot work until "
+            "the forge answers")
+    else:
+        say(f"next sync: {when}")
     say(f"key scan: {n} file(s) read, " + (f"{len(found)} with a key in them" if found else "no key found"))
     for x in rel:
         say(x)
@@ -2865,10 +5600,15 @@ def clone_copy(forge, name, into):
 
 def cmd_restore(args):
     p = paths()
-    st = load_json(p["state"], {})
+    st = load_state(p)
     if set_up_misses(p, st):
         say("Run setup first.")
         return 2
+    try:
+        door(p, st["port"], fresh=True, again="restore --check" if args.check else "status")
+    except DoorShut as e:
+        say(str(e))
+        return 1
     forge = Forge(p, st)
     if args.to:
         return restore_to(p, st, forge, args.to, args.repository)
@@ -2907,13 +5647,15 @@ def cmd_restore(args):
                 diffs.append(f"{name}: {why}")
                 continue
             mine = 0
-            have = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
-            seen = rec.get("seen_refs") or rec.get("refs") or {}
+            have = {written(r): s for r, s in refs_under(into, "refs/heads", "refs/tags").items()
+                    if not r.startswith("refs/heads/kept/")}
+            seen = last_seen_list(rec) or {}                               # written(): the state's one form
             for ref in sorted(set(have) | set(seen)):
                 if have.get(ref) != seen.get(ref):
                     mine += 1
-                    diffs.append(f"{name}: {ref} is {(have.get(ref) or 'missing')[:12]} in the copy, "
-                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen")
+                    said, note = shown_one(ref)
+                    diffs.append(f"{name}: {said} is {(have.get(ref) or 'missing')[:12]} in the copy, "
+                                 f"{(seen.get(ref) or 'missing')[:12]} when GitHub was last seen{note}")
             out = git(into, "fsck", "--no-progress", "--no-dangling")
             if out.returncode != 0:
                 mine += 1
@@ -2937,18 +5679,48 @@ def github_hosts():
     return hosts
 
 
+def last_seen_list(rec):
+    """M135: GitHub's list of branches and tags as the sync last read it, as restore --check reads it (written(): the
+    state's one form); None when the record holds no list at all (rule 6: never taken as none)."""
+    if not isinstance(rec.get("seen_refs"), dict) and not isinstance(rec.get("refs"), dict):
+        return None
+    return rec.get("seen_refs") or rec.get("refs") or {}
+
+
 def restore_to(p, st, forge, url, repository):
     """G7.3: one copy, every branch and tag, into a new home the person names; never GitHub (INV1)."""
     if not repository:
         say("Name the repository: restore --to <url> <owner/name>.")
         return 2
+    # M132 (family rule 31(B), a reviewer's world 20, 11-25): the --to value and the project's name are typed by a
+    # person or their agent and passed on; each line shows them through the shown form, and no command carries one
+    # that this tool does not print as it is. The restore itself uses them as they are.
+    to, who = shown_as_is(url), shown_as_is(repository)
+    note = "" if shows_as_is(url) and shows_as_is(repository) else f" ({SHOWN_CHANGED})"
     low = url.lower()
     host = (urllib.parse.urlsplit(url).hostname or re.sub(r"^[^@]*@([^:/]+).*$", r"\1", url)).lower()
     if any(h == host or host.endswith("." + h) for h in github_hosts()) or "github.com" in low:
+        if not shows_as_is(url):
+            say("This skill never writes to GitHub, so it will not restore there. The address given holds a character "
+                f"this tool does not print as it is ({to}; {SHOWN_CHANGED}), so no line is given to put it back there "
+                "yourself. Make the new, empty repository on GitHub, then run restore --to again with its address.")
+            return 2
+        # M132: one line a person runs as it is printed: the copy's own folder in the forge is on this computer, so
+        # git needs no login to the forge; each part through shlex.quote, and none from a name it does not print.
+        folder = forge_folder(p, forge, copy_name(repository)) if "/" in repository else ""
+        if not folder or not shows_as_is(folder):
+            say("This skill never writes to GitHub, so it will not restore there. "
+                + ("The copy's own folder in your forge could not be found" if not folder else
+                   "The copy's folder holds a character this tool does not print as it is")
+                + ", so no line is given to put it back there yourself. Run status to see the copies the forge holds, "
+                  "and name one of them as owner/name.")
+            return 2
         say("This skill never writes to GitHub, so it will not restore there. To put this project back on GitHub "
-            "yourself, clone it from your forge and push it with your own login:")
-        say(f"  git clone --mirror http://127.0.0.1:{st['port']}/{forge.user}/{copy_name(repository)}.git")
-        say("  cd <that folder> and run: git push --mirror <the new, empty GitHub repository>")
+            "yourself, make a new, empty repository there, then run this line in a terminal:")
+        say(f"  git --git-dir {shlex.quote(folder)} push --mirror {shlex.quote(url)}")
+        say("Run it as it stands: it sends every branch and tag of the copy, with its kept refs, from the copy's own "
+            "folder in your forge to the new repository, with your own login to GitHub, and changes nothing in the "
+            "copy.")
         return 2
     rec = next((r for r in (st.get("repos") or {}).values()
                 if (r.get("full_name") or "").lower() == repository.lower()
@@ -2956,10 +5728,10 @@ def restore_to(p, st, forge, url, repository):
     try:
         cur = forge.by_id(rec["forge_id"]) if rec and rec.get("forge_id") else None
     except CouldNotRead as e:
-        say(f"The copy of {repository} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
+        say(f"The copy of {who}{note} could not be read: {e}. Nothing was pushed; try again when the forge answers.")
         return 1
     if not cur:
-        say(f"There is no copy of {repository} in the forge. Run status to see the copies it holds, and name one "
+        say(f"There is no copy of {who}{note} in the forge. Run status to see the copies it holds, and name one "
             "of them as owner/name.")
         return 2
     # The person's own git login for the new home; the skill's keys are not used there.
@@ -2976,59 +5748,103 @@ def restore_to(p, st, forge, url, repository):
         into = os.path.join(work, "copy.git")
         why = clone_copy(forge, cur["name"], into)
         if why:
-            say(f"{repository}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
+            say(f"{who}{note}: {why}. Nothing was pushed. Run restore --check to see what the copy needs.")
             return 1
         mine = dict(os.environ, GIT_TERMINAL_PROMPT="0")
         run(["git", "--git-dir", into, "remote", "add", "home", url], env=mine)
-        if uses_lfs(into) and has_git_lfs():
+        said = uses_lfs(into)
+        if said is None:
+            say(f"Whether {who}{note} keeps files with Git LFS could not be read from its .gitattributes, so nothing "
+                "was pushed. Run restore --check, then restore --to again.")
+            return 1
+        if said and has_git_lfs():
             # Large files first, to the new home by its own name (git lfs would otherwise ask the forge).
             out = run(["git", "--git-dir", into, "lfs", "push", "--all", "home"], env=mine, timeout=3600)
             if out.returncode != 0:
                 say("The large files could not be put in the new home, so nothing else was pushed: "
-                    + " / ".join(out.stderr.strip().splitlines()[-3:])
+                    + " / ".join(x.strip() for x in shown_lines(out.stderr)[-3:])
                     + ". Check that the new home takes large files, then run restore --to again.")
                 return 1
         specs = ["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*", "^refs/heads/kept/*"]
         out = run(["git", "--git-dir", into, "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--atomic", "home",
                    *specs], env=mine, timeout=3600)
         if out.returncode != 0:
-            say("The push to the new home failed: " + " / ".join(out.stderr.strip().splitlines()[-4:])
+            say("The push to the new home failed: " + " / ".join(x.strip() for x in shown_lines(out.stderr)[-4:])
                 + ". Run restore --to again into a new, empty repository; if it fails the same way, git's words are "
                   "the reason.")
             return 1
         sent = {r: s for r, s in refs_under(into, "refs/heads", "refs/tags").items() if not r.startswith("refs/heads/kept/")}
         back = run(["git", "ls-remote", url], env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=120)
-        there = {r: s for s, r in (l.split("\t", 1) for l in back.stdout.splitlines() if "\t" in l)
+        there = {r: s for s, r in (l.split("\t", 1) for l in lines_of(back.stdout) if "\t" in l)
                  if r.startswith(("refs/heads/", "refs/tags/")) and not r.endswith("^{}")}
         if there != sent:
             say("The new home does not hold what was sent; do not rely on it. Run restore --to again into a new, "
                 "empty repository.")
             return 1
         heads = sum(1 for r in sent if r.startswith("refs/heads/"))
-        say(f"restored {repository}: {heads} branch(es) and {len(sent) - heads} tag(s) to {url}; "
-            "the kept refs stay in your forge")
-        return 0
+        say(f"restored {who}: {heads} branch(es) and {len(sent) - heads} tag(s) to {to}; "
+            f"the kept refs stay in your forge{note}")
+        # M128: a name GitHub held, in the copy, that the new home did not get is said by name, and the exit is not 0.
+        # Only a GitHub branch named kept/... can be one (it shares its name with the copy's own kept refs, M127):
+        # every tag and every other branch was sent, and "there != sent" above stops restore before this otherwise.
+        held = {written(r) for r in refs_under(into, "refs/heads", "refs/tags")}
+        home = {written(r) for r in there}
+        left = sorted(r for r in (rec.get("refs") or {}) if r in held and r not in home)
+        # M135: a name GitHub's list held when the sync last read it, which the copy does not hold and so the new home
+        # did not get, is said too (a name that is not text, one GitHub added since, one taken out of the copy), with
+        # why where the record knows it; the exit is then not 0. What restore pushes does not change.
+        seen = last_seen_list(rec)
+        lacking = None if seen is None else sorted(r for r in seen if r not in home and r not in left)
+        if seen is None:
+            say(RESTORE_LIST_UNREAD.format(full=who + note))
+        elif lacking:
+            odd = sum(1 for r in lacking if written_not_text(r))
+            say(RESTORE_LACKS.format(
+                n=len(lacking),
+                names=shown_names([r[len("refs/heads/"):] if r.startswith("refs/heads/") else "tag " + r[len("refs/tags/"):]
+                                   for r in lacking]),
+                why=f"; {odd} of them are not UTF-8 text, which the forge cannot hold" if odd else ""))
+        if left:
+            # Each name stands for itself only where it can be read as it is (rule 31: a name we did not write is
+            # never handed to a shell raw): one whole line per name, every name, each part through shlex.quote.
+            hidden = [r for r in left if not shows_as_is(r)]
+            shown = [r[len("refs/heads/"):] for r in left]                  # only branches: every tag was sent
+            say(RESTORE_LEFT_OUT.format(n=len(left), names=shown_names(shown)))
+            folder = forge_folder(p, forge, cur["name"])
+            if not folder:
+                say("The copy's own folder in the forge could not be found, so no line is given to bring them over. "
+                    "Run restore --check, and open an issue with these lines if it says the copy is whole.")
+                return 1
+            if not shows_as_is(url):
+                say(RESTORE_TO_HIDDEN)
+                say(f"  git --git-dir {shlex.quote(folder)} for-each-ref refs/heads/kept/")
+                say("Each can be sent from the copy's own folder in your forge with git push, naming the new home and "
+                    "the name yourself; that changes nothing in the copy.")
+                return 1
+            for r in left:
+                if r not in hidden:
+                    say(f"  git --git-dir {shlex.quote(folder)} push {shlex.quote(url)} {shlex.quote(r)}")
+            if hidden:
+                say(RESTORE_HIDDEN.format(n=len(hidden)))
+                say(f"  git --git-dir {shlex.quote(folder)} for-each-ref refs/heads/kept/")
+            say("Run each git line above as it stands, in a terminal: each sends one name from the copy's own folder "
+                "in your forge to the new home, with your own login there, and changes nothing in the copy.")
+            return 1
+        return 0 if lacking == [] else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 def service(p, verb):
     """Stop or start the forge's own service."""
-    if system()[0] == "darwin":
-        uid = str(os.getuid())
-        cmd = (["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"] if verb == "stop"
-               else ["launchctl", "bootstrap", f"gui/{uid}", p["plist"]])
+    if system()[0] == "darwin":                       # G1.17: a stop ends once launchd has let go of the job
+        if verb == "stop":
+            return launchd_off(p, LAUNCHD_LABEL)[0] == "gone"
+        out, _ = launchd_load(p, LAUNCHD_LABEL, p["plist"])
+        return out is not None and out.returncode == 0
     else:
         cmd = ["systemctl", "--user", verb, SERVICE]
     return run(cmd).returncode == 0
-
-
-def port_answers(port):
-    try:
-        with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
-            return True
-    except OSError:
-        return False
 
 
 def safe_extract(archive, into):
@@ -3049,7 +5865,7 @@ def cmd_backup(args):
     """G7.4: the forge's own dump, plus the skill's state and settings (never its keys), in one file only the
     person can read."""
     p = paths()
-    st = load_json(p["state"], {})
+    st = load_state(p)
     if not st.get("port"):
         say("Run setup first.")
         return 2
@@ -3069,13 +5885,16 @@ def make_backup(p, st, folder):
     work = scratch(p, "backup")
     try:
         service(p, "stop")
-        for _ in range(60):
-            if not port_answers(st["port"]):
-                break
-            time.sleep(0.5)
-        else:
+        # G8.7: "stopped" is read by the door: another program that takes the port meanwhile is not our forge
+        # running, and a door that stays unread is not said as either.
+        gone = wait_stopped(p, st["port"])
+        if gone == "running":
             say("The forge did not stop, so no backup was made (a backup of a running forge can be torn). Run "
                 "backup again; if the forge still does not stop, run status.")
+            return 1
+        if gone == "unread":
+            say(f"Who holds the forge's port 127.0.0.1:{st['port']} could not be read after the forge was told to "
+                "stop, so no backup was made (a backup of a running forge can be torn). Run backup again.")
             return 1
         dump = os.path.join(work, "gitea-dump.tar.gz")
         out = gitea(p, "dump", "--type", "tar.gz", "--file", dump, "--tempdir", work)
@@ -3107,12 +5926,17 @@ def make_backup(p, st, folder):
         say("problem: the forge's service did not start again after the backup; run setup to start it")
         return 1
     st["last_backup"] = name
+    try:
+        door(p, st["port"], fresh=True)          # G8.7: another program took the port while the forge was stopped
+    except DoorShut as e:
+        say(str(e))
+        return 1
     return 0
 
 
 def setup_from(p, args):
     """G7.4: a new computer with only the backup file and the skill gets back every copy."""
-    if load_json(p["state"], {}).get("port"):
+    if load_state(p).get("port"):
         say("This computer already has a forge of this skill; setup --from is for a new one. Nothing was changed. "
             "Run setup --from on the new computer; this one keeps its own forge.")
         return 2
@@ -3182,18 +6006,19 @@ def setup_from(p, args):
     save_state(p, st)
     here = os.path.abspath(__file__)
     if os.path.abspath(p["script"]) != here:
-        shutil.copyfile(here, p["script"] + ".tmp")
-        os.replace(p["script"] + ".tmp", p["script"])
-        claim(p["script"])
+        copy_whole(here, p["script"])
     ok, why = install_service(p)
-    if ok and not install_timer(p, int(setting(load_json(p["settings"], {}), "interval_min"))):
-        ok, why = False, "the sync timer could not be switched on"
+    timer_why = install_timer(p, int(setting(load_settings(p), "interval_min")))[1] if ok else ""
     # M88 (G7.4, rule 24): what restore says is what it read. The person acts on these lines after losing a
     # computer, so "back" and "runs" are said only when the forge itself answered and held the copies.
-    up = ok and wait_forge(port, seconds=SETUP_WAIT)
+    shut = None
+    try:
+        up = ok and wait_forge(p, port, seconds=SETUP_WAIT)
+    except DoorShut as e:
+        up, shut = False, e
     ids = [r["forge_id"] for r in (st.get("repos") or {}).values() if r.get("forge_id")]
     n = len(ids)
-    owners = ", ".join(sorted((load_json(p["settings"], {}).get("owners") or {}))) or "(none)"
+    owners = ", ".join(sorted((load_settings(p).get("owners") or {}))) or "(none)"
     name = os.path.basename(src)
     held = unread = 0
     if up:
@@ -3210,11 +6035,16 @@ def setup_from(p, args):
             say(f"Restored from {name}: the forge holds {held} of the {n} copies in the restored record"
                 + (f", and {unread} could not be read" if unread else "") + f", on http://127.0.0.1:{port}/ (this "
                 "computer only). Run status: it names each copy that is not there.")
+    elif shut:
+        say(f"Restored from {name}: {n} copies are in the restored data; they are not counted in the forge, since "
+            "nothing was sent to its port:")
+        say(str(shut))
+        ok = False
     else:
         say(f"Restored from {name}: {n} copies are in the restored data; the forge has not answered, so they are not "
             "counted there yet.")
-    say(f"Your GitHub keys are not in a backup. To keep the copies current, make new keys and run `key set` for "
-        f"each owner: {owners}. Until then, `status` shows them behind.")
+    say(f"Your GitHub keys are not in a backup. To keep the copies current, make new keys and run key set for "
+        f"each owner: {owners}. Until then, status shows them behind.")
     say("Your Gitea password is the one it had on the old computer.")
     if not ok:
         say(f"The forge's service did not start: {why}")
@@ -3222,10 +6052,13 @@ def setup_from(p, args):
         say("The forge runs as your own service.")
     else:
         say(not_answering_yet(p, port, SETUP_WAIT))
+    if timer_why:
+        ok = False
+        say(f"The sync's timer is not on, so nothing is copied until it is: {timer_why}")
     if system()[0] == "darwin":
         back, note = comes_back_by_itself()
     else:
-        st = load_json(p["state"], {})
+        st = load_state(p)
         st.pop("linger_by_setup", None)              # the old computer's record means nothing here
         back, note = linger_step(st, allow=not getattr(args, "no_linger", False))
         save_state(p, st)
@@ -3250,29 +6083,63 @@ def not_answering_yet(p, port, waited):
     """G1.9: what 'not answering yet' means, and when the person should look again."""
     return (f"The forge's service is started, and it was not answering yet on http://127.0.0.1:{port}/ after "
             f"{waited} s. On the slowest computer it was tried on, it answered within {FIRST_START_SEEN} s, so "
-            f"something is holding it up: run `status` in 5 minutes. If it still does not answer then, the forge's "
+            f"something is holding it up: run status in 5 minutes. If it still does not answer then, the forge's "
             f"own words are the last lines of {os.path.join(p['forge'], 'log', 'gitea.log')}.")
 
 
-def wait_forge(port, up=True, seconds=FIRST_START_WAIT):
+def wait_forge(p, port, seconds=FIRST_START_WAIT, again="status"):
+    """G1.9, G8.7: the forge is up only when the door reads it as ours AND its health check answers. Another
+    program on the port stops the wait at once (DoorShut); a door that stays unread to the end is said as that."""
+    shut = None
     for _ in range(seconds * 2):
-        if port_answers(port) == up:
-            if not up:
-                return True
-            try:
+        try:
+            if door(p, port, fresh=True, again=again) == "mine":
                 with forge_opener().open(f"http://127.0.0.1:{port}/api/healthz", timeout=2):
                     return True
-            except (urllib.error.URLError, OSError):
-                pass
+            shut = None
+        except DoorShut as e:
+            if e.kind == "other":
+                raise
+            shut = e
+        except (urllib.error.URLError, OSError):
+            pass
         time.sleep(0.5)
+    if shut:
+        raise shut
     return False
+
+
+def wait_stopped(p, port, seconds=30):
+    """After the service is told to stop: 'stopped' (no listener on the port AND no process of this account runs
+    this forge on this folder), 'other' (another program holds the port AND none of ours runs: the forge did stop),
+    'running' (ours still runs at the end), 'unread' (the door or our own processes stayed unread to the end, so
+    neither is said). The port alone is never the answer (the owner's rulings F2 and F4, 11-24): a stranger can sit
+    on ::1 while our forge still runs on 127.0.0.1, and a forge that has closed its listener can still be writing
+    its database while it ends, so a dump or a migration then would read a torn database."""
+    kind = "unread"
+    for _ in range(seconds * 2):
+        try:
+            seen = door(p, port, fresh=True)          # "mine" or "none"
+        except DoorShut as e:
+            seen = e.kind                              # "other" or "unread"
+        if seen == "mine":
+            kind = "running"
+        elif seen == "unread":
+            kind = "unread"
+        else:
+            ours = own_forge_running(p)
+            if ours is False:
+                return "stopped" if seen == "none" else "other"
+            kind = "running" if ours else "unread"
+        time.sleep(0.5)
+    return kind
 
 
 def cmd_upgrade_forge(args):
     """G9.1: only to the version this release pins; a backup first; the binary checksum-checked; started and
     checked; on any failure the old binary and the database as it was are put back."""
     p = paths()
-    st = load_json(p["state"], {})
+    st = load_state(p)
     if not st.get("port"):
         say("Run setup first.")
         return 2
@@ -3284,6 +6151,11 @@ def cmd_upgrade_forge(args):
         say(f"The forge runs Gitea {cur}, newer than the {new} this release pins. A forge is never moved back. "
             "Nothing was changed. Run self-update for the newest release of this skill.")
         return 2
+    try:
+        door(p, st["port"], fresh=True, again="upgrade-forge")     # G8.7: before anything is stopped or made
+    except DoorShut as e:
+        say(str(e) + " Nothing was upgraded.")
+        return 1
     ok, why = take_lock(p)
     if not ok:
         say(f"No upgrade: {why}. Run upgrade-forge again when it has ended.")
@@ -3303,10 +6175,22 @@ def cmd_upgrade_forge(args):
             say(f"{e} The forge was not touched. Run upgrade-forge again.")
             return 1
         service(p, "stop")
-        if not wait_forge(st["port"], up=False, seconds=30):
+        gone = wait_stopped(p, st["port"])
+        if gone == "other":
+            # G8.7 (the owner's condition ii): the forge did stop; another program took its port meanwhile. Not
+            # "did not stop": nothing is upgraded, nothing is sent to that program, and the forge stays stopped,
+            # since its service cannot start on a port another program holds.
+            say(f"problem: the forge stopped for the upgrade, and another program took its port 127.0.0.1:"
+                f"{st['port']} meanwhile, so nothing was upgraded and nothing was sent to that program: no key, no "
+                "copy. Run setup: it moves the forge to a free port and starts it again; every copy stays. Then run "
+                "upgrade-forge again.")
+            return 1
+        if gone != "stopped":
             service(p, "start")
             say("The forge did not stop, so it was not upgraded. Run upgrade-forge again; if the forge still does "
-                "not stop, run status.")
+                "not stop, run status." if gone == "running" else
+                f"Who holds the forge's port 127.0.0.1:{st['port']} could not be read after the forge was told to "
+                "stop, so it was not upgraded. Run upgrade-forge again.")
             return 1
         shutil.rmtree(rollback, ignore_errors=True)
         os.makedirs(rollback, mode=0o700)
@@ -3322,21 +6206,28 @@ def cmd_upgrade_forge(args):
             why = "Gitea's migration failed: " + last_line(out.stderr or out.stdout)
         else:
             service(p, "start")
-            if not wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT):
-                why = "the new forge did not answer within 90 s"
-            else:
-                code, ver = Forge(p, st).call("GET", "/version")
-                if code != 200 or (ver or {}).get("version") != new:
-                    why = f"the new forge says it is {(ver or {}).get('version')}, not {new}"
+            try:
+                if not wait_forge(p, st["port"], seconds=FIRST_START_WAIT, again="upgrade-forge"):
+                    why = "the new forge did not answer within 90 s"
+                else:
+                    code, ver = Forge(p, st).call("GET", "/version")
+                    if code != 200 or (ver or {}).get("version") != new:
+                        why = f"the new forge says it is {(ver or {}).get('version')}, not {new}"
+            except DoorShut as e:
+                why = ("another program holds the forge's port" if e.kind == "other" else
+                       "who holds the forge's port could not be read") + ", so nothing was sent to it"
         if why:
             service(p, "stop")
-            wait_forge(st["port"], up=False, seconds=30)
+            wait_stopped(p, st["port"])
             shutil.copy2(os.path.join(rollback, "gitea.db"), db)
             shutil.copy2(os.path.join(rollback, "app.ini"), p["app_ini"])
             st["gitea"] = cur
             save_state(p, st)
             service(p, "start")
-            back = wait_forge(st["port"], up=True, seconds=FIRST_START_WAIT)
+            try:
+                back = wait_forge(p, st["port"], seconds=FIRST_START_WAIT)
+            except DoorShut:
+                back = False
             say(f"The upgrade to Gitea {new} failed: {why}. "
                 + (f"The old forge, Gitea {cur}, is back with its database as it was before."
                    if back else f"The old forge, Gitea {cur}, was put back but does not answer yet; run status.")
@@ -3415,7 +6306,7 @@ def cmd_self_update(args):
         drop_lock(p)
     say(f"self-update: {VERSION} to {tag}, replaced whole at {target}. The forge was not changed.")
     pin = re.search(r'^GITEA_VERSION = "([\d.]+)"', data.decode("utf-8", "replace"), re.M)
-    if pin and vt(pin.group(1)) > vt(load_json(p["state"], {}).get("gitea") or GITEA_VERSION):
+    if pin and vt(pin.group(1)) > vt(load_state(p).get("gitea") or GITEA_VERSION):
         say(f"{tag} pins Gitea {pin.group(1)}: run upgrade-forge when you choose (it makes a backup first).")
     return 0
 
@@ -3424,7 +6315,20 @@ def cmd_uninstall(args):
     """G9.3: everything but the folder of copies goes; that folder goes only on the person's typed word, typed
     at a terminal (it cannot be undone, so nothing piped in counts)."""
     p = paths()
-    other = other_install_stop(p, "uninstall")
+    found = other_install(p)
+    # M150: a launch agent file at the skill's path that could not be read never keeps a person from leaving; while
+    # it stands, uninstall takes off and removes only what it can show to be this home's own (below).
+    limit = found if found and found[2] else None
+    # M163 (G9.18; seen 2026-11-26 on a stock Ubuntu 24.04 guest, systemd 255): the forge's unit file at mode 000
+    # while systemd held it loaded with this home's start line read as no other install, and uninstall switched off
+    # the sync's service, which named another home's copy, and its timer. On Linux the unreadable-file road is
+    # taken from the file's own read, never from what systemd shows for it (other_install reads systemd's start
+    # line first, and a start line of this home's made it no other install).
+    if found is None and system()[0] != "darwin" and os.path.lexists(p["unit"]):
+        fstate, fwhy = service_file_state(p, read_made(p)[0], p["unit"])
+        if fstate == "could not be read":
+            limit = ("", p["unit"], fwhy)
+    other = None if limit else other_install_stop(p, "uninstall", found)
     if other:
         say(other)
         return 2
@@ -3438,6 +6342,9 @@ def cmd_uninstall(args):
     raw = load_json(p["state"], None) if os.path.exists(p["state"]) else None
     record = "read" if isinstance(raw, dict) else ("unreadable" if os.path.exists(p["state"]) else "none")
     st = raw if record == "read" else {}
+    # M158 (G6.25): while the record of what the skill made is lost, nothing in the skill's folders is written,
+    # removed or made (the state file too), and no new record is started
+    lost = read_made(p)[1] if os.path.exists(p["data"]) or os.path.exists(p["conf"]) else None
     # Rule 8: a sync that is running is a wait, said with what holds it, never a refusal of a person who wants to
     # leave. With no folder of the skill's left, nothing can be running, and no folder is made again.
     if os.path.exists(p["data"]):
@@ -3454,30 +6361,154 @@ def cmd_uninstall(args):
             say(f"Not now: a sync is still running (process {lock_holder(p)}) after {UNINSTALL_WAIT // 60} minutes, "
                 "and nothing was removed. Run uninstall again once it has ended.")
             return 3
-    removed, linger_said, left_service, foreign, unreadable = [], "", [], [], None
+    removed, linger_said, left_service, foreign, unreadable, kept, told = [], "", [], [], None, [], []
+    owners = {}                          # M180: what the owner read found not mine, by path
+    stopped = stays = None               # M179: the line of a delete the system refused part-way, said last; the
+                                         # line of the folder that stays, above the closing sentence
     try:
         uid = str(os.getuid())
         if system()[0] == "darwin":
-            for label, plist in ((LAUNCHD_LABEL, p["plist"]),
-                                 (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"))):
-                run(["launchctl", "bootout", f"gui/{uid}/{label}"])
+            # G1.17 and the family's rule 30: both jobs are told off and read first; while either is not read gone,
+            # nothing at all is removed (a job launchd still holds would go on starting a program taken from it).
+            # M150: while the forge's file could not be read, a job is told off only when launchd shows it running
+            # this home's own copy; any other loaded job is named and left loaded, and its file left with it.
+            # A job launchd could not answer for is "could not be read" (a reviewer's trial, 11-26): never "loaded",
+            # never left while the rest goes; nothing is told off until every job is read.
+            both = ((LAUNCHD_LABEL, p["plist"], "the forge's job"),
+                    (SYNC_LABEL, os.path.join(os.path.dirname(p["plist"]), SYNC_LABEL + ".plist"), "the sync's job"))
+            held = {label: launchd_held(label) for label, _, _ in both} if limit else {}
+            unread_jobs = [f"{words} ({label})" for label, _, words in both if limit and held[label] is None]
+            if unread_jobs:
+                again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                say("Not now: whether launchd holds " + " and ".join(unread_jobs) + ", and what "
+                    + ("it runs" if len(unread_jobs) == 1 else "they run") + f", could not be read, and {limit[1]} "
+                    f"could not be read either ({limit[2]}), so uninstall cannot show what is this home's. Nothing "
+                    f"was removed and nothing was taken off. The one next step: move {limit[1]} out of "
+                    f"{os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run uninstall "
+                    f"again: {again}")
+                return 3
+            jobs = []
+            for label, plist, words in both:
+                got = held.get(label)
+                if limit and got == "absent":
+                    jobs.append((plist, words, "gone", 0.0, 113))
+                elif limit and not job_is_ours(p, label, got[0]):
+                    kept.append(f"{words} ({label}), loaded in launchd, which runs another copy than this home's, "
+                                f"and its file {plist}")
+                else:
+                    jobs.append((plist, words, *launchd_off(p, label)))
+                    told.append(words)
+            if any(answer != "gone" for _, _, answer, _, _ in jobs):
+                said = []
+                for plist, words, answer, waited, code in jobs:
+                    said.append(f"{words} is off, and its file {plist} stays too" if answer == "gone" else
+                                f"launchd still had {words} {waited:.0f} s after it was told to take it off"
+                                if answer == "there" else f"whether launchd let go of {words} could not be read "
+                                f"(launchctl print answered code {code})")
+                again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                say("Not now: " + "; ".join(said) + f". Nothing was removed. Run uninstall again in a minute: {again}")
+                return 3
+            for plist, _, _, _, _ in jobs:
+                if limit and plist == limit[1]:
+                    continue                    # M150: named on its own below, and left byte for byte
                 take_service_file(p, plist, removed, left_service)
         else:
-            run(["systemctl", "--user", "disable", "--now", SERVICE, SYNC_UNIT + ".timer"])
-            base = os.path.dirname(p["unit"])
+            # G1.18 and the family's rule 30: every unit is told to stop and read stopped first; while one is not,
+            # nothing at all is removed (a unit systemd still runs would go on running a program taken from it).
+            # M163 (G9.18): while the forge's unit could not be read, a unit is told off only when systemd's own start
+            # line for it names this home's copy (the timer with the sync's service); one that names another copy, or
+            # none, is named and left as it is, its file with it; one systemd could not answer for is a "Not now".
+            only, kept_files, base, left_running = None, set(), os.path.dirname(p["unit"]), []
+            if limit:
+                both = (("forge", SERVICE + ".service", p["unit"], "the forge's service", (None,)),
+                        ("sync", SYNC_UNIT + ".service", os.path.join(base, SYNC_UNIT + ".service"),
+                         "the sync's service", (".service", ".timer")))
+                held = {which: systemd_parsed(unit) for which, unit, _, _, _ in both}
+                unread_units = [f"{words} ({unit})" for which, unit, _, words, _ in both if held[which] is None]
+                if unread_units:
+                    again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                    say("Not now: what systemd runs for " + " and ".join(unread_units) + " could not be read, and "
+                        f"{limit[1]} could not be read either ({limit[2]}), so uninstall cannot show what is this "
+                        f"home's. Nothing was removed and nothing was taken off. The one next step: move {limit[1]} "
+                        f"out of {os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run "
+                        f"uninstall again: {again}")
+                    return 3
+                # M163, the maintainer's ruling of 11-26 on a guest's finding (the forge's unit not loaded, active, one
+                # forge process, said "so it runs nothing"): a unit with no start line shown runs nothing only when
+                # systemd itself reads it inactive or failed. In any other state, or one that could not be read,
+                # uninstall cannot show whose it is: a "Not now" with its step, before anything is removed or told.
+                unseen = []
+                for which, unit, f, words, suffixes in both:
+                    if not held[which][0]:
+                        state, said = unit_state(SERVICE if which == "forge" else unit)    # as systemd_off reads it
+                        if state not in ("inactive", "failed"):
+                            unseen.append(f"systemd still has {words} ({unit}) {state}" if state else
+                                          f"whether systemd still runs {words} ({unit}) could not be read "
+                                          f"(systemctl --user answered {said})")
+                if unseen:
+                    again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                    say("Not now: " + "; ".join(unseen) + "; systemd shows no start line for "
+                        + ("it" if len(unseen) == 1 else "them") + f", and {limit[1]} could not be read either "
+                        f"({limit[2]}), so uninstall cannot show whose "
+                        + ("it is or what it runs" if len(unseen) == 1 else "they are or what they run") + ". "
+                        f"Nothing was removed and nothing was taken off. The one next step: move {limit[1]} out of "
+                        f"{os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run uninstall "
+                        f"again: {again}")
+                    return 3
+                only = []
+                for which, unit, f, words, suffixes in both:
+                    if unit_is_ours(p, which, held[which][0]):
+                        only += list(suffixes)
+                    else:
+                        # seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26: uninstall run again after one that took the sync's
+                        # files named them as left, though they were gone. Each file is named only where it is; a
+                        # unit that runs nothing and has no file left is nothing to leave, and is not named.
+                        there = [x for x in ([f] + ([os.path.join(base, SYNC_UNIT + ".timer")] if which == "sync"
+                                                    else [])) if os.path.lexists(x)]
+                        if not held[which][0] and not there:
+                            continue
+                        runs = ("which systemd runs another copy than this home's" if held[which][0] else
+                                "for which systemd shows no start line, so it runs nothing")
+                        timer = f", with the sync's timer ({SYNC_UNIT}.timer)" if which == "sync" else ""
+                        if held[which][0]:
+                            left_running.append(f"{words} ({unit})")
+                        kept.append(f"{words} ({unit}), {runs}{timer}" + (
+                            f", and {'its file' if len(there) == 1 else 'their files'} " + " and ".join(there)
+                            if there else ", with no file of it left"))
+                        kept_files.update(there)
+            units = systemd_off(p, only) if only is None or only else []
+            if any(answer != "stopped" for _, answer, _, _ in units):
+                said, no_bus = [], False
+                for words, answer, waited, what in units:
+                    if answer == "unread":
+                        no_bus = no_bus or bool(NO_USER_BUS.search(what))
+                again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                if no_bus:
+                    # G1.18: with no user bus nothing reached systemd, so nothing was changed: these words stay
+                    for words, answer, waited, what in units:
+                        said.append(f"{words} is stopped, and its file stays too" if answer == "stopped" else
+                                    f"systemd still had {words} {what} {waited:.0f} s after it was told to stop it"
+                                    if answer == "running" else f"whether systemd stopped {words} could not be read "
+                                    f"(systemctl --user answered {what})")
+                    say("Not now: " + "; ".join(said) + ". Nothing was removed. This shell cannot reach your "
+                        "account's own systemd (it has no user bus), so run uninstall again from a login of your own "
+                        f"to this computer, such as ssh or a terminal at the screen: {again}")
+                    return 3
+                say(systemd_not_now(p, units, again))
+                return 3
+            told += [words for words, _, _, _ in units]
             for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
+                if limit and f == limit[1] or f in kept_files:
+                    continue                    # M150: named on its own below, and left byte for byte; M163: named
                 take_service_file(p, f, removed, left_service)
             run(["systemctl", "--user", "daemon-reload"])
-            if st.get("linger_by_setup"):
-                if run(["loginctl", "disable-linger", getpass.getuser()]).returncode == 0:
-                    linger_said = "Lingering was switched on by setup, and is switched off again."
-                else:
-                    linger_said = ("Lingering was switched on by setup, and could not be switched off: run "
-                                   f"loginctl disable-linger {getpass.getuser()}")
-            elif st.get("linger_by_setup") is False:
-                linger_said = "Lingering was already on before setup, so it is left on."
-            st.pop("linger_by_setup", None)
-            if record == "read" and os.path.exists(p["state"]):
+            # M163 and M186 (the maintainer's rulings of 11-26): one sentence of lingering for
+            # every road, from uninstall_linger; what is left running as another copy's keeps lingering on, and the
+            # record of it is kept for a later uninstall
+            linger_said = uninstall_linger(st, record, left_running)
+            if not left_running:
+                st.pop("linger_by_setup", None)
+            if record == "read" and os.path.exists(p["state"]) and not lost:
                 save_state(p, st)
         # Rule 23: what the skill made, by its record, read now (a person's file may have arrived since setup).
         # Rule 8: a person who wants to leave is never refused because of the state of their own data: what the
@@ -3485,56 +6516,314 @@ def cmd_uninstall(args):
         rec_now, unreadable = read_made(p)
         if rec_now is not None:
             foreign = not_ours(p)
-            remove_made(p, [os.path.dirname(p["bin"]), p["cache"], p["conf"], p["script"]], removed)
+            leave = [os.path.dirname(p["bin"]), p["cache"], p["conf"], p["script"]]
+            theirs = not_mine_in(p, leave)      # M180: read once, before anything of those goes
+            owners.update(theirs)
+            foreign = sorted(set(foreign) | set(theirs))
+            remove_made(p, leave, removed, keep=theirs)
     finally:
         if os.path.exists(p["data"]):
             drop_lock(p)
     n = len([r for r in (st.get("repos") or {}).values() if r.get("forge_id")])
     rc = 0
     copies_here = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)
-    if args.delete_copies and os.path.exists(p["data"]) and unreadable:
-        say(f"The copies were not deleted: {unreadable}, so the skill cannot tell what in {p['data']} it made, and "
-            "nothing was taken from it.")
+    if args.delete_copies and os.path.exists(p["data"]) and unreadable and copies_on_disk(p) == 0:
+        # M179 (seen 2026-11-26): the same command again after a delete that left only what is not the skill's said
+        # "with every copy in it" of a folder with no copy in it, and ended 1
+        say(f"No copy is in {p['data']}, so none was deleted: there is none to delete. {unreadable[:1].upper()}"
+            f"{unreadable[1:]}, so the skill cannot tell which files in that folder it made, and takes none of them; "
+            "the folder is yours now, as it is.")
+    elif args.delete_copies and os.path.exists(p["data"]) and unreadable:
+        # M158 (G6.25): the number is not asked; nothing in the skill's folders goes; the folder is the person's now
+        say(f"The copies were not deleted: {unreadable}, so the skill cannot tell which files in {p['data']} it "
+            f"made, and deletes none of them. That folder, with every copy in it, is still at {p['data']}, and it is "
+            "yours now, as it is.")
         rc = 1
     elif args.delete_copies and copies_here:
+        theirs = not_mine_in(p, [p["data"]])   # M180: read once, before the number is asked, so it is named first
+        owners.update(theirs)
+        if theirs:
+            names, changed = named_ten(theirs)
+            say(f"Not the skill's, so it stays where it is, with the folders above it: {names}"
+                + (f"; {SHOWN_CHANGED}." if changed else "."))
         say(f"To delete the folder of copies ({n} copies, {p['data']}), type the number of copies it holds. Only "
             "what the skill made goes; anything else in it stays where it is, and is named:")
         answer = input("> ").strip()
         if answer == str(n):
-            foreign = sorted(set(foreign) | set(not_ours(p)))     # read again: a file may have arrived meanwhile
-            take_data(p, removed, f"the folder of copies ({n} copies)", f"{p['forge']}: the {n} copies (the "
-                      "forge's own folders in it)")
+            foreign = sorted(set(foreign) | set(not_ours(p)) | set(theirs))   # read again: a file may have arrived
+            refused, before = take_data(p, removed, f"the folder of copies ({n} copies)", f"{p['forge']}: the {n} "
+                                        "copies (the forge's own folders in it)", foreign, keep=theirs)
+            if refused is not None:
+                stopped, rc = not_deleted_line(p, refused, before, n), 1
+            elif os.path.exists(p["data"]):
+                stays = folder_stays_line(p, before)
         else:
             say(f"That is not {n}. The copies were not deleted. If you mean to delete them, run uninstall "
                 f"--delete-copies again and type {n}.")
             rc = 1
     elif args.delete_copies and os.path.exists(p["data"]):         # no copies left in it: nothing to ask
-        foreign = sorted(set(foreign) | set(not_ours(p)))
-        take_data(p, removed, "the skill's folder", None)
+        theirs = not_mine_in(p, [p["data"]])   # M180: read once, before anything goes
+        owners.update(theirs)
+        foreign = sorted(set(foreign) | set(not_ours(p)) | set(theirs))
+        refused, before = take_data(p, removed, "the skill's folder", None, foreign, keep=theirs)
+        if refused is not None:                                     # M179: never passed over here either
+            stopped, rc = not_deleted_line(p, refused, before, n), 1
+        elif os.path.exists(p["data"]):
+            stays = folder_stays_line(p, before)
     if record == "read":
         take_made_folders(st, removed)
-    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service)
+    uninstall_census(p, removed, linger_said, n, st, record, foreign, unreadable, left_service,
+                     unread_service=limit, kept_jobs=kept, told_off=told, not_deleted=bool(rc and stopped),
+                     stays=stays, owners=owners)
+    if unreadable and holds_mirror(p):     # M158: the way to go on, named once, last
+        say(USE_FOLDER_STEP + own_command(p, "setup", "--use-this-folder"))
+    if stopped:                            # M179: where the delete stopped and the one next step, last
+        say(stopped)
     return rc
 
 
-def take_data(p, removed, what, copies_line):
+class Arrived(Exception):
+    """M179: what a removal found in the data folder after it that was not there before it (a write that landed after
+    rmtree had gone by): its path."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.path = path
+
+
+def take_data(p, removed, what, copies_line, known=(), keep=()):
     """The delete: what the record holds in the data folder goes, by name; the record goes last, once nothing it
-    names is still here; the folder goes once it is empty."""
-    gone = len(removed)
-    remove_made(p, [p["data"]], removed)
-    rec_left, why = read_made(p)
-    try:
-        if rec_left is not None and not any(os.path.lexists(k) for k in rec_left if k != os.path.abspath(p["data"])):
-            os.remove(os.path.join(p["data"], MADE_RECORD))
-        if not os.listdir(p["data"]):
-            os.rmdir(p["data"])
-    except OSError:
-        pass
+    names is still here; the folder goes once it is empty. M179: the forge's folder, with the copies, goes first,
+    and the rest only once it is gone, so a removal that stops part-way leaves the state and the record, and the
+    number asked stays the same. `known`: what in the folder was read as not the skill's before the removal (it stays
+    there, and is named). Gives (the first error the system answered, or Arrived for an entry there after the removal
+    that was not there before it; the copies on the disk before), or (None, ...) when nothing was refused. M180:
+    `keep`, what the owner read found not mine before the number was asked, stays where it is, with the folders above
+    it."""
+    gone, failed, before = len(removed), [], copies_on_disk(p)
+    remove_made(p, [p["forge"]], removed, failed, keep)
+    if not failed:
+        # a write that landed once the forge's folder had gone by is found while the state and the record are still
+        # there to count it against
+        new = sorted(set(map(os.path.abspath, not_ours(p))) - set(map(os.path.abspath, known)) - set(keep))
+        if new:
+            failed.append(Arrived(new[0]))
+    if not failed:
+        remove_made(p, [p["data"]], removed, failed, keep)
+    if not failed:
+        rec_left, why = read_made(p)
+        try:
+            if rec_left is not None and not any(os.path.lexists(k) for k in rec_left
+                                                if k != os.path.abspath(p["data"])):
+                os.remove(os.path.join(p["data"], MADE_RECORD))
+            if not os.listdir(p["data"]):
+                os.rmdir(p["data"])
+        except OSError as e:
+            failed.append(e)
+    if (not failed and os.path.exists(p["data"]) and isinstance(known, list)
+            and not os.path.lexists(os.path.join(p["data"], MADE_RECORD))):
+        # the state and the record are gone: what is left is not the skill's, and each entry is named as kept (with
+        # the record still there, it is what names the skill's own: seen 2026-11-26, a folder of the person's in the
+        # forge's folder had the record and that folder named as not the skill's)
+        try:
+            known.extend(sorted(set(os.path.join(p["data"], x) for x in os.listdir(p["data"])) - set(known)))
+        except OSError as e:
+            failed.append(e)
+    if failed:
+        return failed[0], before
     if not os.path.exists(p["data"]):
         removed[gone:] = [f"{p['data']}: {what} and the record of what the skill did here, each thing the skill "
                           "made in it by name"]
     elif copies_line and (not os.path.exists(p["forge"]) or set(os.listdir(p["forge"])).isdisjoint(FORGE_NAMES)):
         removed.insert(gone, copies_line)
+    return None, before
+
+
+def folder_stays_line(p, before):
+    """M179: the delete ended with only what is not the skill's left in the folder of
+    copies. The copies are said as deleted and the folder as staying, each entry in it named; the folder is said as
+    deleted only once it is gone."""
+    copies = ("No copy was on the disk to delete." if before == 0 else
+              f"The copies are deleted: the {before} on the disk {'is' if before == 1 else 'are'} gone." if before
+              else "The copies are deleted (how many were on the disk could not be read).")
+    rec, _ = read_made(p)
+    theirs = [os.path.abspath(x) for x in not_ours(p)] if rec is not None else []
+    try:
+        names = sorted(os.listdir(p["data"]))
+    except OSError as e:
+        return (f"{copies} The folder of copies stays at {p['data']}; what is in it could not be read "
+                f"({type(e).__name__}).")
+    said, not_theirs, changed = [], "what is not the skill's", False
+    for n in names:
+        e = os.path.abspath(os.path.join(p["data"], n))
+        if n == MADE_RECORD and rec is not None:
+            said.append(f"{n} (the record of what the skill did here, kept while something it names is there)")
+        elif rec is not None and rec.get(e) == "dir":
+            held = [os.path.relpath(x, p["data"]) for x in theirs if x.startswith(e + os.sep)]
+            changed = changed or any(not shows_as_is(x) for x in held)
+            said.append(f"{n} (the skill's, kept because it holds "
+                        f"{', '.join(shown_as_is(x) for x in held) or not_theirs})")
+        else:
+            changed = changed or not shows_as_is(n)
+            said.append(f"{shown_as_is(n)} (not the skill's)")
+    return (f"{copies} The folder of copies stays at {p['data']}, because it holds what is not the skill's; in it "
+            f"now: {', '.join(said)}" + (f"; {SHOWN_CHANGED}." if changed else "."))
+
+
+def entry_owner(path):
+    """M180: the account that owns this entry (the link itself, for a link), by its number."""
+    return os.lstat(path).st_uid
+
+
+def owner_read(path):
+    """M180: the owner read, three answers: ("mine", uid), ("another", uid), ("unread", the error's class)."""
+    try:
+        uid = entry_owner(path)
+    except OSError as e:
+        return "unread", type(e).__name__
+    return ("mine" if uid == os.getuid() else "another"), uid
+
+
+def whose_words(answer):
+    """M180: whose an entry is, as a line says it."""
+    kind, it = answer
+    return (f"another account owns it, {owner_words(it)}" if kind == "another" else
+            f"whose it is could not be read ({it})")
+
+
+def not_mine_in(p, targets):
+    """M180: the one deep read, made only by a command about to remove the skill's trees, before it removes anything
+    (the delete: before it asks the number): every entry at or under what the record holds in `targets` that the owner
+    read does not answer "mine" for, as {path: answer}. The skill and its forge run as this account, so nothing
+    another account owns is theirs. lstat only, no link followed; inside a folder that is not mine nothing is read
+    (it stays whole). A folder of mine that cannot be listed is left to the removal (M179's stop names it)."""
+    rec, why = read_made(p)
+    if rec is None:
+        return {}
+    targets = [os.path.abspath(t) for t in targets]
+    found = {}
+    for k in sorted(rec):
+        if not any(k == t or inside(k, t) for t in targets) or not os.path.lexists(k):
+            continue
+        if any(inside(k, x) for x in found):
+            continue
+        answer = owner_read(k)
+        if answer[0] != "mine":
+            found[k] = answer
+            continue
+        if not rec[k].startswith("tree:") or not os.path.isdir(k) or os.path.islink(k):
+            continue
+        for root, dirs, files in os.walk(k):
+            for n in list(dirs) + files:
+                e = os.path.join(root, n)
+                answer = owner_read(e)
+                if answer[0] != "mine":
+                    found[e] = answer
+                    if n in dirs:
+                        dirs.remove(n)
+    return found
+
+
+def named_ten(found):
+    """M180: the names of what stays because it is not the skill's: the first ten, each as the tool shows names and
+    with whose it is, then "and N more"; and whether a name was shown changed."""
+    names = sorted(found)
+    said = [f"{shown_as_is(x)} ({whose_words(found[x])})" for x in names[:10]]
+    more = len(names) - 10
+    return "; ".join(said) + (f"; and {more} more" if more > 0 else ""), not all(shows_as_is(x) for x in names[:10])
+
+
+def remove_chain(e, keep):
+    """M180: remove `e` but what `keep` names in it: a subtree that holds nothing of `keep` goes whole (shutil.rmtree,
+    as before); only the folders on the way down to what stays are walked, and they are given back (the skill's own,
+    kept because they hold what is not)."""
+    if e in keep:
+        return []
+    inner = [t for t in keep if inside(t, e)]
+    if not inner:
+        rmtree_whole_path(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
+        return []
+    held = [e]
+    for c in sorted(os.listdir(e)):
+        held.extend(remove_chain(os.path.join(e, c), inner))
+    return held
+
+
+def rmtree_whole_path(path):
+    """M179: shutil.rmtree, stopping at the first refusal with that error, its file name the whole path of what was
+    refused (seen 2026-11-26 on Python 3.12: rmtree's own error names it relative to the folder it was in, so a line
+    built from it named the working directory)."""
+    def stop(func, at, exc):
+        e = exc if isinstance(exc, BaseException) else exc[1]
+        if isinstance(e, OSError) and e.errno is not None:
+            raise OSError(e.errno, e.strerror, at) from None
+        raise e
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=stop)
+    else:
+        shutil.rmtree(path, onerror=stop)
+
+
+def copies_on_disk(p):
+    """M179: how many copies the forge keeps on the disk now (stock Gitea: data/gitea-repositories/<owner>/<name>.git,
+    each with its HEAD), read from the disk; None when a folder on the way could not be listed."""
+    root = os.path.join(p["forge"], "data", "gitea-repositories")
+    try:
+        owners = [os.path.join(root, o) for o in os.listdir(root)] if os.path.lexists(root) else []
+        return sum(1 for o in owners if os.path.isdir(o) and not os.path.islink(o)
+                   for x in os.listdir(o) if x.endswith(".git") and os.path.isfile(os.path.join(o, x, "HEAD")))
+    except OSError:
+        return None
+
+
+def not_deleted_line(p, e, before, n):
+    """M179: the last line of an uninstall --delete-copies whose removal the system refused part-way, after the person
+    typed the number: where it stopped and why (the error's class, never a byte of a file), how many of the copies on
+    the disk went before it, that the rest and the record stay, and the one next step, with the same number."""
+    at = (os.path.dirname(e.path) if isinstance(e, Arrived) else
+          os.path.abspath(e.filename) if isinstance(e.filename, str) else p["data"])
+    if isinstance(e, Arrived):
+        name, changed = shown_one(e.path)
+        why = (f"something put files into it while it was being removed: {name}{changed} is there now, and was not "
+               "before the removal")
+        step = "end the program that is still writing there"
+    elif e.errno in (errno.EACCES, errno.EPERM):
+        # unlinking a name, or taking a folder out, is refused by the folder that holds it; listing or entering
+        # a folder, by that folder itself
+        refused = at
+        if not (os.path.isdir(at) and not os.path.islink(at) and not os.access(at, os.R_OK | os.X_OK)):
+            at = os.path.dirname(at)
+        theirs = next((x for x in (refused, at) if owner_read(x)[0] == "another"), None)
+        if theirs:
+            # M180: there after the read made before the removal: it is not the skill's and stays; no line changes
+            # its owner or removes it, and the same command again reads it first, leaves it and finishes
+            shown, changed = shown_one(theirs)
+            asked = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)
+            return (f"Not deleted: the folder of copies is still at {p['data']}. Its removal stopped at {shown}"
+                    f"{changed}: {whose_words(owner_read(theirs))}, so it is not the skill's and stays where it is "
+                    f"({type(e).__name__}); the rest of the folder is still there, with the record of what the skill "
+                    "did here. The one next step: run the same command again"
+                    + (f" and type {n}" if asked else "") + "; it leaves that where it is and finishes: "
+                    + own_command(p, "uninstall", "--delete-copies"))
+        _, why, step = folder_words(p, at)
+        why = f"{why} ({type(e).__name__})"
+    elif e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+        why = f"something put files into it while it was being removed ({type(e).__name__}: {e.strerror})"
+        step = "end the program that is still writing there"
+    else:
+        why = f"the system refused it ({type(e).__name__}: {e.strerror})"
+        step = "this computer's administrator finds why"
+    shown, changed = shown_one(at)
+    after = copies_on_disk(p)
+    asked = os.path.isdir(p["forge"]) and bool(set(os.listdir(p["forge"])) & FORGE_NAMES)   # the number is asked again
+    went = ("how many of the copies on the disk went before it stopped could not be read" if None in (before, after)
+            else "no copy was on the disk" if before == 0 else
+            f"{before - after} of the {before} copies on the disk {'was' if before - after == 1 else 'were'} deleted "
+            "before it stopped")
+    return (f"Not deleted: the folder of copies is still at {p['data']}. Its removal stopped at {shown}{changed}: "
+            f"{why}. {went[0].upper() + went[1:]}; the rest of the folder is still there, with the record of what the "
+            f"skill did here. The one next step: {step}, then run the same command again"
+            + (f" and type {n}" if asked else "") + ": " + own_command(p, "uninstall", "--delete-copies"))
 
 
 def take_service_file(p, f, removed, left):
@@ -3543,20 +6832,35 @@ def take_service_file(p, f, removed, left):
     if not os.path.lexists(f):
         return
     rec, why = read_made(p)
-    if service_file_ours(p, rec, f):
+    state, unread = service_file_state(p, rec, f)
+    if state == "no" and rec is None:
+        # M158 (G6.25): the record is lost, so the file is read against what this home's setup writes there now
+        mine = service_as_written(p, f)
+        if mine:
+            os.remove(f)
+            removed.append(f"{f} (byte for byte what setup writes there for this home)")
+        else:
+            left.append(f"{f} (" + ("it could not be read" if mine is None else "it is not what setup writes there "
+                        "now") + ", and the record of what the skill wrote was not read, so the tool cannot tell "
+                        "whose it is; left as it is)")
+        return
+    if state == "could not be read":
+        left.append(f"{f} (it could not be read: {unread}, so the tool could not tell whether it is as the skill "
+                    "wrote it; left byte for byte)")
+    elif state == "yes":
         os.remove(f)
         removed.append(f)
-        if rec is not None and os.path.exists(p["data"]):
-            rec.pop(f, None)
-            write_made(p, rec)
+        unclaim(p, [f])
     else:
         left.append(f"{f} (not as the skill wrote it: changed since, or written by something else)")
 
 
-def remove_made(p, targets, removed):
+def remove_made(p, targets, removed, failed=None, keep=()):
     """Remove what the record says the skill made at or inside each target: a file by its name, a tree a program
     of the skill's wrote (checked by its top-level names first), a folder only once it is empty. Each removed thing
-    is named; nothing the record does not hold is touched."""
+    is named; nothing the record does not hold is touched. M179: each removal the system refused is put in `failed`
+    (the error itself) where a caller gives one; the others go on. M180: what `keep` names (the owner read's answers
+    that are not "mine", read before) stays where it is, with the folders above it, which stay the skill's."""
     rec, why = read_made(p)
     if rec is None:
         return
@@ -3567,6 +6871,8 @@ def remove_made(p, targets, removed):
     gone, caches, as_dir = [], 0, []
     for k in mine:
         kind = rec[k]
+        if k in keep:                       # M180: not the skill's, whatever the record says: left as it is
+            continue
         try:
             if kind == "file" and (os.path.isfile(k) or os.path.islink(k)):
                 os.remove(k)
@@ -3575,25 +6881,26 @@ def remove_made(p, targets, removed):
                 allowed = FORGE_NAMES if kind == "tree:forge" else GIT_NAMES if kind == "tree:git" else None
                 names = os.listdir(k)                 # read now, at the moment of removal
                 other = [x for x in names if allowed is not None and x not in allowed and not x.endswith(".lock")]
-                if other:                             # what the program wrote goes; the rest and the folder stay
+                held = [t for t in keep if inside(t, k)]          # M180: another account's, at any depth
+                if other or held:                     # what the program wrote goes; the rest and the folder stay
                     for x in names:
                         if x not in other:
-                            e = os.path.join(k, x)
-                            shutil.rmtree(e) if os.path.isdir(e) and not os.path.islink(e) else os.remove(e)
+                            as_dir.extend(remove_chain(os.path.join(k, x), held))
                     as_dir.append(k)                  # still the skill's folder: it goes once it is empty
                 else:
-                    shutil.rmtree(k)
+                    rmtree_whole_path(k)
                 if kind == "tree:git":
                     caches += 1
-                elif not other:
+                elif not other and not held:
                     removed.append(k)
             elif kind == "dir" and os.path.isdir(k) and not os.path.islink(k) and not os.listdir(k):
                 os.rmdir(k)
                 removed.append(k)
             if not os.path.lexists(k):
                 gone.append(k)
-        except OSError:
-            pass
+        except OSError as e:
+            if failed is not None:
+                failed.append(e)
     for t in targets:                       # a target folder of the skill's own goes once it is empty
         try:
             if t not in rec and os.path.isdir(t) and not os.path.islink(t) and not os.listdir(t) and t != p["data"]:
@@ -3605,10 +6912,11 @@ def remove_made(p, targets, removed):
         removed.append(f"{p['cache']}: {caches} cache repositories the skill made")
     unclaim(p, gone)
     if as_dir:
-        rec, why = read_made(p)
-        if rec is not None:
-            rec.update({k: "dir" for k in as_dir})
-            write_made(p, rec)
+        with made_lock(p, make=False):
+            rec, why = read_made(p)
+            if rec is not None:
+                rec.update({k: "dir" for k in as_dir})
+                write_made(p, rec)
 
 
 def downloaded_from(here):
@@ -3626,16 +6934,25 @@ def still_here(p, st, record="read"):
     """G9.8 (M63, the family's rule 8, 2026-11-23: an agent invents where the tool is silent): everything still on
     this computer because of the skill that uninstall does not take, with where it is and whose it is to delete."""
     lines = []
-    root = st.get("setup_from")
-    if root and os.path.isdir(root):
-        if plugin_registry_for(os.path.join(root, "scripts", "mirror.py")):
-            how = (f"with its own plugin uninstall: claude plugin uninstall {PLUGIN}@{PLUGIN}" if system()[0] != "darwin"
-                   else "with its own plugin uninstall")
-            lines.append(f"{root}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
-                         f"are Claude Code's; it removes both {how}. Nothing runs from them now.")
-        else:
-            lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
-                         "delete it like any folder when you want. Nothing runs from it now.")
+    reg, catalog = plugin_record(st)
+    root = None if plugin_registry_for(os.path.join(st.get("setup_from") or os.sep, "scripts", "mirror.py")) else st.get("setup_from")
+    listed, key = plugin_read(st)
+    if reg and listed is not False:
+        # G9.14 (M104, the family's rule 29 (e)): named by Claude Code's own list, never by a version folder; the one
+        # command whole, with the names the list or the record holds.
+        key = key or (f"{PLUGIN}@{catalog}" if catalog else None)
+        how = (f"claude plugin uninstall {shlex.quote(key)}" if key and system()[0] != "darwin" else "")
+        unread = "" if listed else f", if Claude Code still has them (its list of plugins, {reg}, could not be read)"
+        # Seen 2026-11-24 (Claude Code 2.1.331, Linux, a stock virtual machine): its uninstall takes the plugin off its
+        # list at once and leaves the folder, marked; the folder's removal 14 days later is its documentation's word.
+        lines.append(f"Claude Code's folder for this skill as a plugin, and its entry in Claude Code{unread}. They "
+                     "are Claude Code's. Claude Code's own plugin uninstall takes this plugin off Claude Code's list at "
+                     "once; its folder in Claude Code's cache stays, and Claude Code's documentation says it removes "
+                     "that folder 14 days later. Nothing runs from them now."
+                     + (f" Its command for this plugin:\n      {how}" if how else ""))
+    elif root and os.path.isdir(root):
+        lines.append(f"{root}: the folder the skill was downloaded into (a copy of its repository). It is yours; "
+                     "delete it like any folder when you want. Nothing runs from it now.")
     elif st.get("setup_from_file") and os.path.isfile(st["setup_from_file"]):
         lines.append(f"{st['setup_from_file']}: the copy of the script setup was run from. It is yours; delete it "
                      "when you want. Nothing runs from it now.")
@@ -3645,9 +6962,13 @@ def still_here(p, st, record="read"):
                      "or Claude Code's for a plugin; nothing runs from it now.")
     made = [d for d in (st.get("made_folders") or []) if os.path.isdir(d)]
     holds = [d for d in made if os.path.exists(p["data"]) and (p["data"] + os.sep).startswith(d + os.sep)]
-    if holds:
+    if holds and os.path.exists(p["state"]):
         lines.append(", ".join(holds) + ": folders setup made to hold the folder of copies. They stay while it "
                      "stays, and go with it once they are empty.")
+    elif holds:        # M181 (seen 2026-11-26): their only record, the state file, went in this run
+        lines.append(", ".join(holds) + ": folders setup made to hold the folder of copies. They stay: the skill "
+                     "keeps no record of them after this run, so no later run of it removes them; an empty one does "
+                     "no harm.")
     for d in made:
         if d not in holds:
             lines.append(f"{d}: a folder setup made, left because other files are in it now. It is yours.")
@@ -3679,7 +7000,8 @@ def stayed_for(p, foreign):
 
 
 def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign=(), unreadable=None,
-                     left_service=()):
+                     left_service=(), unread_service=None, kept_jobs=(), told_off=(), not_deleted=False,
+                     stays=None, owners=None):
     """Rule 8: the last thing uninstall prints says what is gone now, what is kept, and (G9.8) what is still on this
     computer because of the skill that uninstall does not take. Run twice, it says so. Rule 23: "gone" only of what
     it removed by name; what it did not make is named as the person's, with each folder that stayed for it."""
@@ -3689,35 +7011,87 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         for r in removed:
             say(f"  {r}")
     if unreadable:
-        say(f"Not taken: {unreadable}, so the skill cannot tell what in its folders it made, and nothing was "
-            f"removed from them: the forge's binary, the copies' caches, the settings and your keys ({p['keys']}), "
-            "and the folder of copies are still there. Nothing of the skill's runs. They are yours, to keep or "
-            "delete after you look at them.")
+        # M158 (G6.25): said as that; each kept key named, with why it stayed
+        keys = []
+        try:
+            keys = sorted(n for n in os.listdir(p["keys"]) if n.endswith(".key"))
+        except OSError:
+            pass
+        held = ([f"the GitHub key for {n[:-4]} ({os.path.join(p['keys'], n)})" for n in keys]
+                + [f"the forge's key for its '{MIRROR_USER}' account ({p['mirror_key']})"] * os.path.lexists(p["mirror_key"])
+                + [f"the password of your Gitea account ({p['password']})"] * os.path.lexists(p["password"]))
+        say(f"Not taken: {unreadable}, so uninstall cannot tell which files in its folders the skill made, and took "
+            "nothing from them; nothing there was deleted or written over. Still there, each as it was: "
+            + (f"the folder of copies, {p['data']}, with the forge and its copies; " if holds_mirror(p) else "")
+            + ", ".join([w for w, there in (
+                (f"the forge's binary ({p['bin']})", os.path.lexists(p["bin"])),
+                (f"the copies' caches ({p['cache']})", os.path.lexists(p["cache"])),
+                (f"the settings ({p['settings']})", os.path.lexists(p["settings"]))) if there]
+                        or ["the other files in those folders"])    # each named only where it is (seen on a stock guest 11-26)
+            + ("; and, kept because that record cannot show them to be the skill's to take: " + "; ".join(held)
+               if held else "") + ". Nothing of the skill's runs. They are yours, to keep or delete after you look "
+            "at them.")
     if foreign:
         say("Not the skill's, so left where they are (yours, or put there since setup):")
-        for x in foreign:
-            say(f"  {x}")
+        owners = owners or {}              # M180: whose, from the read made before the removal; never read here
+        for x in foreign[:10]:             # M179: a name somebody else chose, through the tool's own name display
+            say(f"  {shown_as_is(x)}" + (f": {whose_words(owners[x])}" if x in owners else ""))
+        if len(foreign) > 10:
+            say(f"  and {len(foreign) - 10} more")
         held = stayed_for(p, foreign)
         if held:
             say("Folders of the skill's that stayed because they hold those:")
             for d in sorted(held):
-                say(f"  {d}: holds " + ", ".join(sorted(held[d])[:3]) + (", and more" if len(held[d]) > 3 else ""))
+                say(f"  {d}: holds " + ", ".join(shown_as_is(x) for x in sorted(held[d])[:3])
+                    + (", and more" if len(held[d]) > 3 else ""))
+        if not all(shows_as_is(x) for x in foreign[:10]):
+            say(f"In those names, {SHOWN_CHANGED}.")
+    if (left_service or unread_service) and told_off:
+        say("Switched off first, and read off before anything was removed: " + "; ".join(told_off) + ".")
+    for unit, said in SYSTEMD_LINK_LEFT:
+        link = wants_link(p, unit)
+        if os.path.lexists(link):
+            say(link_left_line(link, unit, said))
     if left_service:
         say("Not taken, and still there: " + "; ".join(left_service) + ". It is switched off; look at it, and keep "
             "or delete it as you choose.")
-    if not removed and not unreadable and not foreign and not left_service:
+    if kept_jobs:
+        say("Left as they are, because the tool cannot show them to be this home's: " + "; ".join(kept_jobs) + ".")
+    if unread_service:
+        f, why = unread_service[1], unread_service[2]
+        say(f"Not taken, and left byte for byte: {f}. It could not be read: {why}, so the tool could not tell whose "
+            f"it is. It is still in {os.path.dirname(f)}, "
+            + ("the folder launchd reads at a login" if system()[0] == "darwin" else
+               "the folder systemd reads this account's services from") + "; look at it, and keep or delete it as you "
+            "choose.")
+    if not removed and not unreadable and not foreign and not left_service and not unread_service and not kept_jobs:
         say("Gone now: nothing; the service, the sync timer, the forge's binary, the settings and the keys were "
             "already gone.")
     if linger_said:
         say(linger_said)
     record_here = os.path.exists(os.path.join(p["data"], MADE_RECORD))
-    if unreadable:
+    rec_kept = read_made(p)[0] or {}
+    for x in sorted(k for k, v in rec_kept.items() if v == "set-aside record" and os.path.lexists(k)):
+        # M158 (G6.25): the record setup --use-this-folder set aside is the person's, and named among what is kept
+        say(f"Kept: {x}, the record of what the skill made that could not be read, set aside by setup "
+            "--use-this-folder as it was. It is yours.")
+    if unreadable or not_deleted:          # M158; M179: said in its own line, last
         pass
     elif os.path.exists(p["forge"]) and record_here and set(os.listdir(p["forge"])) & FORGE_NAMES:
+        # M144: while the skill's own copy is there (or could not be read), the words as before; once it is gone, a
+        # way that works with the copy of the tool that is there, and one with no copy of it left. When no copy of the
+        # tool was read there (uninstall run from the own copy itself), only what was read: the own copy is gone, and
+        # another copy only as an "if" (the maintainer's ruling, 11-25: no new read is made for it)
+        how = ("with: uninstall --delete-copies" if path_there(p["script"]) is not False else
+               f"with: {own_command(p, 'uninstall', '--delete-copies')}, in a terminal window of your own (it asks "
+               "you to type the number of copies), or, once no copy of this skill is left on this computer, as you "
+               "delete any folder of yours" if tool_copy(p) else
+               "as you delete any folder of yours; the skill's own copy is gone now, and if another copy of this skill "
+               "is on this computer, its uninstall --delete-copies does it, in a terminal window of your own")
         say(f"Kept: the folder of copies, {p['data']} ({n} copies), with the record of what the skill did here. It "
-            "is yours; delete it only when you are sure, with: uninstall --delete-copies. Setup run again later finds "
-            "this folder and goes on from it: the mirror account gets a new key, and your Gitea account and its "
-            "password are left as they are.")
+            f"is yours; delete it only when you are sure, {how}. Setup run again later finds this folder and goes on "
+            "from it: the mirror account gets a new key, and your Gitea account and its password are left as they "
+            "are.")
     elif record_here:
         say(f"Kept: {p['data']}, the record of what the skill did here. It is yours.")
     elif not foreign:
@@ -3727,7 +7101,12 @@ def uninstall_census(p, removed, linger_said, n, st=None, record="read", foreign
         say("Still on this computer, and not uninstall's to take:")
         for x in left:
             say(f"  {x}")
-    if foreign or left_service or unreadable:
+    if stays:                              # M179: the folder that stays, above the closing sentence (G9.12: the last
+        say(stays)                         # line says the mirror is off this computer and that what stayed is named)
+    if kept_jobs:
+        say("What uninstall could not show to be this home's is named above, and was left as it is; it is yours, "
+            "to keep or delete after you look at it.")
+    elif foreign or left_service or unreadable or unread_service:
         say("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or delete "
             "after you look at it.")
 
@@ -3761,6 +7140,12 @@ def main(argv=None):
     s.add_argument("--linger", action="store_true",
                    help="on Linux: the person said yes to lingering, so the mirror runs after a restart with no one "
                         "logged in")
+    s.add_argument("--use-this-folder", action="store_true",
+                   help="the person's own word: go on with a folder that holds a mirror whose record of what the "
+                        "skill made is lost (its stop names it)")
+    s.add_argument("--new-password", action="store_true",
+                   help="the person's own word: give their Gitea account a new password, kept for them (a password "
+                        "they set for it themselves stops working)")
     s.add_argument("--no-linger", action="store_true",
                    help="on Linux: do not switch on lingering; the mirror then syncs only while you are logged in")
     s.set_defaults(fn=cmd_setup)
@@ -3806,6 +7191,12 @@ def main(argv=None):
     r = sub.add_parser("run-forge", help="(used by the service) start the forge")
     r.set_defaults(fn=cmd_run_forge)
     a = ap.parse_args(argv)
+    floor = root_door(paths(), a.cmd + (f" {a.key_cmd}" if a.cmd == "key" else ""),    # M177: before any read
+                      sys.argv[1:] if argv is None else argv)
+    if floor:
+        say(floor)
+        return 2
+    _made_start.update(data=os.path.abspath(paths()["data"]), fresh=home_fresh(paths()), use=False)    # M158: read before the command writes anything
     lines, stop = settings_lines()
     for line in lines:
         say(line)
@@ -3820,7 +7211,32 @@ def main(argv=None):
                "Nothing of the skill's is set up on this computer; to use it, install the plugin again and run "
                "setup."))
         return 3
-    return a.fn(a)
+    floor = folders_floor(paths(), a.cmd + (f" {a.key_cmd}" if a.cmd == "key" else ""))
+    if floor:
+        say(floor)
+        return 2
+    try:
+        if a.cmd not in ("uninstall", "status", "run-forge", "expose"):
+            # M151, M154, M157: the kept files are read first, so a command that cannot read one stops before it
+            # changes anything. Uninstall never stops on them (a leave always goes to its end); status says them in
+            # its lines.
+            load_state(paths())
+            load_settings(paths())
+        if a.cmd in ("setup", "sync", "go", "restore", "backup", "upgrade-forge"):
+            answer, why = forge_ini_read(paths())   # M159: never a new settings file over one in its place
+            if answer == "could not be read":
+                raise KeptUnread(paths()["app_ini"], why)
+        return a.fn(a)
+    except DoorShut as e:
+        say(str(e))
+        return 1
+    except KeptUnread as e:          # a kept file that could not be read stops the command before any change
+        say(kept_stop_words(paths(), e, a.cmd))
+        return 2
+    finally:
+        if _setup_held[0]:
+            _setup_held[0] = False
+            drop_lock(paths())
 
 
 if __name__ == "__main__":

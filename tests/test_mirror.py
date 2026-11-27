@@ -11,6 +11,8 @@ import inspect
 import io
 import json
 import os
+import plistlib
+import random
 import re
 import shutil
 import socket
@@ -102,6 +104,15 @@ class _PassableAbove:
 from fake_github import FakeGitHub  # noqa: E402
 
 
+def refuse_words(unit):
+    """systemctl's words for a stop a unit's RefuseManualStop=yes refuses, on standard error. RECORDED on systemd
+    255 (a stock Ubuntu 24.04 guest, 2026-11-26), the forge's unit's two lines word for word."""
+    name = unit if unit.endswith((".service", ".timer")) else unit + ".service"
+    return (f"Failed to stop {name}: Operation refused, unit {name} may be requested by dependency only (it is "
+            f"configured to refuse manual start/stop).\nSee user logs and 'systemctl --user status {name}' for "
+            "details.\n")
+
+
 def fread_bytes(path):
     with open(path, "rb") as f:
         return f.read()
@@ -187,6 +198,83 @@ def real_gitea():
         return None
 
 
+BOOT_ID = "89c29fe6010d48b2886cf8dc3e19d3ca"     # what %b gave on the probe's guest
+
+
+def sd_standin_words(value, home):
+    """THE SUITE'S STAND-IN for systemd 255 reading one ExecStart= or Environment= value into words, as seen
+    2026-11-25 on two stock Ubuntu 24.04 guests (row M148; the planted-home walk proves it on a real machine): words
+    part at blanks outside quotes; inside double or single quotes a blank is kept; a backslash takes the character
+    after it; %% is %, %h the home, %b the boot id, any other specifier refuses the line (None); a $ is kept as written
+    (the bus holds the line before $ is expanded at start). None also for a quote left open."""
+    words, cur, quote, inword, i = [], "", None, False, 0
+    while i < len(value):
+        c = value[i]
+        if c == "\\" and i + 1 < len(value):
+            cur, inword, i = cur + value[i + 1], True, i + 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+            else:
+                cur += c
+        elif c in "\"'":
+            quote, inword = c, True
+        elif c in " \t":
+            if inword:
+                words.append(cur)
+            cur, inword = "", False
+        else:
+            cur, inword = cur + c, True
+        i += 1
+    if quote:
+        return None
+    if inword:
+        words.append(cur)
+    out = []
+    for w in words:
+        r, j = "", 0
+        while j < len(w):
+            if w[j] != "%":
+                r, j = r + w[j], j + 1
+                continue
+            spec = {"%": "%", "h": home, "b": BOOT_ID}.get(w[j + 1:j + 2])
+            if spec is None:
+                return None
+            r, j = r + spec, j + 2
+        out.append(r)
+    return out
+
+
+# G1.24's floor (the owner's ruling, 11-25): setup's one read of the manager's version over the user bus, before its
+# first write; a read, asked of nothing else
+# busctl's own words with no user bus, RECORDED from the real program, 2026-11-25: on an Ubuntu 24.04 host, systemd
+# 255.4, and on a stock Ubuntu 24.04 guest, systemd 255.4-1ubuntu8.18, the same words state by state (research logs
+# busctl-nobus-words and busctl-words-guest): with neither variable set (on the guest also after su - from root and
+# under sudo -u, which leave both unset); with XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS set and no bus where it
+# leads. The family's record of five stock systems (systemd 237 to 255) holds the same for 249 and 255. (systemctl's
+# words in the first shell are other words: "Failed to connect to bus: No medium found".)
+BUSCTL_NO_ADDRESS = ("Failed to set bus address: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined (consider "
+                     "using --machine=<user>@.host --user to connect to bus of other user)")
+BUSCTL_NO_BUS = "Failed to connect to bus: No such file or directory"
+FLOOR_READ = ["busctl", "--user", "--json=short", "get-property", mirror.SD_DEST, "/org/freedesktop/systemd1",
+              mirror.SD_DEST + ".Manager", "Version"]
+
+
+def sd_standin_unit(text, home):
+    """(ExecStart's data, Environment's data) as busctl --json=short gives them for a unit with this text: a start
+    line systemd refuses (a program path holding a double quote, an apostrophe or a backslash, seen: the unit reads bad-setting) gives no
+    start line at all, as seen."""
+    starts, env = [], []
+    for line in text.split("\n"):
+        if line.startswith("ExecStart="):
+            w = sd_standin_words(line[len("ExecStart="):], home)
+            starts = [] if not w or any(c in "\"'\\" for c in w[0]) else [[w[0], w, False, 0, 0, 0, 0, 0, 0, 0]]
+        elif line.startswith("Environment="):
+            env += sd_standin_words(line[len("Environment="):], home) or []
+    return starts, env
+
+
 class Home:
     """A person's home of their own for one test: WSM_HOME, HOME and XDG_CONFIG_HOME all inside a temp folder, and
     the service managers (systemctl, loginctl, launchctl) stood in for, so a test never touches the real ones."""
@@ -203,14 +291,219 @@ class Home:
         self.timer_mono = ""         # the timer's next run on the boot clock (systemd's NextElapseUSecMonotonic)
         self.kws = []                # the keyword arguments of each command the stand-in answered
         self.mac_session = True      # a Mac: is this account logged in at the screen (its gui/<uid> domain there)
+        # launchd's jobs, as seen 2026-11-24 on a Mac (macOS 27.2.1): a job booted out while it runs is still there
+        # for a moment, and a bootstrap while it is answers 5. teardown_reads: how many `launchctl print` reads of a
+        # booted-out job still find it (0: gone at once). print_code: what print answers instead, when set (a read
+        # that is not 113 and not a job). A job never loaded or booted out here keeps the old answers.
+        self.teardown_reads, self.loaded, self.tearing, self.gone, self.answered = 0, set(), {}, set(), []
+        self.print_code = None
+        self.domain_code = None      # what `launchctl print gui/<uid>` itself answers, when set (the domain's own read)
+        # systemd's user units, as seen 2026-11-24 on a stock Ubuntu 24.04 (M107): a unit `enable --now` or `start`
+        # started reads ActiveState=active until it is stopped; user_bus False is a shell with no user bus (after
+        # `su -` from root, or XDG_RUNTIME_DIR unset), where every `systemctl --user` answers 1 "Failed to connect to
+        # bus: No medium found" and changes nothing; stop_reads: how many reads a stopped unit still reads deactivating.
+        self.units_up, self.user_bus, self.stop_reads, self.stopping = set(), True, 0, {}
+        self.show_answer = None      # (code, stdout) every `show <unit> -p ActiveState` answers instead, when set
+        # refuse_stop: units a person's own RefuseManualStop=yes keeps systemd from stopping by hand. RECORDED on
+        # systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): `disable --now` takes the links, stops
+        # the others, says refuse_words(unit) on standard error, and ENDS WITH CODE 0; `stop` alone says the same, 4.
+        self.refuse_stop = set()
+        # G1.24: the user manager's bus (busctl), answering from the unit files on disk as sd_standin_unit reads them.
+        # bus_answer: (code, stdout) every busctl call answers instead, when set; bus_starts: the start lines every
+        # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
+        self.bus_answer, self.bus_starts, self.bus_objs, self.bus_loaded = None, None, {}, {}
+        self.launchd_args = None     # (arguments, environment) every loaded job's print shows instead, when set; or
+                                     # {label: (arguments, environment) or None} per job (M150)
+        self.launchd_form = None     # a loaded job's whole print block instead, when set (recorded or MADE UP: each
+                                     # test names which)
+        self.bus_env_extra = []      # Environment entries a person's own drop-in adds to every unit (rule 31 (v.5) (3))
+        self.launchd_env_extra = {}  # variables a loaded job's print shows besides its file's own
+        self.no_bus_words = "Failed to connect to bus: No medium found"     # systemd 255's; 262 says it otherwise
+        # bus_version: what setup's floor read (the manager's Version over the bus) answers: (code, stdout, stderr),
+        # or "timeout"; bus_answer "timeout": every other busctl call runs past its limit. bus_kws: each busctl
+        # call's keywords, so a test reads its time limit. sd_version: systemctl --version's number.
+        self.bus_version = (0, json.dumps({"type": "s", "data": "255.4-1ubuntu8"}) + "\n", "")
+        self.bus_kws, self.sd_version = [], "255"
+        # bus_env_set: variables a person's own drop-in sets, in the form SEEN on systemd 237 to 255 (the family's
+        # rule 31 (v.5) (3), 4:03 PM ET 11-25): the list holds each ONCE, with the drop-in's value. bus_dropins: the
+        # unit's DropInPaths.
+        self.bus_env_set, self.bus_dropins = {}, []
+        # bus_starts_extra: start lines a person's own drop-in adds after the unit's own, in the form SEEN on the same
+        # five (rule 31 (v.5) (3), 4:22 PM ET 11-25: beside ours, ours first); bus_type: the Type every unit reads
+        # instead of its file's own, when set (a drop-in that sets it).
+        self.bus_starts_extra, self.bus_type = [], None
+        # XDG_RUNTIME_DIR: a login of the person's own sets it, so a home has one (setup's floor reads it, G1.24)
         self.env = {"WSM_HOME": os.path.join(self.tmp, "wsm"), "HOME": os.path.join(self.tmp, "home"),
-                    "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config")}
+                    "XDG_CONFIG_HOME": os.path.join(self.tmp, "home", ".config"),
+                    "XDG_RUNTIME_DIR": os.path.join(self.tmp, "run")}
         os.makedirs(self.env["HOME"])
+        os.makedirs(self.env["XDG_RUNTIME_DIR"], mode=0o700)
         self.saved_env = {k: os.environ.get(k) for k in self.env}
         self.saved_run = mirror.run
         self.procs = []
 
+    def launchd(self, cmd):
+        """launchctl's bootstrap, bootout and print of one job, or None for every other command."""
+        dom = f"gui/{os.getuid()}"
+        done = lambda rc, out="", err="": subprocess.CompletedProcess(cmd, rc, out, err)
+        if cmd == ["launchctl", "print", dom] and self.domain_code is not None:
+            return done(self.domain_code, "", "")
+        if not self.mac_session and cmd[:2] in (["launchctl", "bootstrap"], ["launchctl", "bootout"],
+                                                ["launchctl", "print"]) and cmd[2].startswith(dom):
+            # Seen 2026-11-24 over ssh on macOS 13.7.8, a test account with no screen login: print of the domain
+            # and of a job, and bootout of a job, each answered 125.
+            return done(125, "", "Could not print domain: 125: Domain does not support specified action\n")
+        if cmd[:3] == ["launchctl", "bootstrap", dom] and len(cmd) == 4 and self.service_ok:
+            label = os.path.basename(cmd[3])[:-len(".plist")]
+            if label in self.loaded or label in self.tearing:
+                return done(5, "", "Bootstrap failed: 5: Input/output error\n")
+            self.loaded.add(label)
+            self.gone.discard(label)
+            if self.forge_follows and cmd[3] == mirror.paths()["plist"]:
+                self.start_forge()
+            return done(0)
+        if cmd[:2] == ["launchctl", "bootout"] and len(cmd) == 3 and cmd[2].startswith(dom + "/"):
+            label = cmd[2][len(dom) + 1:]
+            if self.forge_follows and label == mirror.LAUNCHD_LABEL:
+                for pr in self.procs:
+                    if pr.poll() is None:
+                        pr.terminate()
+                        pr.wait(30)
+            if label not in self.loaded:                 # nothing loaded under it: launchd says so, and has none
+                if label not in self.tearing:
+                    self.gone.add(label)
+                return done(3, "", "Boot-out failed: 3: No such process\n")
+            self.loaded.discard(label)
+            if self.teardown_reads:
+                self.tearing[label] = self.teardown_reads
+            else:
+                self.gone.add(label)
+            return done(0)
+        if cmd[:2] == ["launchctl", "print"] and len(cmd) == 3 and cmd[2].startswith(dom + "/"):
+            label = cmd[2][len(dom) + 1:]
+            if self.print_code is not None:
+                return done(self.print_code, "", "")
+            if label in self.tearing:
+                self.tearing[label] -= 1
+                if self.tearing[label] <= 0:
+                    del self.tearing[label]
+                    self.gone.add(label)
+                return done(0, "state = running\n")
+            given = self.launchd_args
+            told = given is not None and (not isinstance(given, dict) or label in given)
+            plist = os.path.join(os.path.dirname(mirror.paths()["plist"]), label + ".plist")
+            if label in self.gone or (label not in self.loaded and self.launchd_form is None and not told
+                                      and not os.path.lexists(plist)):
+                # a job launchd does not hold: 113. RECORDED in the gui domain, a session at the screen, macOS 27.2.1
+                # (2026-11-26), for a job never loaded: 113, nothing on stdout, these two lines on stderr word for
+                # word. For a job taken off, in the same domain (macOS 27, 2026-11-24 to 11-26): 113, the code only,
+                # so there the words are the stand-in's own. In the user domain with no session at the screen
+                # (macOS 13.7.8, 2026-11-24 and 11-25): 113, its words ending "in domain for uid: N". Seen on CI's
+                # Mac legs (2026-11-26): the stand-in had answered 0, with no blocks, for a job never loaded.
+                return done(113, "", f"Bad request.\nCould not find service \"{label}\" in domain for user gui: "
+                                     f"{os.getuid()}\n")
+        return None
+
+    def launchd_job(self, label):
+        """THE SUITE'S STAND-IN for the blocks `launchctl print` gives for a loaded job, built from its file with
+        plistlib in the form seen 2026-11-25 on a Mac, macOS 27.2.1, a test account (row M148), and recorded the
+        same day on GitHub's macOS 15.7.9, 15.8.2, 26.6.1 and 26.7.2 (tests/launchd-print): one argument to a line
+        after two tabs; the inherited and default environment blocks; then the job's own environment block,
+        launchd's OSLogRateLimit first (not on 15) and its XPC_SERVICE_NAME last around the file's variables."""
+        given = self.launchd_args
+        if isinstance(given, dict):         # per label: (arguments, environment), or None for a print with no blocks
+            if label in given and given[label] is None:
+                return ""                   # (launchd_parsed: could not be read; such a print is MADE UP, not seen)
+            given = given.get(label)
+        if given is not None:
+            args, env = given
+        else:
+            base = os.path.dirname(mirror.paths()["plist"])
+            f = os.path.join(base, label + ".plist")
+            if not os.path.exists(f):
+                return ""
+            try:
+                with open(f, "rb") as fh:
+                    pl = plistlib.load(fh)
+            except Exception:
+                # A file that is not a plist (M150: any way the parser stops, expat's not-well-formed among them, which
+                # is not a ValueError): the stand-in answers it as it answers no file, with no blocks, and never
+                # raises where the tool would answer. What launchctl print gives for a label whose file is not a
+                # plist is NOT SEEN BY US.
+                return ""
+            if not isinstance(pl, dict):                # a file with no job in it (a bare <plist/>): no block
+                return ""
+            args, env = pl.get("ProgramArguments") or [], pl.get("EnvironmentVariables") or {}
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not isinstance(env, dict):
+                return ""                               # M150: arguments that are not a list of words: no block
+        own = {"OSLogRateLimit": "64", **env, **self.launchd_env_extra}
+        own["XPC_SERVICE_NAME"] = label
+        return (f"gui/{os.getuid()}/{label} = {{\n\tactive count = 1\n\ttype = LaunchAgent\n\tstate = running\n\n"
+                f"\tprogram = {args[0] if args else ''}\n\targuments = {{\n" + "".join(f"\t\t{a}\n" for a in args)
+                + "\t}\n\n\tinherited environment = {\n\t\tSSH_AUTH_SOCK => /var/run/com.apple.launchd.x/Listeners\n\t}\n\n"
+                "\tdefault environment = {\n\t\tPATH => /usr/bin:/bin:/usr/sbin:/sbin\n\t}\n\n\tenvironment = {\n"
+                + "".join(f"\t\t{k} => {v}\n" for k, v in own.items())
+                + "\t}\n\n\tresource coalition = {\n\t\tID = 1\n\t\ttype = resource\n\t}\n}\n")
+
+    def bus(self, cmd):
+        """busctl --user --json=short, as systemd 255 answered it on a stock guest (2026-11-25)."""
+        done = lambda rc, out="", err="": subprocess.CompletedProcess(cmd, rc, out, err)
+        if not os.environ.get("XDG_RUNTIME_DIR") and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            return done(1, "", BUSCTL_NO_ADDRESS + "\n")
+        if not self.user_bus:
+            return done(1, "", BUSCTL_NO_BUS + "\n")
+        if cmd[3:] == ["get-property", mirror.SD_DEST, "/org/freedesktop/systemd1", mirror.SD_DEST + ".Manager",
+                       "Version"]:
+            if self.bus_version == "timeout":
+                raise subprocess.TimeoutExpired(cmd, mirror.BUS_WAIT)
+            return done(*self.bus_version)
+        if self.bus_answer == "timeout":
+            raise subprocess.TimeoutExpired(cmd, mirror.BUS_WAIT)
+        if self.bus_answer is not None:
+            return done(*self.bus_answer)
+        if cmd[3] == "call" and cmd[-3:-1] == ["LoadUnit", "s"]:
+            if not re.search(r"\.(service|timer)$", cmd[-1]):      # the bus takes a whole unit name only
+                return done(1, "", f"Call failed: Unit name {cmd[-1]} is not valid.\n")
+            obj = "/org/freedesktop/systemd1/unit/" + "".join(c if c.isalnum() else "_%02x" % ord(c) for c in cmd[-1])
+            self.bus_objs[obj] = cmd[-1]
+            return done(0, json.dumps({"type": "o", "data": [obj]}) + "\n")
+        if cmd[3] == "get-property" and cmd[5] in self.bus_objs:
+            f = os.path.join(os.path.dirname(mirror.paths()["unit"]), self.bus_objs[cmd[5]])
+            try:
+                text = fread(f) if os.path.exists(f) else ""
+            except OSError:
+                # M150: a unit file the manager cannot open is answered as one with no start line, never a raise; what
+                # systemd answers for a unit file of mode 000 that it has not loaded is NOT SEEN BY US. RECORDED on
+                # systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): one it loaded before the file became unreadable is held as loaded,
+                # its start line too, until a daemon-reload (bus_loaded: the unit's text as loaded)
+                text = self.bus_loaded.get(self.bus_objs[cmd[5]], "")
+            starts, env = sd_standin_unit(text, self.env["HOME"])
+            if cmd[7] == "ExecStart":
+                return done(0, json.dumps({"type": "a(sasbttttuii)",
+                                           "data": (starts if self.bus_starts is None else self.bus_starts)
+                                           + self.bus_starts_extra}) + "\n")
+            if cmd[6:8] == [mirror.SD_DEST + ".Service", "Type"]:
+                if self.bus_type == "unreadable":
+                    return done(1, "", "Failed to get property Type: made up for this test\n")
+                typ = self.bus_type or next((ln[5:] for ln in text.split("\n") if ln.startswith("Type=")), "simple")
+                return done(0, json.dumps({"type": "s", "data": typ}) + "\n")
+            if cmd[7] == "Environment":
+                env = [e for e in env if e.split("=", 1)[0] not in self.bus_env_set]
+                env += [f"{k}={v}" for k, v in self.bus_env_set.items()]
+                return done(0, json.dumps({"type": "as", "data": env + self.bus_env_extra}) + "\n")
+            if cmd[6:8] == [mirror.SD_DEST + ".Unit", "DropInPaths"]:
+                return done(0, json.dumps({"type": "as", "data": self.bus_dropins}) + "\n")
+        return done(1, "", "Unknown object or property\n")
+
     def fake_run(self, cmd, **kw):
+        if cmd[0] == "busctl":
+            self.calls.append(cmd)
+            self.bus_kws.append(kw)
+            return self.bus(cmd)
+        if cmd == ["systemctl", "--version"]:
+            self.calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, f"systemd {self.sd_version} ({self.sd_version}.4-1ubuntu8)\n"
+                                                       "+PAM +AUDIT +SELINUX\n", "")
         if cmd[0] == "pkcheck":
             self.calls.append(cmd)
             self.kws.append(kw)
@@ -226,19 +519,135 @@ class Home:
             return subprocess.CompletedProcess(cmd, 0, f"FileVault is {'On' if self.filevault else 'Off'}.\n", "")
         if cmd[0] in ("systemctl", "loginctl", "launchctl"):
             self.calls.append(cmd)
+            if cmd[:2] == ["systemctl", "--user"]:
+                if not self.user_bus:
+                    return subprocess.CompletedProcess(cmd, 1, "", self.no_bus_words + "\n")
+                verb = [c for c in cmd[2:] if not c.startswith("-")]
+                if verb[:1] in (["enable"], ["disable"]):
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): a unit whose file in
+                    # this account's unit folder cannot be read refuses the WHOLE call, in these words, code 1, and
+                    # with --now nothing in that call is started or stopped; `stop` alone needs no file.
+                    base = os.path.dirname(mirror.paths()["unit"])
+                    for u in verb[1:]:
+                        name = u if u.endswith((".service", ".timer")) else u + ".service"
+                        f = os.path.join(base, name)
+                        if os.path.lexists(f) and not os.path.islink(f) and not os.access(f, os.R_OK):
+                            return subprocess.CompletedProcess(
+                                cmd, 1, "", f"Failed to {verb[0]} unit: Unit file {name} does not exist.\n")
+                refused = [u for u in verb[1:] if u in self.refuse_stop] if (
+                    verb[:1] == ["stop"] or (verb[:1] == ["disable"] and "--now" in cmd)) else []
+                if verb[:1] == ["is-enabled"]:
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): on stdout,
+                    # "enabled" (code 0) while its link from setup is there, "disabled" (code 1) once it is taken,
+                    # and "static" (code 0) for the sync's one-shot service, which has no install section
+                    # (log sha256 85971716290afec1): "not-found" (code 4) for a unit whose
+                    # file is at mode 000, while systemd still holds it loaded and once it does not, its link standing
+                    u = verb[1]
+                    name = u if u.endswith((".service", ".timer")) else u + ".service"
+                    base = os.path.dirname(mirror.paths()["unit"])
+                    f = os.path.join(base, name)
+                    if os.path.lexists(f) and not os.path.islink(f) and not os.access(f, os.R_OK):
+                        return subprocess.CompletedProcess(cmd, 4, "not-found\n", "")
+                    if name == mirror.SYNC_UNIT + ".service":
+                        return subprocess.CompletedProcess(cmd, 0, "static\n", "")
+                    link = os.path.join(base, "timers.target.wants" if name.endswith(".timer") else
+                                        "default.target.wants", name)
+                    there = os.path.lexists(link)
+                    return subprocess.CompletedProcess(cmd, 0 if there else 1,
+                                                       "enabled\n" if there else "disabled\n", "")
+                if verb[:1] == ["stop"] and refused:
+                    return subprocess.CompletedProcess(cmd, 4, "", "".join(refuse_words(u) for u in refused))
+                if verb[:1] == ["stop"]:
+                    # RECORDED on systemd 255 (log sha256 85971716290afec1): `stop` of a unit
+                    # not loaded (its file gone from the unit folder) and not running ends 5, "Failed to stop <unit>:
+                    # Unit <unit> not loaded." (what it answers for one not loaded and still running is NOT SEEN BY US)
+                    base = os.path.dirname(mirror.paths()["unit"])
+                    gone = []
+                    for u in verb[1:]:
+                        name = u if u.endswith((".service", ".timer")) else u + ".service"
+                        if (not os.path.lexists(os.path.join(base, name)) and name not in self.bus_loaded
+                                and u not in self.units_up and name not in self.units_up):
+                            gone.append(name)
+                    if gone and len(gone) == len(verb[1:]):
+                        return subprocess.CompletedProcess(cmd, 5, "", "".join(
+                            f"Failed to stop {n}: Unit {n} not loaded.\n" for n in gone))
+                if verb[:1] == ["disable"]:
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): a unit masked (its
+                    # file a link to /dev/null) is "masked, ignoring", code 0, stopped with --now, and its link from
+                    # setup stays; another unit's link is taken. (Which of the two streams each line goes to is NOT
+                    # SEEN BY US: they were read together there; the stand-in gives both on stderr.)
+                    base, said = os.path.dirname(mirror.paths()["unit"]), []
+                    for u in verb[1:]:
+                        name = u if u.endswith((".service", ".timer")) else u + ".service"
+                        f = os.path.join(base, name)
+                        link = os.path.join(base, "timers.target.wants" if name.endswith(".timer")
+                                            else "default.target.wants", name)
+                        if os.path.islink(f) and os.readlink(f) == "/dev/null":
+                            said.append(f"Unit {f} is masked, ignoring.")
+                        elif os.path.lexists(link):
+                            os.remove(link)
+                            said.append(f'Removed "{link}".')
+                    if said or refused:
+                        for u in verb[1:] if "--now" in cmd else []:     # as the plain disable --now below
+                            if u in refused:
+                                continue
+                            if u in self.units_up and self.stop_reads:
+                                self.stopping[u] = self.stop_reads
+                            self.units_up.discard(u)
+                        if "--now" in cmd and mirror.SERVICE in verb[1:] and mirror.SERVICE not in refused:
+                            self.forge_ends()
+                        return subprocess.CompletedProcess(cmd, 0, "", "".join(x + "\n" for x in said)
+                                                           + "".join(refuse_words(u) for u in refused))
+                if verb[:1] == ["daemon-reload"]:
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): after uninstall's
+                    # daemon-reload, a unit whose file is of mode 000 is no longer held (load=not-found)
+                    self.bus_loaded.clear()
+                if verb[:1] in (["enable"], ["start"]) and ("--now" in cmd or verb[0] == "start"):
+                    self.units_up |= set(verb[1:])
+                elif verb[:1] in (["disable"], ["stop"]) and ("--now" in cmd or verb[0] == "stop"):
+                    for u in verb[1:]:
+                        if u in self.units_up and self.stop_reads:
+                            self.stopping[u] = self.stop_reads
+                        self.units_up.discard(u)
+                elif verb[:1] == ["show"] and cmd[-2:] == ["-p", "ActiveState"] and len(cmd) == 6:
+                    u = cmd[3]
+                    if self.show_answer is not None:
+                        return subprocess.CompletedProcess(cmd, self.show_answer[0], self.show_answer[1], "")
+                    if u in self.stopping:
+                        self.stopping[u] -= 1
+                        if self.stopping[u] <= 0:
+                            del self.stopping[u]
+                        return subprocess.CompletedProcess(cmd, 0, "ActiveState=deactivating\n", "")
+                    return subprocess.CompletedProcess(cmd, 0, f"ActiveState={'active' if u in self.units_up else 'inactive'}\n",
+                                                       "")
+            mac = self.launchd(cmd)
+            if mac is not None:
+                self.answered.append((cmd, mac.returncode))
+                return mac
             if cmd[:2] == ["loginctl", "show-user"]:
+                if self.linger == "unread":       # a read that fails: code and words MADE UP for the test
+                    return subprocess.CompletedProcess(cmd, 1, "", "Failed to get user: made up for this test\n")
                 return subprocess.CompletedProcess(cmd, 0, f"Linger={self.linger}\n", "")
             if self.forge_follows:
                 label = f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"
                 if cmd in (["systemctl", "--user", "stop", mirror.SERVICE], ["launchctl", "bootout", label]):
-                    for pr in self.procs:
-                        if pr.poll() is None:
-                            pr.terminate()
-                            pr.wait(30)
+                    self.forge_ends()
                     return subprocess.CompletedProcess(cmd, 0, "", "")
+                if cmd[:4] == ["systemctl", "--user", "disable", "--now"] and mirror.SERVICE in cmd[4:]:
+                    # M179: uninstall's own stop. SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): one
+                    # forge process before `uninstall`, none after it. Until 31f64d9 the stand-in ended the forge only
+                    # on `stop`, so in G9.3 the real Gitea went on writing in its folder while --delete-copies took it.
+                    self.forge_ends()
                 if cmd == ["systemctl", "--user", "start", mirror.SERVICE] or (
                         cmd[:2] == ["launchctl", "bootstrap"] and cmd[-1] == mirror.paths()["plist"]):
                     self.start_forge()
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                # setup's own start (M105): `enable --now` starts a service that is not running, as systemd does
+                # (seen 2026-11-24 on a stock virtual machine: the forge came back after setup run again); a running
+                # one is left as it is.
+                if cmd == ["systemctl", "--user", "enable", "--now", mirror.SERVICE]:
+                    if not any(pr.poll() is None for pr in self.procs):
+                        self.start_forge()
                     return subprocess.CompletedProcess(cmd, 0, "", "")
             if cmd[:3] == ["systemctl", "--user", "show"]:
                 if self.timer_next is None:
@@ -249,9 +658,12 @@ class Home:
                 return subprocess.CompletedProcess(cmd, 0 if self.mac_session else 113, "", "" if self.mac_session
                                                    else "Could not find domain for user gui: " + str(os.getuid()))
             if cmd[:2] == ["launchctl", "print"]:
-                if self.timer_next is None:
+                label = cmd[2].rsplit("/", 1)[-1]
+                if self.timer_next is None and label == mirror.SYNC_LABEL:
                     return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
-                return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n", "")
+                return subprocess.CompletedProcess(cmd, 0, "state = waiting\n\trun interval = 900 seconds\n"
+                                                   + (self.launchd_form if self.launchd_form is not None
+                                                      else self.launchd_job(label)), "")
             if cmd[:2] == ["loginctl", "disable-linger"]:
                 self.linger = "no"
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -262,6 +674,15 @@ class Home:
                 return subprocess.CompletedProcess(cmd, 1, "", "Access denied")
             return subprocess.CompletedProcess(cmd, 0 if self.service_ok else 1, "", "" if self.service_ok else "Failed to connect to bus")
         return self.saved_run(cmd, **kw)
+
+    def forge_ends(self):
+        """With forge_follows: the forge's service is stopped, so the forge's process has ended when this returns,
+        as systemd's stop job and launchd's bootout end it before they answer."""
+        if self.forge_follows:
+            for pr in self.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
 
     def __enter__(self):
         os.environ.update(self.env)
@@ -317,6 +738,7 @@ class Home:
         not answer, the failure carries the forge's own last log lines, not only that it did not answer."""
         seconds = mirror.FIRST_START_WAIT if seconds is None else seconds
         p = mirror.paths()
+        below_short_lived_ports(p)
         script = p["script"] if os.path.exists(p["script"]) else SCRIPT
         pr = subprocess.Popen([sys.executable, "-I", script, "run-forge"], env=dict(os.environ),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -336,6 +758,53 @@ class Home:
                 if time.monotonic() > end:
                     raise AssertionError(f"the forge did not answer in {seconds} s" + forge_log_tail(p))
                 time.sleep(0.5)
+
+
+def short_lived_ports_start():
+    """Where the system's short-lived ports begin: the ones it hands out for a bind to port 0 and for outgoing
+    connections (Linux: ip_local_port_range, 32768 by default; macOS: 49152)."""
+    try:
+        return int(fread("/proc/sys/net/ipv4/ip_local_port_range").split()[0])
+    except (OSError, ValueError, IndexError):
+        return 49152
+
+
+def low_free_port():
+    """A free port on 127.0.0.1 below the system's short-lived range, for the suite's forges. Seen on a GitHub runner
+    (2026-11-24, release 0.1.0's pull_request run, job test 3.9): setup's port came from that range, and in the
+    seconds between run-forge's check and Gitea's bind a listener that is none of the suite's (it answered 407,
+    which no stand-in here sends) was handed the same number; Gitea could not bind, and the test waited 90 s on a
+    stranger. Below that range the system hands the number to no one, so only a program that asks for it by name
+    can take it."""
+    first = short_lived_ports_start()
+    lo, hi = 20000, min(first, 30000)
+    if hi - lo < 200:
+        raise AssertionError(f"this system's short-lived ports begin at {first}: there is no room below them, from "
+                             f"{lo}, for the suite's forge. Run the suite where they begin at 20200 or above.")
+    for cand in random.Random().sample(range(lo, hi), 200):
+        if mirror.port_is_free(cand):
+            return cand
+    raise AssertionError(f"no free port from {lo} to {hi} for the suite's forge (200 tried)")
+
+
+
+def below_short_lived_ports(p):
+    """The guard: a forge the suite starts listens below the short-lived range. With the tool's own pick made there
+    (free_port, G8.7), it finds the port low and changes nothing; a port written some other way is moved as
+    restore writes it (HTTP_PORT, ROOT_URL, and the state's port)."""
+    port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT") or 0)
+    if 20000 <= port < short_lived_ports_start():
+        return port
+    cand = low_free_port()
+    ini = fread(p["app_ini"])
+    ini = re.sub(r"^HTTP_PORT\s*=.*$", f"HTTP_PORT = {cand}", ini, flags=re.M)
+    ini = re.sub(r"^ROOT_URL\s*=.*$", f"ROOT_URL = http://127.0.0.1:{cand}/", ini, flags=re.M)
+    mirror.write_file(p["app_ini"], ini, 0o600)
+    st = mirror.load_json(p["state"], {})
+    if st.get("port"):
+        st["port"] = cand
+        mirror.save_state(p, st)
+    return cand
 
 
 MAC_COPY_UNSEEN = ("No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS "
@@ -367,6 +836,28 @@ def http_get(url, key=None):
         return r.status, r.headers, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read().decode()
+
+
+def doors_the_hosts_way(real_system, always=False):
+    """A Mac runner standing in for Linux has no /proc/net/tcp (seen on GitHub's Mac runners at 649ee99 for G1.9,
+    and at 38590cc for G1.24): setup's door floor and door read then run for real the Mac's own way (netstat), as
+    G1.9 does. always: the same for a Linux runner standing in for a Mac (M150: the Mac's road on every leg), whose
+    netstat is not a Mac's. Returns the pair to put back."""
+    saved = mirror.read_door, mirror.door_floor
+    if os.path.exists(mirror.PROC_TCP[0]) and not always:
+        return saved
+
+    def the_hosts_way(read):
+        def run(*a, **kw):
+            was = mirror.system
+            mirror.system = real_system
+            try:
+                return read(*a, **kw)
+            finally:
+                mirror.system = was
+        return run
+    mirror.read_door, mirror.door_floor = map(the_hosts_way, saved)
+    return saved
 
 
 def tree(root):
@@ -449,7 +940,7 @@ class G1(unittest.TestCase):
                 txt = fread(p["unit"])
                 self.assertTrue(p["unit"].startswith(os.environ["XDG_CONFIG_HOME"]), "the unit is not the person's own")
                 self.assertNotIn("User=", txt)                       # a user unit: it runs as the person
-                self.assertIn(f"-I {p['script']} run-forge", txt)
+                self.assertIn(" ".join(mirror.sd_word(w) for w in ("-I", p["script"], "run-forge")), txt)   # G1.24's quoted words
                 self.assertIn("WantedBy=default.target", txt)
                 self.assertIn(f'Environment="WSM_HOME={os.environ["WSM_HOME"]}"', txt)
                 self.assertIn(["systemctl", "--user", "enable", "--now", mirror.SERVICE], h.calls)
@@ -566,8 +1057,9 @@ class G1(unittest.TestCase):
             self.assertIn("download Gitea", out)
             self.assertEqual(tree(h.tmp), before, "the dry run changed files")
             reads = (["loginctl", "show-user"], ["defaults", "read"], ["fdesetup", "status"],
-                     ["pkcheck", "--action-id"])                                                  # read-only checks
-            changed = [c for c in h.calls if c[:2] not in reads and c[:3] != ["systemctl", "--user", "show-environment"]]
+                     ["pkcheck", "--action-id"], ["launchctl", "print"])                         # read-only checks
+            changed = [c for c in h.calls if c[:2] not in reads and c[:3] != ["systemctl", "--user", "show-environment"]
+                       and c not in (FLOOR_READ, ["systemctl", "--version"])]       # G1.24's floor is a read
             self.assertFalse(changed, "the dry run ran a command that changes something")
             p = h.place_gitea()
             self.assertEqual(h.setup()[0], 0)
@@ -621,6 +1113,357 @@ class G1(unittest.TestCase):
         finally:
             mirror.system = saved
 
+    def test_G1_17_on_a_mac_setup_again_loads_a_running_forge_again(self):
+        """Seen 2026-11-24 on a Mac (macOS 27.2.1, a clean test account): setup run while the forge's launch agent was
+        loaded and running stopped with "did not load the forge's launch agent (code 5)" and left it unloaded; the
+        next setup loaded it; so every second setup broke the forge. A job booted out while it runs is still there
+        for a moment. Each load waits until launchd no longer has the job (its print answers 113, the family's rule
+        24) before loading it; while it is still there, nothing is loaded over it (a load is never tried again)."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                h.teardown_reads = 3
+                for n in range(3):                              # setup, setup again, and once more
+                    self.assertEqual(mirror.install_service(p), (True, ""), n)
+                    self.assertEqual(mirror.install_timer(p, 15), (True, ""), n)
+                    self.assertEqual({mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL} - h.loaded, set(), n)
+                self.assertEqual([c for c, rc in h.answered if rc == 5], [], "a load met the job still there")
+                self.assertTrue(mirror.service(p, "stop"))
+                self.assertNotIn(mirror.LAUNCHD_LABEL, h.tearing, "a stop ends once launchd no longer has the job")
+                self.assertTrue(mirror.service(p, "start"))
+                self.assertIn(mirror.LAUNCHD_LABEL, h.loaded)
+                # The wait is written in the forge's own log folder when it is there.
+                os.makedirs(os.path.join(p["forge"], "log"), exist_ok=True)
+                self.assertTrue(mirror.service(p, "stop"))
+                logged = fread(os.path.join(p["forge"], "log", "launchd.log")).splitlines()
+                self.assertRegex(logged[-1], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ " + re.escape(mirror.LAUNCHD_LABEL)
+                                 + r": gone after \d+\.\d s, 4 read\(s\), last code 113$")
+                self.assertTrue(mirror.service(p, "start"))
+                saved_wait, mirror.LAUNCHD_WAIT = mirror.LAUNCHD_WAIT, 2
+                try:
+                    # A job that never goes: nothing is loaded over it, and the words say only what was read.
+                    h.teardown_reads = 10 ** 6
+                    n = len(h.calls)
+                    t = time.monotonic()
+                    ok, why = mirror.install_service(p)
+                    self.assertLess(time.monotonic() - t, 10)
+                    self.assertFalse(ok)
+                    self.assertRegex(why, r"^launchd still had the forge's job \d+ s after it was told to take it off, "
+                                          r"so it was not loaded again\. Run setup again in a minute, and if it stops "
+                                          r"here again, run status$")
+                    self.assertFalse([c for c in h.calls[n:] if c[:2] == ["launchctl", "bootstrap"]], "loaded over it")
+                    self.assertFalse(mirror.service(p, "stop"), "a stop is not said done while the job is there")
+                    # A read that answers neither 113 nor the job: could not be read, never "gone".
+                    h.tearing.clear()
+                    h.teardown_reads, h.print_code = 0, 1
+                    ok, why = mirror.install_service(p)
+                    self.assertFalse(ok)
+                    self.assertEqual(why, "whether launchd let go of the forge's job could not be read (launchctl print "
+                                          "answered code 1), so it was not loaded again. Run setup again, and if it "
+                                          "stops here again, run status")
+                finally:
+                    mirror.LAUNCHD_WAIT = saved_wait
+        finally:
+            mirror.system = saved
+
+    def test_G1_17_uninstall_removes_nothing_while_launchd_has_a_job(self):
+        """G1.17 and the family's rule 30 (the owner's ruling, 3:03 PM ET 11-24): an error is never an absence. Both
+        jobs are told off and read first; while either is not read gone, uninstall removes nothing (a job launchd
+        still holds would go on starting a program taken from under it), names each job with what was read, and ends
+        with the one step as the whole command line; that line, run as printed once launchd lets go, ends 0."""
+        saved, saved_wait = mirror.system, getattr(mirror, "LAUNCHD_WAIT", 30)
+        mirror.system = lambda: ("darwin", "arm64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                sync = os.path.join(os.path.dirname(p["plist"]), mirror.SYNC_LABEL + ".plist")
+                kept = [p["script"], p["bin"], p["mirror_key"], os.path.join(p["keys"], "someone"), p["settings"],
+                        p["state"]]
+                for x in kept:
+                    mirror.write_file(x, "{}\n")
+                    mirror.claim(x)
+                kept += [p["plist"], sync, os.path.join(p["data"], mirror.MADE_RECORD)]
+                mirror.LAUNCHD_WAIT = 1
+                for case in ("both", "sync"):                   # neither lets go; then the forge's does, the sync's not
+                    h.tearing.clear()
+                    if case == "both":
+                        h.teardown_reads = 10 ** 6
+                    else:
+                        h.teardown_reads, h.loaded = 0, {mirror.LAUNCHD_LABEL}
+                        h.gone.discard(mirror.SYNC_LABEL)
+                        h.tearing = {mirror.SYNC_LABEL: 10 ** 6}
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, out)
+                    self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{case}: something was removed")
+                    self.assertNotIn("Gone now", out)
+                    self.assertNotIn("is off this computer", out)
+                    line = [l for l in out.splitlines() if l.startswith("Not now: ")]
+                    self.assertEqual(len(line), 1, out)
+                    step = mirror.own_command(p, "uninstall")
+                    self.assertTrue(line[0].endswith(f". Nothing was removed. Run uninstall again in a minute: {step}"))
+                    self.assertIn("launchd still had the sync's job 1 s after it was told to take it off", line[0])
+                    self.assertIn("launchd still had the forge's job 1 s after it was told to take it off" if
+                                  case == "both" else f"the forge's job is off, and its file {p['plist']} stays too",
+                                  line[0])
+                h.tearing.clear()                              # launchd lets go; the step, exactly as printed
+                h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                h.loaded.clear()
+                args = shlex.split(step)
+                self.assertEqual(args[:3], ["python3", "-I", p["script"]])
+                rc, out = quiet(mirror.main, args[3:])
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("Not now", out)
+                self.assertFalse(os.path.exists(p["plist"]) or os.path.exists(sync) or os.path.exists(p["script"]))
+        finally:
+            mirror.system, mirror.LAUNCHD_WAIT = saved, saved_wait
+
+    def test_G1_17_an_account_not_at_the_screen_can_leave_and_the_sync_says_its_own_words(self):
+        """The owner's read of 3:03 PM ET 11-24: in an account not logged in at the Mac's screen (seen that day over
+        ssh on macOS 13.7.8: `launchctl print gui/<uid>` and the job's own print answered 125), setup has already
+        written the forge's file when it says to log in at the screen; uninstall then ends 0 with that file gone,
+        with no 30 s wait; any other answer of the domain stays "could not be read". And a sync's job that launchd
+        does not let go of reaches the person in its own words with its step; the forge's line is not "did not
+        start" when the forge did."""
+        saved, saved_wait = mirror.system, getattr(mirror, "LAUNCHD_WAIT", 30)
+        mirror.system = lambda: ("darwin", "x86_64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                h.mac_session = False
+                self.assertEqual(mirror.install_service(p), (False, mirror.MAC_NO_SESSION))
+                self.assertTrue(os.path.exists(p["plist"]), "setup wrote the file before the session read")
+                t = time.monotonic()
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertLess(time.monotonic() - t, 5)
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(os.path.exists(p["plist"]), out)
+                self.assertIn(p["plist"], out.split("Gone now:")[1] if "Gone now:" in out else "", out)
+                self.assertNotIn("Not now", out)
+                # a domain that answers anything else is never "no domain": with the job loaded and not letting go,
+                # never "gone", and uninstall removes nothing (the owner's point (a), 3:23 PM ET 11-24)
+                self.assertEqual(mirror.LAUNCHD_NO_SCREEN, 125)
+                h.mac_session = True
+                h.print_code, mirror.LAUNCHD_WAIT = 1, 1
+                self.assertEqual(mirror.launchd_off(p, mirror.LAUNCHD_LABEL)[0], "unread")
+                h.print_code = None
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                for x in (p["script"], p["settings"]):
+                    mirror.write_file(x, "{}\n")
+                    mirror.claim(x)
+                for dom_code in (1, 113):
+                    h.domain_code = dom_code
+                    h.tearing.clear()
+                    h.loaded.add(mirror.LAUNCHD_LABEL)
+                    h.teardown_reads = 10 ** 6
+                    answer = mirror.launchd_off(p, mirror.LAUNCHD_LABEL)[0]
+                    self.assertNotEqual(answer, "gone", f"the domain answered {dom_code}")
+                    h.tearing.clear()
+                    h.loaded |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, f"the domain answered {dom_code}: {out}")
+                    self.assertTrue(all(os.path.exists(x) for x in (p["plist"], p["script"], p["settings"])), out)
+                h.domain_code, h.teardown_reads = None, 0
+                h.tearing.clear()
+                h.loaded.clear()
+                # the sync's job held by launchd: its own words reach the person, with the step
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                h.loaded.add(mirror.SYNC_LABEL)
+                h.teardown_reads = 10 ** 6
+                ok, why = mirror.install_timer(p, 15)
+                self.assertFalse(ok)
+                self.assertRegex(why, r"^launchd still had the sync's job \d+ s after it was told to take it off, so "
+                                      r"it was not loaded again\. Run setup again in a minute, and if it stops here "
+                                      r"again, run status$")
+        finally:
+            mirror.system, mirror.LAUNCHD_WAIT = saved, saved_wait
+        for fn in (mirror.cmd_setup, mirror.setup_from):    # the forge's own line stands; the sync's is said after it
+            src = inspect.getsource(fn)
+            self.assertNotIn('"the sync timer could not be switched on"', src)
+            self.assertIn("The sync's timer is not on, so nothing is copied until it is: {timer_why}", src)
+
+    def test_G1_18_uninstall_removes_nothing_while_systemd_runs_a_unit_or_cannot_be_read(self):
+        """M107 (seen 2026-11-24 on a stock Ubuntu 24.04, the owner's question of 3:23 PM ET): uninstall run from a
+        shell with no user bus (after `su -` from root, and with XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset)
+        said "Gone now" and ended 0 while systemd still ran the forge, from its removed program. Every unit is told
+        to stop and read stopped first; while one is not, uninstall removes nothing, names each unit with what was
+        read, and ends 3 with the whole command line; with no user bus, where to run it. That line, run as printed
+        from a shell that reaches systemd, ends 0."""
+        saved, saved_wait = mirror.system, mirror.SYSTEMD_WAIT
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["unit"]), exist_ok=True)
+                self.assertTrue(mirror.install_service(p)[0])
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                base = os.path.dirname(p["unit"])
+                kept = [p["script"], p["bin"], p["mirror_key"], os.path.join(p["keys"], "someone"), p["settings"],
+                        p["state"]]
+                for x in kept:
+                    mirror.write_file(x, "{}\n")
+                    mirror.claim(x)
+                kept += [p["unit"], os.path.join(base, mirror.SYNC_UNIT + ".service"),
+                         os.path.join(base, mirror.SYNC_UNIT + ".timer"), os.path.join(p["data"], mirror.MADE_RECORD)]
+                step = mirror.own_command(p, "uninstall")
+                # (1) no user bus in this shell: nothing is read, so nothing is removed, and where to run it is said
+                h.user_bus = False
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "something was removed")
+                self.assertNotIn("Gone now", out)
+                self.assertFalse([c for c in h.calls if c[:2] == ["loginctl", "disable-linger"]], "linger changed")
+                line = [l for l in out.splitlines() if l.startswith("Not now: ")]
+                self.assertEqual(line, ["Not now: " + "; ".join(
+                    f"whether systemd stopped {w} could not be read (systemctl --user answered code 1: Failed to "
+                    "connect to bus: No medium found)" for w in ("the forge's service", "the sync's service",
+                                                                 "the sync's timer"))
+                    + ". Nothing was removed. This shell cannot reach your account's own systemd (it has no user "
+                    "bus), so run uninstall again from a login of your own to this computer, such as ssh or a "
+                    f"terminal at the screen: {step}"], out)
+                # (1b) systemd 262's words for the same (another skill's log, an Arch test account, 2026-11-24)
+                for words in ("Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and "
+                              "$XDG_RUNTIME_DIR not defined (consider using --machine=<user>@.host --user to connect "
+                              "to bus of other user)",
+                              "Failed to connect to user scope bus via local transport: No such file or directory"):
+                    h.no_bus_words = words
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, out)
+                    self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{words}: something was removed")
+                    self.assertIn("This shell cannot reach your account's own systemd (it has no user bus), so run "
+                                  "uninstall again from a login of your own to this computer, such as ssh or a "
+                                  f"terminal at the screen: {step}", out)
+                    self.assertNotIn("in a minute", out)
+                h.no_bus_words = "Failed to connect to bus: No medium found"
+                # (2) a unit systemd does not stop in time: named with what was read; the stopped ones too
+                h.user_bus, mirror.SYSTEMD_WAIT, h.stop_reads = True, 1, 10 ** 6
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "something was removed")
+                self.assertIn("systemd still had the forge's service deactivating 1 s after it was told to stop it", out)
+                back = mirror.own_command(p, "setup")
+                # static is systemd's own answer for the sync's service, which has no install section: said as that
+                # answer, never as a read that failed
+                self.assertIn("the sync's service: stopped, for restarts systemd answers: static", out)
+                self.assertNotIn("could not be read (systemd:", out)
+                # each command stands last on a line of its own
+                self.assertIn(". No file of the mirror was removed.\nTo go on leaving: run uninstall again in a "
+                              f"minute: {step}\nTo have the mirror running as before instead, run setup again, which "
+                              f"keeps every copy: {back}\n", out)
+                self.assertNotIn("Nothing was removed", out)
+                self.assertNotIn("Gone now", out)
+                # (2b) answers that name no state are never "stopped" (a parser that took a missing state for
+                # "inactive" turned a bus error and an empty answer into "gone", in another skill): exit 0 with
+                # nothing, exit 0 with another field, and a non-zero answer without the bus's words
+                h.stopping.clear()
+                h.stop_reads = 0
+                for answer in ((0, ""), (0, "LoadState=loaded\n"), (0, "ActiveState=\n"), (4, "")):
+                    h.show_answer = answer
+                    h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 3, f"{answer}: {out}")
+                    self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{answer}: something was removed")
+                    self.assertIn(f"whether systemd stopped the forge's service could not be read (systemctl --user "
+                                  f"answered code {answer[0]}", out)
+                    self.assertIn("the forge's service: whether it runs could not be read (systemctl --user answered "
+                                  f"code {answer[0]}", out)
+                    self.assertIn(f". No file of the mirror was removed.\nTo go on leaving: run uninstall again in a "
+                                  f"minute: {step}\n", out)
+                    self.assertNotIn("Nothing was removed", out)
+                    self.assertNotIn("no user bus", out)
+                h.show_answer = None
+                # (4) SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): a person's own
+                # RefuseManualStop=yes on the forge's unit. The tool's disable took the forge's and the timer's links
+                # and stopped the timer, the forge ran on, and the words said "Nothing was removed" and "again in a
+                # minute". Now: each unit as systemd reads it after the calls, systemctl's own refusal, no file
+                # removed, the step on (never "in a minute"), and the step back, which brings both links and the
+                # timer back (as setup did from that state there).
+                h.stopping.clear()
+                h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                h.refuse_stop = {mirror.SERVICE}
+                links = [os.path.join(base, "default.target.wants", mirror.SERVICE + ".service"),
+                         os.path.join(base, "timers.target.wants", mirror.SYNC_UNIT + ".timer")]
+                for x, to in zip(links, (p["unit"], os.path.join(base, mirror.SYNC_UNIT + ".timer"))):
+                    os.makedirs(os.path.dirname(x), exist_ok=True)
+                    if not os.path.lexists(x):
+                        os.symlink(to, x)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "a file was removed")
+                self.assertEqual([x for x in links if os.path.lexists(x)], [], "the stand-in's disable took the links")
+                lines = out.splitlines()
+                at = [i for i, l in enumerate(lines) if l.startswith("Not now: ")]
+                self.assertEqual(len(at), 1, out)
+                name = mirror.SERVICE + ".service"
+                self.assertEqual(lines[at[0]:at[0] + 4], [
+                    "Not now: systemd did not stop the forge's service. As systemd reads them now: the forge's "
+                    "service: running (active), not switched on for restarts; the sync's service: stopped, for "
+                    "restarts systemd answers: static; the sync's timer: stopped, "
+                    "not switched on for restarts. No file of the mirror was removed. systemctl's own words for the "
+                    "forge's service: "
+                    f"Failed to stop {name}: Operation refused, unit {name} may be requested by dependency only (it is "
+                    "configured to refuse manual start/stop).",
+                    "To go on leaving: systemd answers so while that stands, so uninstall run again ends the same "
+                    f"way. What systemd holds for the forge's service shows with: systemctl --user cat {name}",
+                    f"Once it can be stopped, run uninstall again: {step}",
+                    "To have the mirror running as before instead, run setup again, which keeps every copy: "
+                    f"{back}"], out)
+                # a command stands last on its line: from the command to the line's end is that command alone
+                for l, cmd in zip(lines[at[0] + 1:at[0] + 4], (f"systemctl --user cat {name}", step, back)):
+                    self.assertTrue(l.endswith(": " + cmd), l)
+                self.assertNotIn("in a minute", out)
+                # the step on, as printed, with the person's setting still in place: the same answer, nothing removed
+                rc2, out2 = quiet(mirror.main, shlex.split(step)[3:])
+                self.assertEqual(rc2, 3, out2)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "a file was removed")
+                # (4b) the refused unit is the one named: a refusal on the sync's timer names the timer (the timer's
+                # refusal is not recorded; the stand-in says the forge's recorded words with the timer's name)
+                h.refuse_stop = {mirror.SYNC_UNIT + ".timer"}
+                h.stopping.clear()
+                h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "a file was removed")
+                timer = mirror.SYNC_UNIT + ".timer"
+                self.assertIn("Not now: systemd did not stop the sync's timer.", out)
+                self.assertIn("\nTo go on leaving: systemd answers so while that stands, so uninstall run again ends "
+                              "the same way. What systemd holds for the sync's timer shows with: systemctl --user cat "
+                              f"{timer}\n", out)
+                self.assertNotIn(f"systemctl --user cat {name}", out)
+                h.refuse_stop = set()
+                # (5) A guest's finding (the maintainer's ruling, 11-26): is-enabled is read as three answers; only "enabled" and
+                # "disabled" are yes and no, and any other word is the third answer, said as systemd's own word.
+                # RECORDED on systemd 255 (log sha256 85971716290afec1): "not-found", code
+                # 4, for a running unit whose file is at mode 000, its link standing.
+                os.symlink(p["unit"], links[0])
+                self.assertEqual(mirror.unit_enabled(name), ("on", "enabled"))
+                if os.geteuid() != 0:                      # root reads a file of mode 000
+                    os.chmod(p["unit"], 0)
+                    try:
+                        self.assertEqual(mirror.unit_enabled(name), (None, "systemd: not-found"))
+                    finally:
+                        os.chmod(p["unit"], 0o644)
+                os.remove(links[0])
+                self.assertEqual(mirror.unit_enabled(name), ("off", "disabled"))
+                self.assertEqual(mirror.unit_enabled(mirror.SYNC_UNIT + ".service"), (None, "systemd: static"))
+                # (3) systemd stops them; the step, exactly as printed
+                h.stopping.clear()
+                h.stop_reads = 0
+                args = shlex.split(step)
+                self.assertEqual(args[:3], ["python3", "-I", p["script"]])
+                rc, out = quiet(mirror.main, args[3:])
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("Not now", out)
+                self.assertFalse(os.path.exists(p["unit"]) or os.path.exists(p["script"]), out)
+        finally:
+            mirror.system, mirror.SYSTEMD_WAIT = saved, saved_wait
+
     def test_G1_16_on_a_mac_with_no_login_session_setup_says_so_in_the_persons_words(self):
         """M58 (a Mac test account, 2026-11-23): setup over ssh into an account that is not logged in at the Mac's
         screen could not load the forge's launch agent, and said launchctl's own words ("Bootstrap failed: 125:
@@ -653,6 +1496,84 @@ class G1(unittest.TestCase):
             mirror.system = saved
         for fn in (mirror.cmd_setup, mirror.setup_from):      # both say `why` whole, after the same words
             self.assertIn("did not start: {why}", inspect.getsource(fn))
+
+    def test_G1_16_with_no_session_at_the_screen_the_dry_run_and_status_name_a_step_that_works_there(self):
+        """M143 (seen 2026-11-25 on a Mac, macOS 27.2.1, an account reached over ssh only): with no session at the
+        Mac's screen, setup said the cause and its step, but status said "run setup again" alone, which cannot start
+        the forge there, and the dry run said setup would start it. Only the account's own domain answering 125 (its
+        read with no session, seen on macOS 13.7.8 and 27.2.1) changes a line: the dry run says the forge cannot start
+        now, why, and the step; status's forge line says the cause and a step that works there, in both states (setup
+        not finished: log in, then setup again; both jobs' files in place: the login, then status again), and its
+        timer and first-copy lines name no step that cannot work. Any other answer leaves every line as it was."""
+        import socket
+        saved, door, rel = mirror.system, mirror.read_door, mirror.release_check
+        mirror.system = lambda: ("darwin", "arm64")
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")    # nothing on the forge's port
+        mirror.release_check = lambda st, force=False: []
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                s = socket.socket()
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+                s.close()
+                for d in (p["data"], p["conf"], os.path.dirname(p["plist"])):
+                    os.makedirs(d, mode=0o700, exist_ok=True)
+                    os.chmod(d, 0o700)
+                mirror.save_state(p, {"port": port})
+                with open(p["mirror_key"], "w") as f:
+                    f.write("5" * 40 + "\n")           # made up, in the form the forge gives (M156)
+                shutil.copyfile(SCRIPT, p["script"])
+                with open(p["plist"], "w") as f:                  # setup stopped after writing the forge's file
+                    f.write("<plist/>\n")
+                sync = os.path.join(os.path.dirname(p["plist"]), mirror.SYNC_LABEL + ".plist")
+                setup_line = mirror.own_command(p, "setup")
+                today_plan = "install the forge as your own service (a launch agent) and start it"
+                today_forge = (f"problem: the forge does not answer on 127.0.0.1:{port}; run setup again, which starts "
+                               f"it and keeps every copy: {setup_line}")
+                today_go = f"first copy: waiting for your go: in a terminal window of your own, run {mirror.own_command(p, 'go')}"
+
+                def look():
+                    mirror.DOOR_SEEN.clear()
+                    rc, out = status()
+                    return rc, out.splitlines(), mirror.setup_plan(p, {})
+                for code in (0, 113, 1, 5, None):              # every answer but 125: each line as it was
+                    h.domain_code, h.mac_session = (code, True) if code is not None else (None, True)
+                    rc, lines, plan = look()
+                    self.assertEqual(rc, 1, lines)
+                    self.assertIn(today_forge, lines, code)
+                    self.assertTrue([x for x in lines if x.startswith(today_go)], (code, lines))
+                    self.assertIn(today_plan, plan, code)
+                    self.assertFalse([x for x in lines if "logged in at this Mac's screen" in x], (code, lines))
+                h.domain_code, h.mac_session = None, False      # the domain answers 125, as seen
+                rc, lines, plan = look()
+                self.assertEqual(rc, 1, lines)
+                self.assertNotIn(today_plan, plan)
+                said = [x for x in plan if x.startswith("install the forge as your own service (a launch agent)")]
+                self.assertEqual(len(said), 1, plan)
+                for words in ("cannot start now", "this account is not logged in at this Mac's screen",
+                              "log in to this account at this Mac's screen, then run setup"):
+                    self.assertIn(words, said[0])
+                self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{port}: {mirror.MAC_NO_SESSION}: "
+                              f"{setup_line}", lines, "setup not finished: log in, then setup again")
+                self.assertNotIn(today_forge, lines)
+                self.assertIn("problem: the sync timer is not loaded: this account is not logged in at this Mac's "
+                              "screen", lines)
+                self.assertIn("first copy: waiting for your go, which can be given once the forge answers (see the "
+                              "problem above)", lines)
+                with open(sync, "w") as f:                       # both files in place: a restart since setup
+                    f.write("<plist/>\n")
+                rc, lines, plan = look()
+                self.assertEqual(rc, 1, lines)
+                forge = [x for x in lines if x.startswith(f"problem: the forge does not answer on 127.0.0.1:{port}")]
+                self.assertEqual(forge, [f"problem: the forge does not answer on 127.0.0.1:{port}: this account is not "
+                                         "logged in at this Mac's screen, and on a Mac the forge runs only in a login "
+                                         "session at the screen. Log in to this account at this Mac's screen, then run "
+                                         "status again; if the forge still does not answer there, run setup again: "
+                                         f"{setup_line}"], lines)
+                self.assertFalse([x for x in lines if "run setup again, which starts it" in x], lines)
+        finally:
+            mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
 
     def test_G1_8_a_computer_without_git_is_told_before_anything_is_downloaded(self):
         """Seen on a stock Ubuntu 24.04 with git removed: setup downloaded Gitea, then stopped on Gitea's own words."""
@@ -777,16 +1698,63 @@ class G1(unittest.TestCase):
             return
         self.assertIn(MAC_COPY_UNSEEN, " ".join(readme.split()))
 
+    def test_G1_10_a_stranger_on_the_forges_port_is_never_said_to_be_the_forge(self):
+        """M85 (read 11-24, due 0.1.0 with M102): setup and restore said the forge runs from an answer on its port
+        alone. Now another program there is said in its own words, apart from "not answering yet", setup and restore
+        answer 1, and the stranger is sent nothing. (Setup moving the kept port, and status: test_G8_7.)"""
+        if not real_gitea() and not os.environ.get("WSM_REQUIRE_GITEA"):
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        real_free, wait = mirror.free_port, mirror.SETUP_WAIT
+        with contextlib.ExitStack() as stack:
+            ports = [low_free_port() for _ in range(2)]
+            strangers = [Stranger(x) for x in ports]
+            for s in strangers:
+                stack.callback(s.close)
+            picks = iter(ports)
+            stack.callback(setattr, mirror, "free_port", real_free)
+            stack.callback(setattr, mirror, "SETUP_WAIT", wait)
+            # setup: the first port it picks is taken by the time it reads it, and so is the one it moves to
+            with Home(linger="yes") as h:
+                h.place_gitea()
+                mirror.free_port = lambda: next(picks)
+                mirror.SETUP_WAIT = 5
+                rc, out = h.setup()
+                mirror.SETUP_WAIT = wait
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"The forge's address changed: another program holds 127.0.0.1:{ports[0]}, so the forge "
+                              f"moves to http://127.0.0.1:{ports[1]}/.", out)
+                self.assertIn(f"problem: another program answers on the forge's port 127.0.0.1:{ports[1]}, not this "
+                              "mirror's own forge", out)
+                self.assertNotIn("The forge runs as your own service", out)
+                self.assertNotIn("not answering yet", out)
+                mirror.free_port = real_free
+            # restore: setup --from, with another program on the port it picks
+            backup = backup_of_one_copy(self)
+            with Home(linger="yes") as h2:
+                h2.place_gitea()
+                mirror.free_port = lambda: ports[1]
+                mirror.SETUP_WAIT = 5
+                rc, out = h2.setup("--from", backup)
+                mirror.SETUP_WAIT = wait
+                self.assertEqual(rc, 1, out)
+                self.assertIn("copies are in the restored data; they are not counted in the forge, since nothing was "
+                              "sent to its port:", out)
+                self.assertIn(f"problem: another program answers on the forge's port 127.0.0.1:{ports[1]}", out)
+                self.assertNotIn("copies are back", out)
+                self.assertNotIn("The forge runs as your own service", out)
+            for s in strangers:
+                self.assertEqual(s.close(), [], "a stranger was sent requests")
+
     def test_G1_10_setup_says_the_forge_runs_only_once_it_answers(self):
         with Home() as h:
             h.place_gitea()
             saved = mirror.wait_forge
             try:
-                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                mirror.wait_forge = lambda p, port, seconds=60, again="status": False
                 rc, out = h.setup()
                 self.assertIn("not answering yet", out)
                 self.assertNotIn("The forge runs as your own service", out)
-                mirror.wait_forge = lambda port, up=True, seconds=60: True
+                mirror.wait_forge = lambda p, port, seconds=60, again="status": True
                 rc, out = h.setup()
                 self.assertIn("The forge runs as your own service", out)
             finally:
@@ -867,7 +1835,7 @@ class G1(unittest.TestCase):
             h.place_gitea()
             saved = mirror.wait_forge
             try:
-                mirror.wait_forge = lambda port, up=True, seconds=60: False
+                mirror.wait_forge = lambda p, port, seconds=60, again="status": False
                 rc, out = h.setup()
             finally:
                 mirror.wait_forge = saved
@@ -875,14 +1843,28 @@ class G1(unittest.TestCase):
             self.assertIn(f"not answering yet on http://127.0.0.1:{mirror.load_json(p['state'], {})['port']}/ after "
                           f"{mirror.SETUP_WAIT} s", out)
             self.assertIn(f"it answered within {mirror.FIRST_START_SEEN} s", out)
-            self.assertIn("run `status` in 5 minutes", out)
+            self.assertIn("run status in 5 minutes", out)
             self.assertIn(os.path.join(p["forge"], "log", "gitea.log"), out)
 
     def test_G1_9_lingering_is_said_first_asked_of_this_computer_and_undone_only_if_setup_did_it(self):
         saved, saved_proc = mirror.system, mirror.own_process_for_polkit
+        saved_doors = mirror.read_door, mirror.door_floor
         mirror.system = lambda: ("linux", "x86_64")
         if not os.path.exists("/proc/self/stat"):        # a Mac runner standing in for Linux has no /proc to read
             mirror.own_process_for_polkit = lambda: f"{os.getpid()},1,{os.getuid()}"
+        if not os.path.exists(mirror.PROC_TCP[0]):
+            # Seen on GitHub's Mac runners at 649ee99: with no /proc/net/tcp, setup's floor said the door cannot be
+            # read and stopped. The door is then read for real the Mac's own way (netstat); lingering stays Linux's.
+            def the_mac_way(read):
+                def run(*a, **kw):
+                    was = mirror.system
+                    mirror.system = saved
+                    try:
+                        return read(*a, **kw)
+                    finally:
+                        mirror.system = was
+                return run
+            mirror.read_door, mirror.door_floor = map(the_mac_way, saved_doors)
         me = mirror.getpass.getuser()
         try:
             # (a, b) The dry run says what lingering means, from this computer's own three answers.
@@ -933,6 +1915,50 @@ class G1(unittest.TestCase):
                 self.assertIn("Lingering was already on before setup, so it is left on.", out)
                 self.assertEqual(h.linger, "yes")
                 self.assertFalse([c for c in h.calls if "disable-linger" in c])
+            # (f) A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest: setup said
+            # "Lingering is now on ... uninstall switches it off again", and an uninstall with the state file at mode
+            # 000 ended 0 with no line on lingering). Whenever uninstall ends with lingering on, or not read, and did
+            # not switch it off, it says so: the state as read, why it was left, the person's own command. It
+            # switches off only where its record says setup switched it on; read off, nothing is said.
+            later = f"To switch it off yourself, if you want: loginctl disable-linger {me}"
+            unread_rec = ("the record of what setup did here could not be read, so uninstall cannot tell whether setup "
+                          "switched it on")
+            for record, linger, want in (
+                    ("unreadable", "yes", f"Lingering is on for your account, and is left on: {unread_rec}. {later}"),
+                    ("no key", "yes", "Lingering is on for your account, and is left on: the record of what setup did "
+                                      f"here does not say that setup switched it on. {later}"),
+                    ("none", "yes", "Lingering is on for your account, and is left on: no record of what setup did "
+                                    "here is on this computer, so uninstall cannot tell whether setup switched it on. "
+                                    + later),
+                    ("unreadable", "unread", "Whether lingering is on for your account could not be read (loginctl "
+                                             "answered code 1: Failed to get user: made up for this test), and "
+                                             f"uninstall did not switch it off: {unread_rec}. {later}"),
+                    ("unreadable", "no", None)):
+                with Home(linger=linger) as h, self.subTest(record=record, linger=linger):
+                    p = mirror.paths()
+                    os.makedirs(os.path.dirname(p["state"]), exist_ok=True)
+                    os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+                    if record == "unreadable":
+                        # the record says setup switched it on, and cannot be read: cut short (so root, who reads mode
+                        # 000, cannot read it either) and at mode 000, as on the guest
+                        with open(p["state"], "w") as fh:
+                            fh.write('{"linger_by_setup": tru')
+                        os.chmod(p["state"], 0)
+                    elif record == "no key":
+                        mirror.save_state(p, {"port": 1})
+                    try:
+                        rc, out = quiet(mirror.main, ["uninstall"])
+                    finally:
+                        if os.path.exists(p["state"]):
+                            os.chmod(p["state"], 0o600)
+                    self.assertEqual(rc, 0, out)
+                    self.assertFalse([c for c in h.calls if "disable-linger" in c], out)
+                    self.assertEqual(h.linger, linger)
+                    if want:
+                        self.assertIn(want, out)
+                        self.assertEqual(out.count("ingering"), 1 + want.count("ingering") - 1, out)
+                    else:
+                        self.assertNotIn("ingering", out)
             # Refused: the administrator's one command, never a dialog.
             with Home(linger="no", enable_linger_ok=False) as h:
                 back, note = mirror.linger_step({})
@@ -977,6 +2003,7 @@ class G1(unittest.TestCase):
                 self.assertIn("syncs only while you are logged in", out)
         finally:
             mirror.system, mirror.own_process_for_polkit = saved, saved_proc
+            mirror.read_door, mirror.door_floor = saved_doors
 
     def test_G1_13_a_mac_is_written_as_what_was_seen(self):
         """The family's rule on Macs (2026-11-23): we have no stock Mac. A Mac sighting is written as what it was, a
@@ -1014,6 +2041,648 @@ class G1(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ G2 the GitHub keys
+    # G1.24 (M148): every value in a service file is one whole value, and what the manager parsed is read back.
+    PLANTED = ["a b", "a  b", " a", "a%b", "a%hb", "a$b", "a${X}b", 'a"b', "a\\b", "ab\\", "a'b", "a;b", "a&b<c>d",
+               "é", 'a b%c$d"e\\f']
+
+    @staticmethod
+    def held_by_systemd(argv):
+        """What systemd's bus holds for a start line meant as argv: the program, then argv, an argument's $ as $$
+        (it is expanded at start; seen 2026-11-25 on systemd 255, where the started program got each word whole)."""
+        return [argv[0], argv[0]] + [w.replace("$", "$$") for w in argv[1:]]
+
+    def test_G1_24_a_job_launchd_does_not_hold_is_read_as_not_there(self):
+        """Seen 2026-11-26 on every Mac leg of CI: a first setup in the suite's home ended 1, "what launchd holds for
+        the forge's job ... could not be read", because the suite's stand-in answered a print of a job never loaded
+        with code 0 and no blocks. launchd answers such a print with 113: RECORDED in the gui domain, a session at
+        the screen, macOS 27.2.1 (2026-11-26), for a job never loaded, 113, nothing on stdout, and "Bad request." and
+        "Could not find service ... in domain for user gui: N" on stderr, the stand-in's words; the tool reads 113 as
+        no such job. (For a job taken off, macOS 27 gave 113, the code only; the user domain on macOS 13.7.8 gave
+        113 and words ending "in domain for uid: N".) On every leg:
+        the Mac's road, through the stand-in. Then the job setup loads is held and read (the control)."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", saved()[1])
+        try:
+            with Home(linger="yes") as h:
+                p = mirror.paths()
+                dom = f"gui/{os.getuid()}"
+                self.assertFalse(os.path.exists(p["plist"]))
+                out = mirror.run(["launchctl", "print", f"{dom}/{mirror.LAUNCHD_LABEL}"])
+                self.assertEqual(out.returncode, 113, out)
+                self.assertIn(f'Could not find service "{mirror.LAUNCHD_LABEL}"', out.stderr)
+                self.assertEqual(mirror.launchd_held(mirror.LAUNCHD_LABEL), "absent")
+                ok, why = mirror.install_service(p, restart=True)
+                self.assertNotIn("could not be read", why or "", why)
+                self.assertTrue(ok, why)
+                got = mirror.launchd_held(mirror.LAUNCHD_LABEL)
+                self.assertIsInstance(got, tuple, got)
+                self.assertTrue(mirror.job_is_ours(p, mirror.LAUNCHD_LABEL, got[0]), got)
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_each_value_in_a_service_file_is_one_whole_value(self):
+        """M148 (seen 2026-11-25 on two stock Ubuntu 24.04 guests, systemd 255, and the issue's own case): with the
+        folder the skill keeps its things in holding a space, %, $, ", \\ or another planted character, alone and all
+        at once, every service file setup writes is read as the words meant: a systemd unit, read by the suite's
+        stand-in for systemd's grammar as seen, gives the program and then each argument, and each Environment entry
+        whole; a launchd file, read as a property list, gives each argument, WSM_HOME and its log paths whole. The
+        0.1.0 head's form of the same start line is not read as meant for a space."""
+        for v in self.PLANTED:
+            with Home() as h, self.subTest(value=v):
+                home = os.path.join(h.tmp, v, "wsm")
+                os.environ["WSM_HOME"] = home
+                p = mirror.paths()
+                argv = [sys.executable, "-I", p["script"], "run-forge"]
+                sync = [sys.executable, "-I", p["script"], "sync", "--from-timer"]
+                for text, want in ((mirror.unit_text(p), argv), (mirror.sync_unit_text(p), sync)):
+                    starts, env = sd_standin_unit(text, h.env["HOME"])
+                    self.assertEqual(len(starts), 1, text)
+                    self.assertEqual([starts[0][0]] + starts[0][1], self.held_by_systemd(want), text)
+                    self.assertEqual(env, [f"WSM_HOME={home}"], text)
+                for text, want, log in ((mirror.plist_text(p), argv, "launchd.log"),
+                                        (mirror.sync_plist_text(p, 15), sync, "sync.log")):
+                    pl = plistlib.loads(text.encode("utf-8"))
+                    self.assertEqual(pl["ProgramArguments"], want, text)
+                    self.assertEqual(pl["EnvironmentVariables"], {"WSM_HOME": home}, text)
+                    self.assertEqual(pl["StandardOutPath"], os.path.join(p["forge"], "log", log), text)
+                    self.assertEqual(pl["StandardErrorPath"], os.path.join(p["forge"], "log", log), text)
+        meant = [sys.executable, "-I", "/srv/a b/data/mirror.py", "run-forge"]
+        starts, _ = sd_standin_unit(f"ExecStart={sys.executable} -I /srv/a b/data/mirror.py run-forge\n", "/home/you")
+        self.assertNotEqual([starts[0][0]] + starts[0][1], self.held_by_systemd(meant))
+
+    def test_G1_24_setup_stops_before_its_first_write_on_a_value_no_manager_takes_whole(self):
+        """M148: a character that cannot be seen (a control character, a format character, a line or paragraph
+        separator) or bytes that are not text in WSM_HOME, and on Linux a dollar sign, a double quote, an apostrophe
+        or a backslash in the path of the Python setup runs with (seen 2026-11-25 on systemd 255: no one spelling
+        carried every such path whole): setup and its dry run end 2 before anything is written or any service
+        manager is asked, never print the value, and name the character and the one next step. On a Mac the same
+        Python path is written whole into its file, so setup goes on there."""
+        saved_sys, saved_exe = mirror.system, sys.executable
+        saved_doors = doors_the_hosts_way(saved_sys)
+        try:
+            mirror.system = lambda: ("linux", "x86_64")
+            for bad in ("a\nb", "a\x7fb", "a\u2028b", "a\u200bb", "a\udcffb"):   # each planted character as an escape
+                with Home() as h, self.subTest(home=repr(bad)):
+                    os.environ["WSM_HOME"] = os.path.join(h.tmp, bad)
+                    before = tree(h.tmp)
+                    for args in (("--dry-run",), ("--linger",)):
+                        rc, out = h.setup(*args)
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn("Stopped: the folder this skill keeps its things in holds a character that "
+                                      "cannot be seen, or bytes that are not text, so it cannot be written into the "
+                                      "service file as one whole value. Nothing was changed. The one next step: set "
+                                      "WSM_HOME to a folder of your own whose path has none, and run setup again.", out)
+                        self.assertNotIn(bad, out)
+                        self.assertIn(mirror.SHOWN_CHANGED, out)
+                    self.assertEqual(tree(h.tmp), before)
+                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")
+                                      and c != FLOOR_READ], h.calls)          # the floor's one read only
+            for exe, named in (("/opt/a$b/python3", "a dollar sign"), ('/opt/a"b/python3', "a double quote"),
+                               ("/opt/a'b/python3", "an apostrophe"), ("/opt/a\\b/python3", "a backslash"),
+                               ("/opt/a$\\b/python3", "a dollar sign and a backslash")):
+                with Home() as h, self.subTest(exe=exe):
+                    before = tree(h.tmp)
+                    sys.executable = exe
+                    try:
+                        rc, out = h.setup("--linger")
+                    finally:
+                        sys.executable = saved_exe
+                    self.assertEqual(rc, 2, out)
+                    it = "them" if " and " in named else "it"
+                    self.assertIn(f"Stopped: the path of the Python this runs with holds {named}, and systemd does "
+                                  f"not take a program's path holding {it} as one whole value. Nothing was changed. The one next step: run setup with a Python whose "
+                                  "path has none (for example /usr/bin/python3).", out)
+                    self.assertEqual(tree(h.tmp), before)
+                    self.assertFalse([c for c in h.calls if c[0] in ("systemctl", "busctl", "launchctl")
+                                      and c != FLOOR_READ], h.calls)          # the floor's one read only
+            mirror.system = lambda: ("darwin", "arm64")
+            with Home():
+                sys.executable = "/opt/a$b\"c'd\\e&f<g/python3"
+                self.assertIsNone(mirror.service_value_stop(mirror.paths()))
+        finally:
+            mirror.system, sys.executable = saved_sys, saved_exe
+            mirror.read_door, mirror.door_floor = saved_doors
+
+    def test_G1_24_set_up_is_said_only_when_the_manager_holds_each_word_as_written(self):
+        """M148: on Linux setup reads back what systemd parsed for each service, over its bus one word at a time
+        (never the line `systemctl show` prints, which joins the words), after daemon-reload and before anything is
+        switched on, and switches it on only when every word and every Environment entry is what it wrote. A parse
+        that differs and one that could not be read are each said as that, with nothing switched on; the go block's
+        restart line and status say the same, each with a step that works where it is said. On a Mac, launchd's
+        loaded job is read back the same way and taken off again at once when it is not what setup wrote."""
+        saved = mirror.system
+        other = [sys.executable, "-I", "/elsewhere/mirror.py", "run-forge"]
+        try:
+            mirror.system = lambda: ("linux", "x86_64")
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["unit"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                reads = [i for i, c in enumerate(h.calls) if c[0] == "busctl"]
+                on = h.calls.index(["systemctl", "--user", "enable", "--now", mirror.SERVICE])
+                self.assertTrue(reads and max(reads) < on, h.calls)
+                self.assertFalse([c for c in h.calls if c[:3] == ["systemctl", "--user", "show"]])
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                self.assertEqual([mirror.service_read_back(p, w) for w in ("forge", "sync")], ["equal", "equal"])
+                self.assertFalse(mirror.restart_line(p, {}).startswith("After a restart: systemd"))
+                for name, value, answer in (("bus_starts", [[other[0], other, False, 0, 0, 0, 0, 0, 0, 0]], "differs"),
+                                            ("bus_starts", [], "differs"),
+                                            ("bus_answer", (1, "", "Failed to connect to bus: No medium found\n"),
+                                             "unread")):
+                    setattr(h, name, value)
+                    n = len(h.calls)
+                    for which, got in (("forge", mirror.install_service(p)), ("sync", mirror.install_timer(p, 15))):
+                        self.assertFalse(got[0])
+                        self.assertIn("its start line is not read as setup wrote it" if answer == "differs" else
+                                      "as setup wrote it could not be read", got[1])
+                        self.assertTrue(got[1].endswith(mirror.read_back_step(which, answer)), got[1])
+                        # the owner's ruling, 11-25: never uninstall first; the person's own setting is looked at first
+                        self.assertNotIn("uninstall", got[1].split(";")[0])
+                    self.assertFalse([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
+                    self.assertEqual(mirror.service_read_back(p, "forge"), answer)
+                    line = mirror.restart_line(p, {})
+                    self.assertTrue(line.startswith("After a restart: systemd does not hold the forge's service"
+                                                    if answer == "differs" else
+                                                    "After a restart: whether systemd holds the forge's service"), line)
+                    self.assertTrue(line.endswith(mirror.read_back_step("forge", answer, "status")), line)
+                    self.assertNotIn("starts by itself", line)
+                    setattr(h, name, None)
+            src = inspect.getsource(mirror.cmd_status)
+            self.assertIn('read_back_step(which, held, "status")', src)
+            mirror.system = lambda: ("darwin", "arm64")
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.service_read_back(p, "forge"), "equal")
+                h.launchd_args = (other, {"WSM_HOME": os.environ["WSM_HOME"]})
+                n = len(h.calls)
+                ok, why = mirror.install_service(p)
+                self.assertFalse(ok)
+                self.assertIn("launchd does not hold the forge's service as setup wrote it: its arguments are not "
+                              "read as setup wrote it, so it was taken off again, and launchd reads it gone. Run setup "
+                              "again, which writes it again and reads it back; if this line comes back after that, "
+                              "run uninstall", why)
+                job = ["launchctl", "print", f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"]
+                boot = [i for i, c in enumerate(h.calls[n:]) if c[:2] == ["launchctl", "bootstrap"]]
+                out = [i for i, c in enumerate(h.calls[n:]) if c == ["launchctl", "bootout", f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"]]
+                self.assertTrue(boot and out and max(out) > max(boot), h.calls[n:])
+                # G1.17: taken off by the one function, and read gone after it (the owner's ruling, 11-25)
+                self.assertTrue([i for i, c in enumerate(h.calls[n:]) if c == job and i > max(out)], h.calls[n:])
+                h.launchd_args = None
+                h.print_code = 1
+                self.assertEqual(mirror.service_read_back(p, "forge"), "unread")
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_a_persons_own_entry_is_theirs_and_no_line_holds_a_value_the_tool_did_not_write(self):
+        """M148, the family's rule 31 (v.5) (3): an environment entry the person set in the skill's service
+        themselves (a drop-in of theirs on Linux; a variable in the loaded job on a Mac), holding a made-up secret,
+        is named as theirs by its name alone, a warning: setup goes on, the read-back is equal, and no line of status,
+        of the restart line or of the warning holds its value. A second entry for WSM_HOME (systemd) or WSM_HOME
+        changed (launchd) is a stop, named by the part, and no line holds the planted value. The read-back's meant
+        side is what setup wrote: a terminal with another WSM_HOME reads the same answer."""
+        import socket
+        secret = "madeup-secret-7f3a9c"
+        planted = f"http://me:{secret}@proxy.example:8080"
+        saved, door, rel = mirror.system, mirror.read_door, mirror.release_check
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")
+        mirror.release_check = lambda st, force=False: []
+        try:
+            for name in ("linux", "darwin"):
+                mirror.system = lambda name=name: (name, "arm64" if name == "darwin" else "x86_64")
+                with Home() as h, self.subTest(system=name):
+                    p = mirror.paths()
+                    s = socket.socket()
+                    s.bind(("127.0.0.1", 0))
+                    port = s.getsockname()[1]
+                    s.close()
+                    for d in (p["data"], p["conf"], os.path.dirname(p["plist"] if name == "darwin" else p["unit"])):
+                        os.makedirs(d, mode=0o700, exist_ok=True)
+                        os.chmod(d, 0o700)
+                    mirror.save_state(p, {"port": port})
+                    with open(p["mirror_key"], "w") as f:
+                        f.write("5" * 40 + "\n")           # made up, in the form the forge gives (M156)
+                    shutil.copyfile(SCRIPT, p["script"])
+                    self.assertEqual(mirror.install_service(p), (True, ""))
+                    self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                    if name == "darwin":
+                        h.launchd_env_extra = {"HTTPS_PROXY": planted}
+                    else:
+                        h.bus_env_extra = [f"HTTPS_PROXY={planted}"]
+                    for which in ("forge", "sync"):
+                        self.assertEqual(mirror.service_read(p, which), ("equal", ["HTTPS_PROXY"], []))
+                    warn = mirror.theirs_line(p)
+                    self.assertEqual(warn, "Your own setting is in the skill's service too, set by you, not by this "
+                                           "tool: HTTPS_PROXY. It is left as it is; this tool reads only the values it "
+                                           "set itself.")
+                    mirror.DOOR_SEEN.clear()
+                    rc, out = status()
+                    self.assertIn("note: " + warn, out)
+                    self.assertNotIn("as setup wrote it", out)
+                    self.assertNotIn(secret, out)
+                    self.assertNotIn(secret, mirror.restart_line(p, {}))
+                    home = os.environ["WSM_HOME"]
+                    os.environ["WSM_HOME"] = home + "-another-terminal"
+                    try:
+                        self.assertEqual(mirror.service_read(p, "forge")[0], "equal")
+                    finally:
+                        os.environ["WSM_HOME"] = home
+                    if name == "linux":
+                        # SEEN on systemd 237 to 255 (the family's rule 31 (v.5) (3), 4:03 PM ET 11-25): a drop-in of
+                        # the person's own that sets WSM_HOME leaves ONE entry, with their value. A stop; their value
+                        # is never said; the step is the manager's own listing, never uninstall or setup again.
+                        h.bus_env_extra = [f"HTTPS_PROXY={planted}"]
+                        h.bus_env_set = {"WSM_HOME": planted}
+                        h.bus_dropins = [os.path.join(os.path.dirname(p["unit"]), mirror.SERVICE + ".service.d",
+                                                      "mine.conf")]
+                        self.assertEqual(mirror.service_read(p, "forge"),
+                                         ("differs", ["HTTPS_PROXY"], ["its WSM_HOME entry"]))
+                        line = mirror.restart_line(p, {})
+                        self.assertTrue(line.startswith("After a restart: systemd does not hold the forge's service as "
+                                                        "setup wrote it: its WSM_HOME entry is not read as setup wrote "
+                                                        "it, so it is not set up. 1 drop-in file stands on it"), line)
+                        self.assertTrue(line.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), line)
+                        mirror.DOOR_SEEN.clear()
+                        rc, out = status()
+                        for said in (line, out):
+                            self.assertNotIn(secret, said)
+                            self.assertNotIn("uninstall", said.split("its WSM_HOME entry")[-1].split("\n")[0])
+                            self.assertNotIn("setup again", said.split("its WSM_HOME entry")[-1].split("\n")[0])
+                        h.bus_env_set, h.bus_dropins = {}, []
+                    # Below, on Linux, a SECOND entry for WSM_HOME: the STAND-IN'S OWN FORM, produced by none of the
+                    # five systemd versions tried (rule 31 (v.5) (3)); the stop it holds is said by its count.
+                    if name == "darwin":
+                        h.launchd_env_extra = {"HTTPS_PROXY": planted, "WSM_HOME": planted}
+                    else:
+                        h.bus_env_extra = [f"HTTPS_PROXY={planted}", f"WSM_HOME={planted}"]
+                    entry = "its WSM_HOME entry" if name == "darwin" else "its WSM_HOME entry (2 found where setup wrote one)"
+                    self.assertEqual(mirror.service_read(p, "forge"), ("differs", ["HTTPS_PROXY"], [entry]))
+                    mgr = "launchd" if name == "darwin" else "systemd"
+                    line = mirror.restart_line(p, {})
+                    self.assertTrue(line.startswith(f"After a restart: {mgr} does not hold the forge's service as "
+                                                    f"setup wrote it: {entry} is not read as setup wrote it, so it is "
+                                                    "not set up."), line)
+                    mirror.DOOR_SEEN.clear()
+                    rc, out = status()
+                    self.assertIn(f"{entry} is not read as setup wrote it", out)
+                    self.assertNotIn(secret, out + line)
+                    if name == "linux":
+                        n = len(h.calls)
+                        ok, why = mirror.install_service(p)
+                        self.assertFalse(ok)
+                        self.assertNotIn(secret, why)
+                        self.assertFalse([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
+        finally:
+            mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
+
+    def test_G1_24_a_start_line_of_the_persons_own_beside_the_syncs_is_theirs_by_its_count(self):
+        """M148, the family's rule 31 (v.5) (3) as corrected 4:22 PM ET 11-25: the sync's unit is one-shot (the
+        list holds its start lines in order, seen; that the manager runs them in that order is recorded on five
+        systems, the user manager (rule 31 (v.5) (3), 4:52 PM ET), and a line still says only what the tool read). A start line of the person's own beside ours, ours held
+        once, as written and first, is theirs: named by its count, never its words (it holds a made-up secret here),
+        the listing as the step and as the last words of the line, and the answer stays "set up" (the timer goes on).
+        Ours not first, ours twice, ours changed, the manager holding the sync as another type, and any start line of
+        theirs on the forge (written simple: seen by no one) are each a stop, its step the listing where a drop-in
+        stands. Each line that gives a command ends with it (the same rule, the same hour)."""
+        secret = "madeup-secret-5c1e"
+        theirs = ["/bin/sh", ["/bin/sh", "-c", f"curl -s https://me:{secret}@hook.example/"], False, 0, 0, 0, 0, 0, 0, 0]
+        import socket
+        saved, door, rel = mirror.system, mirror.read_door, mirror.release_check
+        mirror.system = lambda: ("linux", "x86_64")
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")
+        mirror.release_check = lambda st, force=False: []
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                for d in (p["data"], p["conf"], os.path.dirname(p["unit"])):
+                    os.makedirs(d, mode=0o700, exist_ok=True)
+                    os.chmod(d, 0o700)
+                s = socket.socket()
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+                s.close()
+                mirror.save_state(p, {"port": port})
+                with open(p["mirror_key"], "w") as f:
+                    f.write("5" * 40 + "\n")           # made up, in the form the forge gives (M156)
+                shutil.copyfile(SCRIPT, p["script"])
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                sync = mirror.SYNC_UNIT + ".service"
+                ours = sd_standin_unit(fread(os.path.join(os.path.dirname(p["unit"]), sync)), h.env["HOME"])[0]
+                self.assertEqual(len(ours), 1)
+                h.bus_dropins = [os.path.join(os.path.dirname(p["unit"]), sync + ".d", "mine.conf")]
+                h.bus_starts_extra = [theirs]
+                self.assertEqual(mirror.service_read(p, "sync"), ("equal", [1], []))
+                warn = mirror.theirs_line(p)
+                # what was READ, the order in the list; that systemd runs them in that order is not recorded (rule 31
+                # (v.5) (3), 4:27 PM ET 11-25), so no line says it
+                self.assertEqual(warn, "1 start line of your own is in the sync's service, set by you, not by this "
+                                       "tool; it stands after the skill's own in systemd's list, and it is left as it "
+                                       "is. To read it: systemctl --user cat " + sync)
+                self.assertNotIn("runs", warn)
+                n = len(h.calls)
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))       # set up: the timer goes on
+                self.assertTrue([c for c in h.calls[n:] if c[:3] == ["systemctl", "--user", "enable"]])
+                mirror.DOOR_SEEN.clear()
+                rc, out = status()
+                self.assertIn("note: " + warn, out)
+                self.assertNotIn("the sync's service as setup wrote it", out)   # (the stand-in plants it on the forge too)
+                h.bus_starts_extra = [theirs, theirs]
+                self.assertTrue(mirror.theirs_line(p).startswith("2 start lines of your own are in the sync's"))
+                self.assertNotIn(secret, out + warn + mirror.theirs_line(p))
+                changed = [ours[0][0], ours[0][1] + ["--more"]] + ours[0][2:]
+                for label, starts, typ in (("ours not first", [theirs] + ours, None),
+                                           ("ours twice", ours + [theirs] + ours, None),
+                                           ("ours changed", [changed, theirs], None),
+                                           ("held as another type", ours + [theirs], "simple")):
+                    with self.subTest(case=label):
+                        h.bus_starts, h.bus_starts_extra, h.bus_type = starts, [], typ
+                        self.assertEqual(mirror.service_read(p, "sync"), ("differs", [], ["its start line"]))
+                        ok, why = mirror.install_timer(p, 15)
+                        self.assertFalse(ok)
+                        self.assertTrue(why.endswith("systemctl --user cat " + sync), why)
+                        self.assertNotIn("setup again", why.split("its start line")[-1])
+                        self.assertNotIn(secret, why)
+                h.bus_starts, h.bus_starts_extra, h.bus_type = None, [theirs], "unreadable"
+                self.assertEqual(mirror.service_read(p, "sync"), ("unread", [], []))   # a read that failed: unread
+                h.bus_starts, h.bus_type = None, None
+                h.bus_starts_extra = [theirs]            # the forge, written simple: theirs there is seen by no one
+                h.bus_dropins = [os.path.join(os.path.dirname(p["unit"]), mirror.SERVICE + ".service.d", "mine.conf")]
+                self.assertEqual(mirror.service_read(p, "forge"), ("differs", [], ["its start line"]))
+                line = mirror.restart_line(p, {})
+                self.assertTrue(line.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), line)
+                self.assertNotIn(secret, line)
+                # A COMMAND STANDS LAST ON ITS LINE: each step line of the cure that gives a command ends with it.
+                given = [mirror.theirs_line(p)]
+                for n_in in ([], h.bus_dropins):
+                    h.bus_dropins = n_in
+                    for which in ("forge", "sync"):
+                        for answer in ("differs", "unread", "unrecorded"):
+                            for where in ("setup", "status"):
+                                given.append(mirror.read_back_step(which, answer, where))
+                h.user_bus = False
+                given.append(mirror.bus_floor(p))
+                h.user_bus = True
+                cmds = 0
+                for g in given:
+                    m = re.search(r"systemctl --user cat \S+|" + re.escape(mirror.own_command(p, "setup")), g)
+                    if m:
+                        cmds += 1
+                        self.assertEqual(g[m.end():], "", g)
+                self.assertGreaterEqual(cmds, 6)
+        finally:
+            mirror.system, mirror.read_door, mirror.release_check = saved, door, rel
+
+    def test_G1_24_a_mac_print_as_recorded_on_each_macos_image_is_read_whole(self):
+        """M148 (the owner's ruling 3, 11-25): launchctl print's answer for one made-up agent, RECORDED on each macOS
+        image GitHub's standard runners offered that day (15.7.9 and 26.6.1 on Intel, 15.8.2 and 26.7.2 on Apple
+        Silicon; tests/launchd-print, each tab kept as \\t), is read by the tool whole: its arguments one by one, the
+        one with a space whole, and its own variable; with setup's record set to that agent the read-back is equal and
+        nothing is the person's own (launchd's own OSLogRateLimit is there on 26 and not on 15; neither is counted).
+        One argument other than recorded is a difference."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launchd-print")
+        forms = sorted(f for f in os.listdir(here) if f.endswith(".txt"))
+        self.assertEqual(forms, ["macos-15.7.9-x86_64.txt", "macos-15.8.2-arm64.txt", "macos-26.6.1-x86_64.txt",
+                                 "macos-26.7.2-arm64.txt"])
+        args = ["/bin/sh", "-c", "sleep 300"]
+        try:
+            for name in forms:
+                with Home() as h, self.subTest(form=name):
+                    p = mirror.paths()
+                    os.makedirs(p["data"], exist_ok=True)
+                    text = re.sub(r"\\([\\t])", lambda m: "\t" if m.group(1) == "t" else "\\",
+                                  fread(os.path.join(here, name)))
+                    h.launchd_form = text
+                    with open(os.path.join(p["data"], mirror.SERVICE_MEANT), "w") as f:
+                        json.dump({"forge": {"argv": args, "env": {"TRIAL_VALUE": "made up"}}}, f)
+                    got = mirror.launchd_parsed(mirror.LAUNCHD_LABEL)
+                    self.assertEqual(got[0], args)
+                    self.assertEqual(got[1]["TRIAL_VALUE"], "made up")
+                    self.assertEqual(set(got[1]) - {"TRIAL_VALUE"}, set(got[1]) & set(mirror.LAUNCHD_OWN_ENV))
+                    self.assertEqual("OSLogRateLimit" in got[1], name.startswith("macos-26"))
+                    self.assertEqual(mirror.service_read(p, "forge"), ("equal", [], []))
+                    with open(os.path.join(p["data"], mirror.SERVICE_MEANT), "w") as f:
+                        json.dump({"forge": {"argv": args[:2] + ["sleep 301"], "env": {"TRIAL_VALUE": "made up"}}}, f)
+                    self.assertEqual(mirror.service_read(p, "forge"), ("differs", [], ["its arguments"]))
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_a_mac_print_in_a_made_up_other_form_is_could_not_be_read(self):
+        """M148 (the owner's ruling, 11-25, point 7 (b)): launchd's print form is seen on the macOS versions
+        MACOS_PRINT_SEEN names only. A print
+        block in another form, MADE UP here (no macOS has been seen printing these: one with no arguments block of
+        the seen form, one with the seen arguments block and no environment block where setup set a variable), is
+        answered "could not be read" with its step: never "differs", never "not set up", never a road to uninstall;
+        the step ends with the command that prints this Mac's version. A job setup wrote with no variable reads equal
+        with no environment block (whether launchd prints one for such a job is not seen)."""
+        saved = mirror.system
+        mirror.system = lambda: ("darwin", "arm64")
+        made_up_no_arguments = ("gui/501/x = {\n\tstate = running\n\tProgramArguments = (\n\t\t\"/usr/bin/python3\",\n"
+                                "\t)\n\tEnvironmentVariables = (\n\t\tWSM_HOME = \"/made/up\"\n\t)\n}\n")
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                args = mirror.read_meant(p, "forge")[0]
+                made_up_no_environment = ("gui/501/x = {\n\tstate = running\n\targuments = {\n"
+                                          + "".join(f"\t\t{a}\n" for a in args) + "\t}\n}\n")
+                for label, form in (("made up: no arguments block", made_up_no_arguments),
+                                    ("made up: no environment block", made_up_no_environment)):
+                    with self.subTest(form=label):
+                        h.launchd_form = None
+                        self.assertEqual(mirror.install_service(p), (True, ""))      # loaded again, read equal
+                        h.launchd_form = form
+                        self.assertEqual(mirror.service_read(p, "forge"), ("unread", [], []))
+                        line = mirror.restart_line(p, {})           # read while it is loaded
+                        ok, why = mirror.install_service(p)
+                        self.assertFalse(ok)
+                        for said, first in ((why, "Run setup again in a minute;"),
+                                            (line, "Run status from a terminal window of your own;")):
+                            self.assertIn("whether launchd holds the forge's service as setup wrote it could not be "
+                                          "read", said)
+                            self.assertIn(first + " if this line comes back, launchd's answer on this Mac may be in a "
+                                          f"form this tool does not read yet (it was seen on macOS "
+                                          f"{mirror.MACOS_PRINT_SEEN})", said)
+                            self.assertTrue(said.endswith("which this prints: sw_vers -productVersion"), said)
+                            for never in ("not set up", "uninstall", "does not hold"):
+                                self.assertNotIn(never, said)
+                h.launchd_form = None
+                self.assertEqual(mirror.install_service(p), (True, ""))
+            with Home() as h:
+                os.environ.pop("WSM_HOME", None)            # put back by Home on its way out
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.read_meant(p, "forge")[1], {})
+                args = mirror.read_meant(p, "forge")[0]
+                h.launchd_form = ("gui/501/x = {\n\tstate = running\n\targuments = {\n"
+                                  + "".join(f"\t\t{a}\n" for a in args) + "\t}\n}\n")
+                self.assertEqual(mirror.service_read(p, "forge"), ("equal", [], []))
+        finally:
+            mirror.system = saved
+
+    def test_G1_24_setup_stops_before_its_first_write_when_the_read_backs_road_is_not_there(self):
+        """M148 (the owner's ruling, 11-25: the read-back's road is a floor, and a floor is checked before the first
+        write): on Linux setup reads the manager's own version over the user bus in busctl's JSON form before it
+        makes anything. A shell with no user bus, a busctl that does not answer in that form, none at all, or no
+        answer within the limit: setup and its dry run end 2, the home is read unchanged, no unit is written and
+        systemd is asked nothing else; the line says what was found and the one next step. On a Mac there is no
+        such read."""
+        saved = mirror.system
+        login = "The one next step: run setup from a login of your own to this computer, such as ssh or a terminal at the screen"
+        # (what the case sets, its value, the words said, busctl reads, how the line ends: "cmd" = with the command)
+        cases = (("no_vars", True, "this shell cannot reach your account's own systemd: it has neither "
+                                   "XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS", 0, "cmd"),
+                 ("user_bus", False, "this shell cannot reach your account's own systemd: busctl found no bus where "
+                                     "XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS leads", 1, "cmd"),
+                 # RECORDED (the family's record of five stock systems, 2026-11-25): busctl's own refusal of the JSON
+                 # form on systemd 237 (Ubuntu 18.04) and 239 (AlmaLinux 8.10), in every shell, with a bus too
+                 ("old", ("237", (1, "", "busctl: unrecognized option '--json=short'\n")),
+                  "this computer's systemd is 237 whose busctl does not know the JSON form setup reads with (busctl "
+                  f"answered that the option is not one it knows); the skill was seen to run on systemd "
+                  f"{mirror.OLDEST_SEEN_SYSTEMD},", 1,
+                  "set the skill up on a computer whose busctl answers in that form, such as one with systemd "
+                  f"{mirror.OLDEST_SEEN_SYSTEMD}, as the README says."),
+                 # MADE UP: an answer no one has recorded, on the oldest systemd seen, and on 249, which the same
+                 # record shows answering the read: the version alone never names a cause (the owner's ruling, 11-25)
+                 ("bus_version", (3, "", "made-up words\n"), "busctl answered exit 3 when setup read your account's "
+                                                              "own systemd over its bus", 1, "cmd"),
+                 ("old", ("249", (1, "", "made-up words\n")), "busctl answered exit 1 when setup read your "
+                                                               "account's own systemd over its bus", 1, "cmd"),
+                 # RECORDED (the same family record): systemd 245's busctl, a runtime folder with no bus, its words
+                 # between colour escapes although standard error was a file
+                 ("bus_version", (1, "", "\x1b[0;1;31mFailed to connect to bus: No such file or directory\x1b[0m\n"),
+                  "this shell cannot reach your account's own systemd: busctl found no bus where XDG_RUNTIME_DIR or "
+                  "DBUS_SESSION_BUS_ADDRESS leads", 1, "cmd"),
+                 ("bus_version", (0, "made-up, not JSON\n", ""), "systemd 255 answered over your account's bus in a "
+                                                                 "form setup does not read (busctl's JSON form)", 1,
+                  "open an issue with this line."),
+                 ("bus_version", (127, "", "busctl is not installed on this computer"), "this computer has no busctl",
+                  1, "open an issue with this line."),
+                 ("bus_version", "timeout", f"did not answer over its bus within {mirror.BUS_WAIT} s", 1,
+                  "run setup again in a minute."))
+        saved_doors = doors_the_hosts_way(saved)
+        try:
+            mirror.system = lambda: ("linux", "x86_64")
+            for name, value, said, reads, end in cases:
+                for args in (("--dry-run",), ("--linger",)):
+                    with Home(linger="yes") as h, self.subTest(case=said, args=args):
+                        if name == "no_vars":
+                            os.environ.pop("XDG_RUNTIME_DIR", None)
+                            saved_dbus = os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+                        elif name == "old":
+                            h.sd_version, h.bus_version = value
+                        else:
+                            setattr(h, name, value)
+                        before = tree(h.tmp)
+                        try:
+                            rc, out = h.setup(*args)
+                        finally:
+                            if name == "no_vars" and saved_dbus is not None:
+                                os.environ["DBUS_SESSION_BUS_ADDRESS"] = saved_dbus
+                        line = [x for x in out.splitlines() if x.startswith("Stopped: ")]
+                        self.assertEqual(rc, 2, out)
+                        self.assertEqual(len(line), 1, out)
+                        self.assertIn(said, line[0])
+                        self.assertIn("Setup made nothing. The one next step: ", line[0])
+                        if end == "cmd":                # the login first; the command stands last on the line
+                            self.assertIn(login, line[0])
+                            self.assertTrue(line[0].endswith(": " + mirror.own_command(mirror.paths(), "setup")),
+                                            line[0])
+                            if "answered exit" in said:  # an issue only if the line comes back in that login
+                                self.assertIn(login + ", and if this line comes back there, open an issue", line[0])
+                        else:
+                            self.assertTrue(line[0].endswith(end), line[0])
+                        if name in ("no_vars", "user_bus"):
+                            self.assertNotIn("issue", line[0])
+                        if name == "old" and value[0] == "249":
+                            self.assertNotIn("249", line[0])       # nothing blamed on the version it read
+                        if (name, value[0] if name == "old" else None) != ("old", "237") and \
+                                (name != "bus_version" or value[0] != 0):
+                            self.assertNotIn("form", line[0])     # nothing about a form unless JSON came back
+                        self.assertEqual(tree(h.tmp), before)
+                        self.assertFalse(os.path.exists(mirror.paths()["unit"]))
+                        self.assertFalse([c for c in h.calls if c[:2] == ["systemctl", "--user"]], h.calls)
+                        self.assertEqual(len([c for c in h.calls if c[0] == "busctl"]), reads, h.calls)
+            mirror.system = lambda: ("darwin", "arm64")
+            with Home() as h:
+                h.user_bus = False
+                self.assertIsNone(mirror.bus_floor(mirror.paths()))
+                self.assertFalse([c for c in h.calls if c[0] in ("busctl", "systemctl")])
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
+
+    def test_G1_24_every_read_of_a_service_manager_has_a_limit_and_each_is_read_once(self):
+        """M148 (the owner's ruling, 11-25): every read over the manager's bus, and launchd's print, is given
+        BUS_WAIT; past it the answer is "could not be read", never a wait without end. Status reads each service once
+        and the warning about the person's own entry uses those reads; setup reads that warning once. Setup's own
+        record not there is its own answer, "unrecorded", with setup again as the first step and no bus read."""
+        seen = []
+
+        def slow(cmd, **kw):
+            seen.append((cmd[0], kw.get("timeout")))
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        saved_run, saved = mirror.run, mirror.system
+        try:
+            mirror.run = slow
+            mirror.system = lambda: ("linux", "x86_64")
+            self.assertIsNone(mirror.systemd_parsed(mirror.SERVICE + ".service"))
+            self.assertIsNone(mirror.launchd_parsed(mirror.LAUNCHD_LABEL))
+            self.assertEqual(mirror.systemd_version(), "")
+            was = os.environ.get("XDG_RUNTIME_DIR")
+            os.environ["XDG_RUNTIME_DIR"] = "/run/user/made-up"          # as a login sets it
+            try:
+                self.assertIn(f"within {mirror.BUS_WAIT} s", mirror.bus_floor(None))
+            finally:
+                if was is None:
+                    os.environ.pop("XDG_RUNTIME_DIR")
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = was
+        finally:
+            mirror.run = saved_run
+        self.assertEqual({t for _, t in seen}, {mirror.BUS_WAIT}, seen)
+        self.assertEqual({c for c, _ in seen}, {"busctl", "launchctl", "systemctl"}, seen)
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["unit"]), exist_ok=True)
+                self.assertEqual(mirror.install_service(p), (True, ""))
+                self.assertEqual(mirror.install_timer(p, 15), (True, ""))
+                self.assertTrue(h.bus_kws and all(k.get("timeout") == mirror.BUS_WAIT for k in h.bus_kws), h.bus_kws)
+                reads = {w: mirror.service_read(p, w) for w in ("forge", "sync")}
+                n = len(h.calls)
+                self.assertEqual(mirror.theirs_line(p, reads), "")
+                self.assertEqual(len(h.calls), n, "the warning read the services again")
+                h.bus_answer = "timeout"
+                self.assertEqual(mirror.service_read(p, "forge")[0], "unread")
+                self.assertIn("could not be read", mirror.restart_line(p, {}))
+                h.bus_answer = None
+                os.remove(os.path.join(p["data"], mirror.SERVICE_MEANT))
+                n = len(h.calls)
+                self.assertEqual(mirror.service_read(p, "forge"), ("unrecorded", [], []))
+                self.assertFalse([c for c in h.calls[n:] if c[0] == "busctl"], "a missing record is not a bus read")
+                line = mirror.restart_line(p, {})
+                self.assertIn("what setup wrote for the forge's service could not be read from setup's own record, "
+                              "so it is not set up. Run setup again, which writes that record again", line)
+                self.assertNotIn("uninstall", line.split(";")[0])
+                step = mirror.read_back_step("forge", "differs")
+                self.assertTrue(step.startswith("A setting of your own that changes it comes off first, then run setup "
+                                                "again; if this line comes back after that, run uninstall, which takes "
+                                                "away the skill's own files and names any it leaves, and open an "
+                                                "issue with this line"), step)
+                self.assertTrue(step.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), step)
+            status_src, setup_src = inspect.getsource(mirror.cmd_status), inspect.getsource(mirror.cmd_setup)
+            self.assertIn("theirs_line(p, reads)", status_src)
+            self.assertEqual(status_src.count("service_read("), 1)
+            self.assertEqual(setup_src.count("theirs_line("), 1)
+        finally:
+            mirror.system = saved
+
 
 def files_holding(root, needle):
     hits, read = [], 0
@@ -1162,6 +2831,30 @@ class AtTerminal(io.StringIO):
     """Standing in for the person's own terminal: what is typed there."""
     def isatty(self):
         return True
+
+
+def disk_holds(where, name):
+    """Whether the disk under the folder `where` can hold a file of that name at all (a Mac's refuses bytes that
+    are not UTF-8): asked of the disk, never guessed by the system's name."""
+    d = tempfile.mkdtemp(dir=where)
+    try:
+        open(os.path.join(d, name), "w").close()
+        return True
+    except OSError:
+        return False
+    finally:
+        shutil.rmtree(d)
+
+
+def disk_folds(where, a, b):
+    """Whether the disk under the folder `where` makes the names a and b one file (a Mac's folds case and the two
+    spellings of an accented letter): asked of the disk, never guessed by the system's name."""
+    d = tempfile.mkdtemp(dir=where)
+    try:
+        open(os.path.join(d, a), "w").close()
+        return os.path.exists(os.path.join(d, b))
+    finally:
+        shutil.rmtree(d)
 
 
 class World:
@@ -1403,8 +3096,9 @@ class G3(unittest.TestCase):
                 self.assertFalse(any(key in a for a in cmd), f"the key was on a command line: {cmd[:4]}")
                 holds = any(key in v or __import__("base64").b64encode(f"x-access-token:{key}".encode()).decode() in v
                             for v in env.values())
-                if holds:
-                    self.assertIn("fetch", cmd, f"the key was given to a process that does not fetch: {cmd[:6]}")
+                if holds:                       # the fetch, and the read of GitHub's own list before it (M123)
+                    self.assertTrue("fetch" in cmd or "ls-remote" in cmd,
+                                    f"the key was given to a process that does not read GitHub: {cmd[:6]}")
             hits, read = files_holding(w.home.tmp, key)
             self.assertGreater(read, 0)
             self.assertEqual(hits, [mirror.key_path(w.p, "someone")], "the key was written somewhere else")
@@ -1501,7 +3195,20 @@ class G3(unittest.TestCase):
             self.assertEqual(w.forge_refs("someone--alpha"), before)
             st = mirror.load_json(w.p["state"], {})
             self.assertTrue(next(iter(st["repos"].values()))["gone_since"])
-            self.assertEqual(fread(SCRIPT).count('"DELETE"'), 1, "the script can delete a copy outside the M17 stop")
+            # The script deletes in two places only: a copy, in the M17 stop (made public by the forge), and the
+            # token setup --new-password made for the change (M175), on that account's own tokens; nothing else
+            import ast
+            deletes = {}
+            for fn in ast.walk(ast.parse(fread(SCRIPT))):
+                if isinstance(fn, ast.FunctionDef):
+                    for n in ast.walk(fn):
+                        if isinstance(n, ast.Call) and n.args and isinstance(n.args[0], ast.Constant) \
+                                and n.args[0].value == "DELETE":
+                            deletes.setdefault(fn.name, []).append(ast.unparse(n.args[1]))
+            self.assertEqual(fread(SCRIPT).count('"DELETE"'), 2, "the script can delete outside its two places")
+            self.assertEqual(deletes, {"create": ["f'/repos/{self.user}/{urllib.parse.quote(name)}'"],
+                                       "new_forge_password": ["f'/users/{name}/tokens/{number}'"]},
+                             "the script can delete a copy outside the M17 stop")
 
     def test_G3_7_the_first_copy_is_announced_with_its_size_and_time_before_it_starts(self):
         with World(self) as w:
@@ -1633,7 +3340,8 @@ class G3(unittest.TestCase):
                 rc, out = w.sync()
                 self.assertNotEqual(rc, 0, out)
                 self.assertIn("the address git would use for GitHub could not be read (fatal: bad config line 1", out)
-                self.assertIn("`git config --global --list` shows the git setting it stops at", out)
+                self.assertIn("This command shows the git setting it stops at; with that line mended, the next sync refreshes "
+                              "it:\n    git config --global --list", out)
                 shown = subprocess.run(["git", "config", "--global", "--list"], capture_output=True, text=True,
                                        env=dict(os.environ, GIT_CONFIG_GLOBAL=gc))
                 self.assertIn(f"bad config line 1 in file {gc}", shown.stderr)
@@ -1726,6 +3434,360 @@ class G3(unittest.TestCase):
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertEqual(sorted(r["name"] for r in w.forge_get("/user/repos")[1]), ["someone--alpha", "someone--beta"])
+
+    def test_G3_15_nothing_one_project_holds_stops_the_sync(self):
+        """M120: bytes that are not UTF-8 in one project (a .gitattributes, a branch's or a tag's name) never end the
+        sync: under LANG=en_US.UTF-8 and with no LANG, in a fresh process writing to a pipe, the project is copied or
+        named and the projects after it are copied; and a fault the tool did not foresee in one project names that
+        project in plain words while the others are copied."""
+        drive = ("import importlib.util, sys\n"
+                 "s = importlib.util.spec_from_file_location('mirror', sys.argv[1]); m = importlib.util.module_from_spec(s)\n"
+                 "s.loader.exec_module(m)\n"
+                 "sys.stderr.write('stdout errors: ' + sys.stdout.errors + '\\n')\n"
+                 "if sys.argv[2] == 'no-lfs':\n"
+                 "    m.has_git_lfs = lambda: False\n"
+                 "sys.exit(m.main(sys.argv[3:]))\n")
+
+        def sync_in(w, lang, lfs, *cmd, locpath=None):
+            env = {k: v for k, v in os.environ.items() if k not in ("LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE", "LOCPATH")}
+            if lang:
+                env["LANG"] = lang
+            if locpath:
+                env["LOCPATH"] = locpath
+            r = subprocess.run([sys.executable, "-I", "-c", drive, w.p["script"], lfs, *(cmd or ["sync"])], env=env,
+                               capture_output=True, timeout=300)
+            out, err = r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+            if lang:                               # the print trap is real only where the language makes it strict
+                self.assertIn("stdout errors: strict", err, f"{lang} is not a language on this computer")
+            self.assertNotIn("Traceback", err + out, err + out)
+            self.assertNotRegex(out, r"\b\w+Error\b", "a Python name in the tool's words")
+            return r.returncode, out
+
+        def raw_refs(cmd):
+            out = subprocess.run(cmd, capture_output=True, check=True).stdout
+            return {r: s for s, r in (line.split(b"\t" if b"\t" in line else b" ", 1) for line in out.split(b"\n")
+                                      if line) if not r.endswith(b"^{}") and r != b"HEAD"}
+
+        def gh_raw(w, name):
+            return raw_refs(["git", "--git-dir", os.path.join(w.gh.root, "someone", name + ".git"), "for-each-ref",
+                             "--format=%(objectname) %(refname)"])
+
+        def forge_raw(w, name):
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            return raw_refs(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "ls-remote",
+                             f"http://127.0.0.1:{w.port}/mirror/someone--{name}.git"])
+
+        def three(w, first):
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+            first(w)
+            w.gh.commit("someone/bb", {".gitattributes": b"\xf6*.dat -text\r\n", "a": b"1"})     # Latin-1, CR LF, no LFS
+            w.gh.commit("someone/cc", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+
+        def attrs(w):
+            w.gh.commit("someone/aa", {".gitattributes": b"# M\xf6\xdfe\r*.bin filter=lfs diff=lfs merge=lfs -text\r\n",
+                                       "a": b"1"})
+
+        # Every character Python's split() and strip() with no argument take for a blank, that git takes in a ref's
+        # name (rule 31 (vi)): each in the middle of a branch's name and at the end of a tag's. The same world is also
+        # run with "_" in the same places (git takes no control character there), so a name cut or trimmed shows as
+        # a difference in the count.
+        blanks = [chr(i) for i in range(0x110000) if len(("a" + chr(i) + "b").split()) > 1
+                  and subprocess.run(["git", "check-ref-format", "refs/heads/a" + chr(i) + "b"]).returncode == 0]
+        self.assertEqual(len(blanks), 19, [hex(ord(c)) for c in blanks])
+
+        def names(w, twin=None):
+            w.gh.commit("someone/aa", {"a": b"1"})
+            w.gh.commit("someone/aa", {"b": b"2"}, branch="side")
+            w.gh.plant("someone/aa", "refs/heads/a\udcffb", "side")
+            w.gh.plant("someone/aa", "refs/tags/t\udcc3x", "main")
+            w.gh.git("someone/aa", "update-ref", "refs/heads/c" + (twin or "\u0085") + "d" + (twin or "\u2028") + "e",
+                     "main")                                                    # UTF-8 that splitlines breaks
+            w.gh.commit("someone/bb", {"z": b"0"})       # bb: the same names, in a project nothing else is wrong in
+            for c in blanks:
+                for n, at in (("aa", "side"), ("bb", "main")):
+                    w.gh.git(f"someone/{n}", "update-ref", f"refs/heads/w{ord(c):04x}-a{twin or c}b", at)
+                    w.gh.git(f"someone/{n}", "tag", f"v{ord(c):04x}{twin or c}", "main")
+
+        def counted(w, lang, twin=None):
+            """Part 2's world: N branches and tags on GitHub end as N - 2 on the forge, the 2 named; never one more,
+            never one fewer unnamed."""
+            three(w, lambda w: names(w, twin))
+            rc, out = sync_in(w, lang, "lfs")
+            if not disk_holds(os.path.dirname(w.p["state"]), "a\udcffb"):
+                # A disk that cannot hold such a name as a file (seen: a Mac's) cannot fetch it either: the project
+                # is a named problem in git's words, never the left-out road, and the projects after it are copied.
+                self.assertEqual(rc, 1, out)
+                self.assertIn("problem: someone/aa: the fetch from GitHub failed: ", out)
+                self.assertNotIn("not UTF-8 text", out)
+                for n in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
+                rc, said = sync_in(w, lang, "lfs", "status")
+                self.assertIn("\ncopies: 3 on GitHub, 2 copied, 1 behind, 0 unreadable\n", said)
+                return None
+            self.assertEqual(rc, 0, out)
+            self.assertIn("problem: someone/aa: " + mirror.NOT_TEXT.format(n=2, names="a?b, tag t?x; " + mirror.SHOWN_CHANGED), out)
+            gh = gh_raw(w, "aa")
+            self.assertEqual(len(gh), 5 + 2 * len(blanks))
+            want = {r: s for r, s in gh.items() if r not in (b"refs/heads/a\xffb", b"refs/tags/t\xc3x")}
+            got = forge_raw(w, "aa")
+            self.assertEqual(len(got), len(gh) - 2,
+                             f"{lang} {'twin' if twin else 'blanks'}: {sorted(set(got) ^ set(want))}")
+            self.assertEqual(got, want, lang)
+            self.assertEqual(len(gh_raw(w, "bb")), 1 + 2 * len(blanks))
+            self.assertEqual(forge_raw(w, "bb"), gh_raw(w, "bb"), lang)
+            # what the tool wrote down as GitHub's (status's "current" and the left-out names are read from it)
+            recs = {r["full_name"]: r for r in mirror.load_json(w.p["state"], {})["repos"].values()}
+            for n, key in (("aa", "seen_refs"), ("bb", "refs")):
+                wrote = {r.encode("utf-8", "surrogateescape"): v.encode() for r, v in recs[f"someone/{n}"][key].items()}
+                self.assertEqual(wrote, gh_raw(w, n), f"{n}'s {key} ({lang})")
+            rc, said = sync_in(w, lang, "lfs", "status")
+            self.assertEqual(rc, 1, said)
+            self.assertIn("\ncopies: 3 on GitHub, 3 copied, 1 behind, 0 unreadable\n", said)
+            return said
+
+        for lang in ("en_US.UTF-8", None):
+            # 1. A .gitattributes whose bytes are not UTF-8, on a computer without git lfs: decided on its bytes.
+            with World(self) as w:
+                three(w, attrs)
+                rc, out = sync_in(w, lang, "no-lfs")
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"problem: someone/aa: {mirror.LFS_NOT_IN_COPY}", out, "an LFS line read as no LFS")
+                self.assertNotIn(f"someone/bb: {mirror.LFS_NOT_IN_COPY}", out)
+                for n in ("aa", "bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
+            # 2. A branch's and a tag's name that are not UTF-8 (the forge cannot hold them): every other branch
+            # and tag is copied, the two are named in the sync's words and in status, and the projects after it
+            # are copied whole.
+            with World(self) as w:
+                out = counted(w, lang)
+                if out is None:
+                    continue
+                self.assertIn(b"refs/heads/c\xc2\x85d\xe2\x80\xa8e", forge_raw(w, "aa"))
+                self.assertIn(b"refs/tags/v3000\xe3\x80\x80", forge_raw(w, "aa"))     # a tag ending in a blank
+                for n in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lang})")
+                self.assertIn(mirror.NOT_TEXT.format(n=2, names="a?b, tag t?x; " + mirror.SHOWN_CHANGED), out)   # status
+        with World(self) as w:                                  # 2, the twin: "_" in every place a blank was
+            counted(w, "en_US.UTF-8", twin="_")
+        # 3. A .gitattributes that cannot be read is never taken as no LFS: the project is named, the rest copied.
+        with World(self) as w:
+            three(w, attrs)
+            saved, lfs = mirror.git, mirror.has_git_lfs
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "blob") and args[2].endswith(":.gitattributes"):
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git, mirror.has_git_lfs = unread, lambda: False
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.git, mirror.has_git_lfs = saved, lfs
+            self.assertEqual(rc, 1, out)
+            for n in ("aa", "bb"):
+                self.assertIn(f"someone/{n}: {mirror.LFS_UNREAD}", out)
+            self.assertNotIn(mirror.LFS_NOT_IN_COPY, out)
+            self.assertEqual(forge_raw(w, "cc"), gh_raw(w, "cc"))
+        # 4. A fault the tool did not foresee, in the first project only: named in plain words; the others copied.
+        with World(self) as w:
+            three(w, lambda w: w.gh.commit("someone/aa", {"a": b"1"}))
+            saved = mirror.place_copy
+
+            def fault(forge, rec, full, gid, report):
+                if full == "someone/aa":
+                    raise KeyError("id")
+                return saved(forge, rec, full, gid, report)
+            mirror.place_copy = fault
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.place_copy = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"someone/aa: {mirror.UNFORESEEN}", out)
+            self.assertNotIn("KeyError", out)
+            for n in ("bb", "cc"):
+                self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+        # 5. The forge refuses a push for a reason the tool did not foresee (Gitea 28.4.0's own words, seen when it
+        # refused a name): the project is named with the forge's words, and the others are copied.
+        with World(self) as w:
+            three(w, lambda w: w.gh.commit("someone/aa", {"a": b"1"}))
+            saved = mirror.forge_call
+            gitea_said = ("remote: \nremote: error:        \nremote: error: Internal Server Error (no message for end "
+                          "users)        \nremote: error:        \nTo http://127.0.0.1:1/mirror/someone--aa.git\n"
+                          " ! [remote rejected] main -> main (pre-receive hook declined)\n"
+                          "error: failed to push some refs to 'http://127.0.0.1:1/mirror/someone--aa.git'\n")
+
+            def refused(forge, cache, *args, **kw):
+                if args[:1] == ("push",) and "someone--aa" in fread(os.path.join(cache, "config")):
+                    return subprocess.CompletedProcess(args, 1, "", gitea_said)
+                return saved(forge, cache, *args, **kw)
+            mirror.forge_call = refused
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.forge_call = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("someone/aa: the push into the forge failed, so nothing in its copy was moved (the push is "
+                          "all or nothing): Internal Server Error (no message for end users); pre-receive hook declined",
+                          out)
+            for n in ("bb", "cc"):
+                self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+        # 6. restore --to with a .gitattributes that cannot be read: never taken as no LFS; nothing is pushed.
+        with World(self) as w:
+            three(w, attrs)
+            self.assertEqual(w.sync()[0], 0)
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "bb")
+            saved = mirror.git
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "blob") and args[2].endswith(":.gitattributes"):
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git = unread
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            finally:
+                mirror.git = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("Whether someone/bb keeps files with Git LFS could not be read from its .gitattributes, so "
+                          "nothing was pushed.", out)
+            self.assertEqual(lsremote(home), {})
+        # 7. A tag at a file (a blob), an annotated one, a tag at a tree and a tag of a tag (git's own project has a
+        # tag at a file): by its kind it has no top .gitattributes, which is a no, never "could not be read"; with
+        # git lfs and without, the project is copied whole and restore --to brings it all back.
+        def odd_tags(w):
+            w.gh.commit("someone/aa", {"a": b"1"})
+            blob = w.gh.git("someone/aa", "rev-parse", "main:a").strip()
+            tree = w.gh.git("someone/aa", "rev-parse", "main^{tree}").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            w.gh.git("someone/aa", "tag", "a-key-file", blob)
+            w.gh.git("someone/aa", *me, "tag", "-a", "-m", "a file", "an-annotated-file", blob)
+            w.gh.git("someone/aa", "tag", "a-tree", tree)
+            w.gh.git("someone/aa", *me, "tag", "-a", "-m", "of a tag", "a-tag-of-a-tag", "an-annotated-file")
+
+        for lfs in ("no-lfs", "lfs"):
+            with World(self) as w:
+                three(w, odd_tags)
+                rc, out = sync_in(w, "en_US.UTF-8", lfs)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                self.assertEqual(len(gh_raw(w, "aa")), 5)
+                for n in ("aa", "bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lfs})")
+                root = tempfile.mkdtemp(prefix="wsm-home-")
+                TEMPS.append(root)
+                home = bare_home(root, "aa")
+                rc, out = sync_in(w, "en_US.UTF-8", lfs, "restore", "--to", home, "someone/aa")
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                self.assertEqual(raw_refs(["git", "ls-remote", home]), gh_raw(w, "aa"), lfs)
+        # 8. What a left-out name costs, against a control with a plain name in the same place, three syncs: the copy
+        # is refreshed and said with its limit at every sync and in status; the sync is good, its full pass is one,
+        # the others are unchanged the next time, and no line says "not refreshed" or "cannot refresh" of it.
+        for label, name in (("planted", "refs/heads/a\udcffb"), ("control", "refs/heads/a_b")):
+            with World(self) as w:
+                three(w, lambda w: (w.gh.commit("someone/aa", {"a": b"1"}), w.gh.plant("someone/aa", name, "main")))
+                self.assertIn(name.encode("utf-8", "surrogateescape"), gh_raw(w, "aa"))        # the premise
+                time.sleep(1.1)                        # pushed_at has whole seconds: a push in a fetch's own second is fetched again
+                limit = "problem: someone/aa: " + mirror.NOT_TEXT.format(n=1, names="a?b; " + mirror.SHOWN_CHANGED)
+                if label == "planted" and not disk_holds(os.path.dirname(w.p["state"]), "a\udcffb"):
+                    # A disk that cannot hold the name (seen: a Mac's): a named problem at every sync, in git's
+                    # words, never the left-out road, and the others copied (M123's guard, M124's cure).
+                    for i in (1, 2):
+                        rc, out = sync_in(w, "en_US.UTF-8", "lfs")
+                        self.assertEqual(rc, 1, out)
+                        self.assertIn("problem: someone/aa: the fetch from GitHub failed: ", out)
+                        self.assertNotIn(limit, out)
+                        for n in ("bb", "cc"):
+                            self.assertEqual(forge_raw(w, n), gh_raw(w, n), n)
+                    continue
+                for i in (1, 2, 3):
+                    rc, out = sync_in(w, "en_US.UTF-8", "lfs")
+                    self.assertEqual(rc, 0, f"{label} {i}: {out}")
+                    line = next(x for x in out.split("\n") if x.startswith("sync: "))
+                    self.assertIn("3 copied now, 0 unchanged" if i == 1 else "0 copied now, 3 unchanged", line, label)
+                    self.assertEqual(", a full pass" in line, i == 1, line)
+                    self.assertEqual(limit in out, label == "planted", out)
+                    self.assertEqual("1 copy without branch or tag names the forge cannot hold" in line,
+                                     label == "planted", line)
+                    self.assertNotRegex(out, r"not refreshed|cannot refresh", out)
+                    st = mirror.load_json(w.p["state"], {})
+                    for k in ("first_copy_done", "last_good_sync", "last_full_pass"):
+                        self.assertTrue(st.get(k), f"{label} {i}: {k}")
+                rc, out = sync_in(w, "en_US.UTF-8", "lfs", "status")
+                self.assertNotRegex(out, r"not refreshed|cannot refresh|last good sync: none yet", out)
+                self.assertIn(f"\ncopies: 3 on GitHub, 3 copied, {1 if label == 'planted' else 0} behind, 0 unreadable", out)
+                self.assertEqual(f"problem: someone/aa: {mirror.NOT_TEXT.format(n=1, names='a?b; ' + mirror.SHOWN_CHANGED)}"
+                                 in out, label == "planted", out)
+                for n in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({label})")
+                if label == "planted":
+                    time.sleep(1.1)                    # pushed_at has whole seconds
+                    w.gh.plant("someone/aa", name)
+                    rc, out = sync_in(w, "en_US.UTF-8", "lfs")
+                    self.assertEqual(rc, 0, out)
+                    self.assertNotIn("not UTF-8 text", out)
+                    self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+                    rc, out = sync_in(w, "en_US.UTF-8", "lfs", "status")
+                    self.assertIn("\ncopies: 3 on GitHub, 3 copied, 0 behind, 0 unreadable", out)
+        # 9. A program's words with a carriage return, shown to a person: cut there too, never handed to the screen.
+        out = mirror.run(["sh", "-c", "printf 'fatal: bad\\rsudo id #\\n' >&2; exit 1"])
+        self.assertEqual(out.stderr, "fatal: bad\rsudo id #\n")                       # the premise: the CR was read
+        self.assertEqual(mirror.git_reason(out.stderr), "fatal: bad")
+        self.assertEqual(mirror.last_line(out.stderr), "sudo id #")
+        out = mirror.run(["sh", "-c", "printf 'remote: error: no\\rsudo id #\\n ! [remote rejected] main -> main (x\\ry)\\n' >&2;"
+                                      " exit 1"])
+        self.assertIn("\r", out.stderr)
+        self.assertEqual(mirror.forge_refusal(out.stderr), "no")
+        for f in (mirror.git_reason, mirror.last_line, mirror.forge_refusal):
+            self.assertNotIn("\r", f(out.stderr), f.__name__)
+        self.assertEqual(mirror.lines_of("a\rb\nc"), ["a\rb", "c"])                     # a record keeps its CR
+        # 10. A language that is not UTF-8 (en_US.ISO-8859-1, made into a folder of the test's own): a branch and a
+        # tag named with an e-acute go back to git as the bytes read, and are copied, with git lfs and without; a
+        # status in the other language reads what was written down as the same names.
+        loc = tempfile.mkdtemp(prefix="wsm-loc-")
+        TEMPS.append(loc)
+        made = shutil.which("localedef") and subprocess.run(
+            ["localedef", "-i", "en_US", "-f", "ISO-8859-1", os.path.join(loc, "en_US.ISO-8859-1")],
+            capture_output=True).returncode in (0, 1)
+        probe = subprocess.run([sys.executable, "-I", "-c", "import sys; print(sys.getfilesystemencoding())"],
+                               env=dict({k: v for k, v in os.environ.items() if not k.startswith(("LC_", "LANG"))},
+                                        LANG="en_US.ISO-8859-1", LOCPATH=loc), capture_output=True, text=True).stdout
+        if probe.strip() != "iso8859-1":
+            if sys.platform.startswith("linux") and os.environ.get("WSM_REQUIRE_GITEA"):
+                raise AssertionError(f"a Latin-1 language could not be made here (localedef: {made}): {probe!r}")
+            print(f"\nG3.15: part 10 is not run here (no Latin-1 language for Python: {probe.strip()!r}); a Linux CI "
+                  "job runs it", file=sys.stderr)
+            return
+
+        def latin(w):
+            for n, e in (("aa", "é"), ("bb", "e")):
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.gh.git(f"someone/{n}", "update-ref", f"refs/heads/caf{e}", "main")
+                w.gh.git(f"someone/{n}", "tag", f"v{e}", "main")
+
+        for lfs in ("lfs", "no-lfs"):
+            with World(self) as w:
+                three(w, latin)
+                self.assertIn(b"refs/heads/caf\xc3\xa9", gh_raw(w, "aa"))                 # the premise
+                rc, out = sync_in(w, "en_US.ISO-8859-1", lfs, locpath=loc)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                for n in ("aa", "bb", "cc"):
+                    self.assertEqual(forge_raw(w, n), gh_raw(w, n), f"{n} ({lfs})")
+                    self.assertEqual(len(forge_raw(w, n)), 1 if n == "cc" else 3, n)
+                for lang, lp in (("en_US.UTF-8", None), ("en_US.ISO-8859-1", loc)):
+                    rc, out = sync_in(w, lang, lfs, "status", locpath=lp)
+                    self.assertIn("\ncopies: 3 on GitHub, 3 copied, 0 behind, 0 unreadable", out, f"{lfs} {lang}")
+                rc, out = sync_in(w, "en_US.UTF-8", lfs)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
+                rc, out = sync_in(w, "en_US.ISO-8859-1", lfs, "restore", "--check", locpath=loc)
+                self.assertEqual(rc, 0, f"{lfs}: {out}")
 
     def test_G3_8_large_files_are_copied_or_named_as_missing(self):
         if not mirror.has_git_lfs():
@@ -1867,6 +3929,308 @@ class G3(unittest.TestCase):
             first = ", ".join(f"someone/r{i:02d}" for i in range(mirror.ANNOUNCE_NAMES))
             self.assertIn(f"They are: {first}, and 5 more; the whole list is in {w.p['first_copy_list']}.", told(out))
             self.assertEqual(fread(w.p["first_copy_list"]).splitlines(), [f"someone/r{i:02d}" for i in range(25)])
+    def test_G3_19_a_settings_file_that_cannot_be_read_is_never_taken_as_empty(self):
+        """M151 (G3.19; seen 2026-11-25 and 2026-11-26 in stand-in trials in made homes): config and key set wrote over
+        a settings file they could not read; sync, left-out and go said "No GitHub key is kept yet" with the key
+        there; status said nothing. Every form, before every command that reads it: never taken as empty, never
+        written over, GitHub never asked; the stop names the file, where the read stopped and one step, and the
+        step taken as printed ends with the include list chosen again, the key kept again, and a sync whole."""
+        with World(self) as w:
+            for n in ("a", "b"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(quiet(mirror.main, ["config", "include", "someone/a"])[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            kept_file_trial(self, w, p["settings"], b'{"owners": ["someone"]}\n')
+            plant_kept(p["settings"], "cut short", fread_bytes(p["settings"]), None)
+            rc, out = run_kept_cmd(w, ["sync"])
+            self.assertEqual(rc, 2, out)
+            step = out.split("The one next step: ", 1)[1]
+            inc, ks = mirror.own_command(p, "config", "include"), mirror.own_command(p, "key", "set", "someone")
+            self.assertIn(f"move that file out of {os.path.dirname(p['settings'])}", step)
+            self.assertIn(inc, step)
+            self.assertIn(ks, step)
+            kept = os.path.join(w.home.tmp, "kept-by-the-person")
+            os.makedirs(kept)
+            os.rename(p["settings"], os.path.join(kept, "settings.json"))         # the step, as printed
+            rc, out = run_printed(w, inc)                                          # the line exactly as printed
+            self.assertEqual((rc, out.strip().split("\n")[-1]), (0, "include: (none)"), out)
+            # "choose it again": the patterns are the person's own choice, so the person types theirs after the
+            # line, as the step asks; this one is the choice made before the file was damaged
+            self.assertEqual(run_printed(w, inc + " someone/a")[0], 0)
+            rc, out = run_printed(w, ks, stdin=w.gh.key + "\n")
+            self.assertEqual(rc, 0, out)
+            w.gh.commit("someone/a", {"f": b"2"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(w.forge_refs("someone--a").get("refs/heads/main"),
+                             w.gh.git("someone/a", "rev-parse", "main").strip(), out)
+            self.assertEqual(quiet(mirror.main, ["status"])[0], 0)
+
+    def test_G3_16_a_copy_is_whole_only_as_githubs_own_list_shows_it(self):
+        """M123: a project is copied, and its copy whole, only when every branch and tag in GitHub's own list is in
+        the copy at the commit GitHub lists. Seen on a Mac (2026-11-24): a disk that folds case kept Feature at
+        feature's commit and lost feature, and the sync, status and restore --check all called the copy whole. Where
+        a name is not as listed, the project is a named problem, the forge keeps what it held, and the exit is 1;
+        a list that could not be read is said so and nothing is called wrong; a name that moved or went on GitHub
+        during the fetch is no problem; and where the disk keeps names apart the guard says nothing."""
+        drive = ("import importlib.util, json, os, subprocess, sys\n"
+                 "s = importlib.util.spec_from_file_location('mirror', sys.argv[1]); m = importlib.util.module_from_spec(s)\n"
+                 "s.loader.exec_module(m)\n"
+                 "inj = json.loads(os.environ.get('WSM_INJ') or '{}')\n"
+                 "n = {'ls': 0}\n"
+                 "real, real_forge = m.github_call, m.forge_call\n"
+                 "def g(*a, **k):\n"
+                 "    mine = 'ls-remote' in a and a[1].endswith('/someone/aa.git')\n"
+                 "    if 'ls-remote' in a:\n"
+                 "        open(os.environ['WSM_INJ_COUNT'], 'a').write(a[1].rsplit('/', 1)[-1] + '\\n')\n"
+                 "    if mine:\n"
+                 "        n['ls'] += 1\n"
+                 "        if n['ls'] in inj.get('unread', []):\n"
+                 "            return subprocess.CompletedProcess(a, 128, '', 'fatal: unable to access (planted)')\n"
+                 "    out = real(*a, **k)\n"
+                 "    if mine and n['ls'] == 1 and inj.get('move'):\n"
+                 "        bare, ref, sha = inj['move']\n"
+                 "        subprocess.run(['git', '--git-dir', bare, 'update-ref'] + (['-d', ref] if not sha else [ref, sha]), check=True)\n"
+                 "    if 'fetch' in a and 'github' in a and inj.get('fold'):\n"
+                 "        cache = a[0]\n"
+                 "        lines = subprocess.run(['git', '--git-dir', cache, 'for-each-ref', '--format=%(refname) %(objectname)',\n"
+                 "                                'refs/heads', 'refs/tags'], capture_output=True, check=True).stdout.split(b'\\n')\n"
+                 "        groups = {}\n"
+                 "        for x in lines:\n"
+                 "            if x:\n"
+                 "                r, sha = x.rsplit(b' ', 1); groups.setdefault(r.lower(), []).append((r, sha))\n"
+                 "        for grp in groups.values():\n"
+                 "            if len(grp) > 1:\n"
+                 "                grp.sort()\n"
+                 "                subprocess.run([b'git', b'--git-dir', os.fsencode(cache), b'update-ref', grp[0][0], grp[-1][1]], check=True)\n"
+                 "                for r, _ in grp[1:]:\n"
+                 "                    subprocess.run([b'git', b'--git-dir', os.fsencode(cache), b'update-ref', b'-d', r], check=True)\n"
+                 "    return out\n"
+                 "def f(forge, cache, *a, **k):\n"
+                 "    out = real_forge(forge, cache, *a, **k)\n"
+                 "    if a[:1] == ('push',) and inj.get('forge_drop'):\n"
+                 "        real_forge(forge, cache, 'push', '--quiet', 'forge', ':' + inj['forge_drop'])\n"
+                 "    return out\n"
+                 "m.github_call, m.forge_call = g, f\n"
+                 "sys.exit(m.main(sys.argv[2:]))\n")
+
+        def run_(w, *cmd, project="aa", **inj):
+            count = os.path.join(w.gh_root, "listings")
+            open(count, "w").close()
+            env = dict(os.environ, WSM_INJ=json.dumps(inj), WSM_INJ_COUNT=count)
+            r = subprocess.run([sys.executable, "-I", "-c", drive, w.p["script"], *(cmd or ["sync"])], env=env,
+                               capture_output=True, timeout=300)
+            out = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
+            self.assertNotIn("Traceback", out, out)
+            return r.returncode, out, open(count).read().split().count(project + ".git")
+
+        def raw(cmd):
+            out = subprocess.run(cmd, capture_output=True)
+            if out.returncode != 0:
+                return None
+            return {r: s for s, r in (x.split(b"\t" if b"\t" in x else b" ", 1) for x in out.stdout.split(b"\n") if x)
+                    if not r.endswith(b"^{}") and r != b"HEAD" and not r.startswith(b"refs/heads/kept/")}
+
+        def gh_raw(w, n):
+            return raw(["git", "--git-dir", os.path.join(w.gh.root, "someone", n + ".git"), "for-each-ref",
+                        "--format=%(objectname) %(refname)", "refs/heads", "refs/tags"])
+
+        def forge_raw(w, n):
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            return raw(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "ls-remote", "--heads",
+                        "--tags", f"http://127.0.0.1:{w.port}/mirror/someone--{n}.git"])
+
+        def folds(a, b):
+            return disk_folds(os.path.dirname(w.p["state"]), a, b)
+
+        def holds(name):
+            return disk_holds(os.path.dirname(w.p["state"]), name)
+
+        def world(w, pairs=()):
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+            c = [w.gh.commit("someone/aa", {"a": str(i).encode()}) for i in (1, 2, 3)]
+            for i, ref in enumerate(pairs):
+                w.gh.plant("someone/aa", ref, c[i % 2])
+            w.gh.commit("someone/bb", {"a": b"1"})
+            w.gh.commit("someone/cc", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            for ref in pairs:                                       # the premise: GitHub holds every name, apart
+                self.assertIn(os.fsencode(ref), gh_raw(w, "aa"))
+            return c
+
+        case = ["refs/heads/Feature", "refs/heads/feature", "refs/tags/V1", "refs/tags/v1"]
+        case_line = mirror.NOT_AS_LISTED.format(n=4, names="Feature: at another commit, feature: missing, "
+                                                "tag V1: at another commit, tag v1: missing")
+
+        def not_moved(w, rc, out, before, listings, n=2):
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/aa: " + case_line, out)
+            self.assertEqual(listings, n, out)
+            self.assertEqual(forge_raw(w, "aa"), before, "the forge was given a set GitHub does not list")
+            for x in ("bb", "cc"):
+                self.assertEqual(forge_raw(w, x), gh_raw(w, x), x)
+
+        # 1. A wrong cache on a first copy (made here as a disk that folds case makes it): a named problem at every
+        # sync and in status, the forge given nothing of it, restore --check not whole; right again once it is right.
+        with World(self) as w:
+            world(w, case)
+            for i in (1, 2):
+                rc, out, ls = run_(w, fold=True)
+                not_moved(w, rc, out, None, ls)
+            rc, out, _ = run_(w, "status")
+            self.assertIn(case_line, out)
+            self.assertIn("\ncopies: 3 on GitHub, 2 copied, 1 behind", out)
+            rc, out, _ = run_(w, "restore", "--check")
+            self.assertNotIn("3 whole", out)
+            if not folds("Feature", "feature"):
+                rc, out, ls = run_(w)
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn(case_line, out)
+                self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+                rc, out, _ = run_(w, "restore", "--check")
+                self.assertIn("3 copies, 3 whole, 0 difference(s)", out)
+        # 2. The same after a good copy: what the forge held before stays byte for byte, and what GitHub showed is
+        # written down from GitHub's own list, so restore --check names what the copy lacks.
+        with World(self) as w:
+            world(w)
+            rc, out, ls = run_(w)
+            self.assertEqual((rc, ls), (0, 1), out)
+            before = forge_raw(w, "aa")
+            gid = str(w.gh.repos["someone/aa"]["id"])
+            self.assertEqual({os.fsencode(r): s.encode() for r, s in mirror.load_json(w.p["state"], {})["repos"][gid]["seen_refs"].items()},
+                             gh_raw(w, "aa"))
+            time.sleep(1.1)                                         # pushed_at has whole seconds
+            for i, ref in enumerate(case):
+                w.gh.plant("someone/aa", ref, "main~" + str(i % 2))
+            rc, out, ls = run_(w, fold=True)
+            not_moved(w, rc, out, before, ls)
+            rc, out, _ = run_(w, "restore", "--check")
+            self.assertIn("someone/aa: refs/heads/feature is missing in the copy", out)
+        # 3. The three worlds a Mac's disk was seen to fold or refuse, with nothing planted in the tool: where the disk
+        # keeps the names apart, every name is at its own commit and the guard says nothing; where it folds case, the
+        # project is the named problem; where it folds two spellings or cannot hold a name, the fetch says so.
+        for label, pairs, a, b in (("case", case, "Feature", "feature"),
+                                   ("spelling", ["refs/heads/caf\u00e9", "refs/heads/cafe\u0301"], "caf\u00e9", "cafe\u0301"),
+                                   ("not UTF-8", ["refs/heads/a\udcffb", "refs/heads/a_b"], None, None)):
+            with World(self) as w:
+                world(w, pairs)
+                folded = folds(a, b) if a else not holds("a\udcffb")
+                rc, out, ls = run_(w)
+                if not folded:
+                    self.assertEqual((rc, ls), (0, 1), f"{label}: {out}")
+                    self.assertNotIn("would not be what GitHub lists", out)
+                    held = forge_raw(w, "aa")
+                    for ref in pairs:
+                        want = gh_raw(w, "aa")[os.fsencode(ref)]
+                        self.assertEqual(held.get(os.fsencode(ref)), None if mirror.not_text(ref) else want, label)
+                elif label == "case":
+                    not_moved(w, rc, out, None, ls)
+                else:
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("problem: someone/aa: the fetch from GitHub failed: ", out)
+                    self.assertIsNone(forge_raw(w, "aa"), label)
+        # 4. A name that moved, and one that went, on GitHub between the first list and the fetch: no problem, a
+        # second list read once, and the copy as GitHub holds it after; beside a control that reads one list.
+        for label, change in (("moved", lambda w, bare: [bare, "refs/heads/side", w.gh.git("someone/aa", "rev-parse", "main~1").strip()]),
+                              ("went", lambda w, bare: [bare, "refs/heads/side", ""]),
+                              ("control", None)):
+            with World(self) as w:
+                world(w)
+                rc, out, ls = run_(w)
+                self.assertEqual((rc, ls), (0, 1), out)
+                time.sleep(1.1)
+                w.gh.commit("someone/aa", {"b": b"1"})
+                w.gh.git("someone/aa", "branch", "side", "main")
+                bare = os.path.join(w.gh.root, "someone", "aa.git")
+                rc, out, ls = run_(w, **({"move": change(w, bare)} if change else {}))
+                self.assertEqual((rc, ls), (0, 2 if change else 1), f"{label}: {out}")
+                self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"), label)
+                self.assertEqual(b"refs/heads/side" in forge_raw(w, "aa"), label != "went", label)
+        # 5. A list that could not be read (both tries), the first and then the second: said so, nothing called wrong,
+        # the forge given nothing, the other projects copied; beside a control with the same wrong cache and both
+        # lists read.
+        for label, inj in (("first", {"unread": [1, 2]}), ("second", {"unread": [2, 3], "fold": True}),
+                           ("control", {"fold": True})):
+            with World(self) as w:
+                world(w, case)
+                rc, out, ls = run_(w, **inj)
+                self.assertEqual((rc, ls), (1, {"first": 2, "second": 3, "control": 2}[label]), out)
+                self.assertEqual("problem: someone/aa: " + mirror.LISTING_UNREAD.format(why="fatal: unable to access (planted)")
+                                 in out, label != "control", out)
+                self.assertEqual("would not be what GitHub lists" in out, label == "control", out)
+                self.assertIsNone(forge_raw(w, "aa"), label)
+                for x in ("bb", "cc"):
+                    self.assertEqual(forge_raw(w, x), gh_raw(w, x), x)
+        # 6. What the list does not hold is not compared (the fetch asks for branches and tags only): a note on
+        # GitHub is no problem; and a project with no branch and no tag is a list read with none, never unread.
+        with World(self) as w:
+            world(w)
+            w.gh.git("someone/aa", "update-ref", "refs/notes/commits", "main")
+            w.gh.add_repo("someone", "dd")
+            self.assertIn(b"refs/notes/commits", raw(["git", "--git-dir", os.path.join(w.gh.root, "someone", "aa.git"),
+                                                      "for-each-ref", "--format=%(objectname) %(refname)"]))
+            self.assertEqual(gh_raw(w, "dd"), {})
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            self.assertEqual(w.go()[0], 0)
+            rc, out, ls = run_(w)
+            self.assertEqual((rc, ls), (0, 1), out)
+            time.sleep(1.1)
+            w.gh.commit("someone/aa", {"b": b"2"})
+            w.gh.touch("someone/dd")
+            rc, out, ls = run_(w, project="dd")
+            self.assertEqual((rc, ls), (0, 1), out)
+            self.assertNotIn("could not be read", out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+        # 7. A project skipped as unchanged reads no list.
+        with World(self) as w:
+            world(w)
+            time.sleep(1.1)                                         # a push in a fetch's own second is fetched again
+            self.assertEqual(run_(w)[0], 0)
+            rc, out, ls = run_(w)
+            self.assertEqual((rc, ls), (0, 0), out)
+            self.assertIn("0 copied now, 3 unchanged", out)
+        # 8. The copy is the forge, read back after the push: a branch gone from it then is a named problem.
+        with World(self) as w:
+            world(w)
+            w.gh.git("someone/aa", "branch", "side", "main")
+            rc, out, ls = run_(w, forge_drop="refs/heads/side")
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/aa: " + mirror.FORGE_NOT_AS_LISTED.format(n=1, names="side: missing"), out)
+            rc, out, ls = run_(w)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+        # 9. A GitHub branch named kept/...: the read-back leaves refs/heads/kept/ out on both sides, so the first copy
+        # is whole and not called wrong (the name is checked in the cache against GitHub's list). Its later syncs are
+        # row M127's, due 0.1.1.
+        with World(self) as w:
+            for n in ("aa", "bb", "cc"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit("someone/" + n, {"a": b"1"})
+            w.gh.git("someone/aa", "branch", "kept/2020-01-01/old", "main")
+            w.key_set()
+            self.assertEqual(w.sync("--announce")[0], 0)
+            rc, out = w.go()
+            self.assertEqual(rc, 0, out)
+            rc, out = w.sync()                                       # the first copy
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("not what GitHub lists", out)
+            self.assertEqual(forge_raw(w, "aa"), gh_raw(w, "aa"))
+            self.assertEqual(w.forge_refs("someone--aa").get("refs/heads/kept/2020-01-01/old"),
+                             w.gh_refs("someone/aa")["refs/heads/main"])
+            st = mirror.load_json(w.p["state"], {})["repos"]
+            aa = next(r for r in st.values() if r.get("full_name") == "someone/aa")
+            self.assertEqual(aa.get("problem"), "", aa)
+            self.assertIn("refs/heads/kept/2020-01-01/old", aa["refs"])
+
 
 class G2Sync(unittest.TestCase):
     def test_G2_5_a_new_key_is_one_step_and_the_next_sync_proves_it(self):
@@ -1889,6 +4253,48 @@ class G2Sync(unittest.TestCase):
             self.assertIn("sync: 2 on GitHub, 2 copied now, 0 unchanged, 0 problem(s)", out)
             self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
 
+    def test_G2_7_a_fine_grained_key_for_one_project_of_an_organisation_is_set_copied_and_proved(self):
+        """Row M99: the one road 0.1.0 gives a person, with a key as GitHub's docs describe it: fine-grained
+        (github_pat_ and 82 more, no X-OAuth-Scopes header), read-only, an organisation as its resource owner, one
+        project selected, an end date in its header. key set keeps it; the announcement names that project and the
+        key's end; the first copy follows the person's go; restore --check proves it from the forge alone; the key
+        is in its own file and nowhere else. This is the stand-in's idea of GitHub's answers: the row is seen
+        against the real GitHub, with a real key of this kind, before its version is tagged."""
+        pat = "github_pat_" + "11ABCDEFG0" + "Zz9_" * 18
+        self.assertEqual(len(pat), len("github_pat_") + 82)
+        self.assertTrue(mirror.KEY_SHAPE.search(pat), "the key scan does not know a fine-grained key's shape")
+        end = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() + 30 * 86400))
+        tell = re.compile(r"^tell the person \d+ of \d+: (.*)$", re.M)
+        with World(self) as w:
+            w.gh.key, w.gh.scopes, w.gh.expires = pat, None, end
+            w.gh.add_repo("theorg", "proof", owner_type="Organization")
+            w.gh.commit("theorg/proof", {"a": b"1"})
+            quiet(mirror.main, ["config", "include", "theorg/proof"])
+            rc, out = w.key_set("theorg")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("The key for theorg (organisation) is kept", out)
+            rc, out = w.sync("--announce")
+            self.assertEqual(rc, 0, out)
+            said = tell.findall(out)
+            self.assertTrue(any(x.startswith("The first copy: 1 repositories from 1 owner(s)") for x in said), said)
+            self.assertTrue(any("They are: theorg/proof." in x for x in said), said)
+            self.assertIn(f"The key for theorg ends {end}; the mirror warns you two weeks before.", said)
+            self.assertEqual(w.go()[0], 0)
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(w.forge_refs("theorg--proof"), w.gh_refs("theorg/proof"))
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("restore check: 1 copies, 1 whole, 0 difference(s), 0 could not be read", out)
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"key for theorg: expires {end}", out)
+            self.assertRegex(out, r"key scan: \d+ file\(s\) read, no key found")
+            hits, read = files_holding(w.home.tmp, pat)
+            self.assertGreater(read, 0, "the scan read no files")
+            self.assertEqual(hits, [mirror.key_path(w.p, "theorg")], "the key was written somewhere else")
+            self.assertEqual(w.gh.writes(), [], "something was written to GitHub")
+
 
 def put_settings(p, **kw):
     s = mirror.load_json(p["settings"], {})
@@ -1898,6 +4304,151 @@ def put_settings(p, **kw):
 
 def git_calls(gh, full=None):
     return [x for x in gh.log if ".git/" in x[1] and (full is None or x[1].startswith(f"/{full}.git/"))]
+
+
+# M151, M154, M157: each damaged form of a kept JSON file, planted alone; "cannot be opened" only where the
+# account is not root (root reads mode 000), and a folder by the file's name stands in for it there too.
+KEPT_FORMS = ("cannot be opened", "0 bytes", "blank space", "cut short", "not JSON", "not text", "a JSON list",
+              "a folder", "an entry of the wrong kind")
+
+
+def plant_kept(path, form, whole, wrong):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.chmod(path, 0o600)
+        os.remove(path)
+    if form == "a folder":
+        os.makedirs(path)
+        return
+    data = {"cannot be opened": whole, "0 bytes": b"", "blank space": b" \n\n", "cut short": whole[:len(whole) // 2],
+            "not JSON": b"owners = someone\n", "not text": b"\xff\xfe{\x00", "a JSON list": b'["someone"]\n',
+            "an entry of the wrong kind": wrong}[form]
+    with open(path, "wb") as f:
+        f.write(data)
+    if form == "cannot be opened":
+        os.chmod(path, 0)
+
+
+def kept_mark(path):
+    """What a planted file is, read without opening it: its kind, mode, size and time."""
+    st = os.lstat(path)
+    return stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode), st.st_size, st.st_mtime_ns
+
+
+def run_kept_cmd(w, cmd):
+    saved = sys.stdin
+    sys.stdin = AtTerminal("\n") if cmd == ["go"] else io.StringIO(w.gh.key + "\n" if cmd[:2] == ["key", "set"] else "")
+    try:
+        return quiet(mirror.main, cmd)
+    finally:
+        sys.stdin = saved
+
+
+def run_printed(w, line, stdin=""):
+    """A command as the tool printed it, run as a person pastes it: its words after `python3 -I <the copy>`."""
+    argv = shlex.split(line)
+    assert argv[:2] == ["python3", "-I"] and os.path.exists(argv[2]), line
+    saved = sys.stdin
+    sys.stdin = io.StringIO(stdin)
+    try:
+        return quiet(mirror.main, argv[3:])
+    finally:
+        sys.stdin = saved
+
+
+KEPT_COMMANDS = (["status"], ["left-out"], ["restore", "--check"], ["sync"], ["config", "include", "someone/a"],
+                 ["key", "set", "someone"], ["go"], ["setup"])
+
+
+def made_home_tree(h, p):
+    """M158: the whole made home, each path with its bytes' SHA-256 (or "dir", or "link"), its service files and
+    the folders around them aside."""
+    svc = os.path.dirname(mirror.service_files(p)[0])
+    out = {}
+    for d, ds, fs in os.walk(h.tmp):
+        for x in ds + fs:
+            q = os.path.join(d, x)
+            if q == svc or mirror.inside(q, svc) or mirror.inside(svc, q):
+                continue
+            if os.path.islink(q):
+                out[q] = "link"
+            elif os.path.isdir(q):
+                out[q] = "dir"
+            else:
+                try:
+                    out[q] = mirror.sha256_of(q)
+                except OSError as e:
+                    out[q] = f"could not be read ({type(e).__name__}) {stat.S_IMODE(os.lstat(q).st_mode):o}"
+    return out
+
+
+# launchd_off's own line (scripts/mirror.py): each wait for a job to be taken off, added to launchd.log in the forge's
+# log folder when that folder is there
+LAUNCHD_WAIT_LINE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ (?:" + re.escape(mirror.LAUNCHD_LABEL) + "|"
+                               + re.escape(mirror.SYNC_LABEL) + r"): (?:gone|there|unread) after \d+\.\d s, \d+ "
+                               r"read\(s\), last code -?\d+(?: \(no domain at the screen\))?")
+
+
+def made_home_held(tc, h, p, before):
+    """M158: the whole made home is as it was (made_home_tree, `before` taken with launchd_log_bytes beside it), each
+    path that differs named, paths only, never a byte. On a Mac one file is set aside by its exact path: the forge's
+    launchd.log, which uninstall's take-off of the jobs adds its wait line to (the product's own words); in its
+    place, that file only grew, and each line added has the wait's own form."""
+    tree, log_before = before
+    now = made_home_tree(h, p)
+    log = os.path.join(p["forge"], "log", "launchd.log")
+    if mirror.system()[0] == "darwin":
+        log_now = fread_bytes(log) if os.path.lexists(log) else None
+        tc.assertTrue(log_now is not None or log_before is None, f"{log} is gone")
+        if log_now is not None:
+            old = log_before or b""
+            tc.assertTrue(log_now.startswith(old), f"{log} did not only grow")
+            added = log_now[len(old):].decode("utf-8").splitlines()
+            tc.assertEqual([x for x in added if not LAUNCHD_WAIT_LINE.fullmatch(x)], [],
+                           f"{log}: a line added that is not the wait's own form")
+        tree = {k: v for k, v in tree.items() if k != log}
+        now = {k: v for k, v in now.items() if k != log}
+    tc.assertEqual(sorted(k for k in tree.keys() | now.keys() if tree.get(k) != now.get(k)), [],
+                   "paths in the made home that differ")
+
+
+def launchd_log_bytes(p):
+    log = os.path.join(p["forge"], "log", "launchd.log")
+    return fread_bytes(log) if os.path.lexists(log) else None
+
+
+def kept_file_trial(tc, w, path, wrong):
+    """Every form before every command that reads the file: never a traceback, never taken as empty or written
+    over, GitHub never asked, and the stop (status: a problem line) names the file, where the read stopped and one
+    step."""
+    whole = fread_bytes(path)
+    forms = [f for f in KEPT_FORMS if f != "cannot be opened" or os.geteuid() != 0]
+    for form in forms:
+        for cmd in KEPT_COMMANDS:
+            with tc.subTest(form=form, command=" ".join(cmd)):
+                plant_kept(path, form, whole, wrong)
+                mark, n = kept_mark(path), len(w.gh.log)
+                rc, out = run_kept_cmd(w, cmd)
+                tc.assertEqual(kept_mark(path), mark, f"the file was changed: {out}")
+                tc.assertEqual(len(w.gh.log), n, "GitHub was asked")
+                tc.assertNotIn("No GitHub key is kept yet", out)
+                tc.assertNotIn("Run setup first", out)
+                tc.assertNotIn("Setup comes first", out)
+                head = "problem: " if cmd == ["status"] else "Stopped: "
+                tc.assertIn(f"{head}{path} could not be read: ", out)
+                tc.assertEqual(rc, 1 if cmd == ["status"] else 2, out)
+                tc.assertIn("The one next step: move that file out of", out)
+                why = out.split("could not be read: ", 1)[1].split("\n")[0]
+                for planted in ("owners = someone", '["someone"]', "\\xff", "\ufffd"):
+                    tc.assertNotIn(planted, why, "a value of the file was printed")
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.chmod(path, 0o600)
+        os.remove(path)
+    with open(path, "wb") as f:
+        f.write(whole)
 
 
 class G4(unittest.TestCase):
@@ -1913,7 +4464,7 @@ class G4(unittest.TestCase):
                 self.assertIn("OnUnitActiveSec=15min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))
                 self.assertIn("OnStartupSec=2min", fread(os.path.join(base, mirror.SYNC_UNIT + ".timer")))   # G4.7
                 unit = fread(os.path.join(base, mirror.SYNC_UNIT + ".service"))
-                self.assertIn(f"{p['script']} sync --from-timer", unit)
+                self.assertIn(" ".join(mirror.sd_word(w) for w in (p["script"], "sync", "--from-timer")), unit)   # G1.24
                 self.assertIn("WSM_HOME=", unit)
                 self.assertIn(["systemctl", "--user", "enable", "--now", mirror.SYNC_UNIT + ".timer"], h.calls)
             w.gh.add_repo("someone", "alpha")
@@ -1957,19 +4508,40 @@ class G4(unittest.TestCase):
             rc, out = w.first_sync()
             self.assertEqual(rc, 1, out)
             self.assertLess(time.time() - started, 40)
-            self.assertIn("problem: someone/alpha: the fetch from GitHub took longer than 2 s, and so did the retry", out)
+            # The first read of GitHub is its list of branches and tags (M123): that is the slow one, said with why.
+            slow = mirror.LISTING_UNREAD.format(why="it took longer than 2 s, and so did the retry")
+            self.assertIn("problem: someone/alpha: " + slow, out)
             self.assertIn("2 on GitHub, 1 copied now", out)
             self.assertEqual(len([x for x in git_calls(w.gh, "someone/alpha") if "info/refs" in x[1]]), 2,
                              "the slow fetch was not tried exactly twice")
             self.assertEqual(w.forge_refs("someone--beta"), w.gh_refs("someone/beta"))
             st = mirror.load_json(w.p["state"], {})
             alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
-            self.assertTrue(alpha["problem"].startswith("cannot refresh: the fetch from GitHub took longer"))
+            self.assertEqual(alpha["problem"], "cannot refresh: " + slow)
             # When it is quick again, the next sync copies it.
             w.gh.slow.clear()
             rc, out = w.sync()
             self.assertEqual(rc, 0, out)
             self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"))
+        # The list quick and the fetch slow: the fetch's own words, tried exactly twice, and the rest copied.
+        with World(self) as w:
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            put_settings(w.p, git_timeout_s=2)
+            w.gh.slow_fetch["someone/alpha"] = 5
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 1, out)
+            slow = "the fetch from GitHub took longer than 2 s, and so did the retry"
+            self.assertIn("problem: someone/alpha: " + slow, out)
+            self.assertNotIn("could not be read", out)
+            self.assertIn("2 on GitHub, 1 copied now", out)
+            self.assertEqual(w.gh.fetches.count("someone/alpha"), 2, "the slow fetch was not tried exactly twice")
+            self.assertEqual(w.forge_refs("someone--beta"), w.gh_refs("someone/beta"))
+            st = mirror.load_json(w.p["state"], {})
+            alpha = next(r for r in st["repos"].values() if r["full_name"] == "someone/alpha")
+            self.assertEqual(alpha["problem"], "cannot refresh: " + slow)
 
     def test_G4_3_one_sync_at_a_time(self):
         with Home() as h:
@@ -2174,6 +4746,108 @@ class G4(unittest.TestCase):
         self.assertNotIn("OnBootSec", t)
         self.assertNotIn("Persistent", t)          # it applies to calendar timers only, and promised a catch-up
 
+
+    def test_G4_10_two_writes_of_one_kept_file_at_once_never_tear_it(self):
+        """M161 (seen 2026-11-26 in a stand-in trial in a made home, the two writes forced into one order inside one
+        process): with one temporary name for every writer, a second write run whole at the first one's rename took
+        that name away, and the first ended in a traceback; the record's second write, run inside the first,
+        left a record that could not be read. Each write is made under its own temporary name and put in place
+        whole: no traceback, and the file holds one writer's bytes, whole. Both writers (write_file, the record's
+        write_made), each forced order (the second run whole right after the first made its temporary file, and
+        at the first's rename)."""
+        with Home():
+            p = mirror.paths()
+            mirror.write_file(os.path.join(p["data"], "first-note"), "x\n")
+            rf = os.path.join(p["data"], mirror.MADE_RECORD)
+            base, why = mirror.read_made(p)
+            self.assertIsNotNone(base, why)
+            writers = {
+                "settings": (p["settings"], lambda tag: mirror.write_file(
+                    p["settings"], json.dumps({"include": [tag]}, indent=1) + "\n", 0o600),
+                    lambda tag: json.dumps({"include": [tag]}, indent=1) + "\n"),
+                "record": (rf, lambda tag: mirror.write_made(p, dict(base, **{os.path.join(p["data"], tag): "file"})),
+                           lambda tag: json.dumps({"written_by": "windstorm-mirror", "made": dict(
+                               base, **{os.path.join(p["data"], tag): "file"})}, indent=1)),
+                # two setups at once (the owner's Q4, 11-26): each puts the skill's own copy in place
+                "the installed copy": (p["script"], lambda tag: mirror.copy_whole(srcs[tag], p["script"]),
+                                       lambda tag: f"# the copy of {tag}\n"),
+            }
+            srcs = {}
+            for tag in ("first-writer", "second-writer"):
+                srcs[tag] = os.path.join(mirror.paths()["data"], "..", f"source-{tag}.py")
+                with open(srcs[tag], "w") as fh:
+                    fh.write(f"# the copy of {tag}\n")
+            for name, (f, write, text_of) in writers.items():
+                for at in ("made", "rename"):
+                    with self.subTest(file=name, second_writer_at=at):
+                        real_mk, real_rep, box = tempfile.mkstemp, os.replace, {"n": 0}
+
+                        def second():
+                            box["n"] += 1
+                            tempfile.mkstemp, os.replace = real_mk, real_rep
+                            write("second-writer")
+
+                        def mk(*a, **kw):
+                            got = real_mk(*a, **kw)
+                            if at == "made" and box["n"] == 0:
+                                second()
+                            return got
+
+                        def rep(src, dst):
+                            if at == "rename" and dst == f and box["n"] == 0:
+                                second()
+                            return real_rep(src, dst)
+                        tempfile.mkstemp, os.replace = mk, rep
+                        try:
+                            write("first-writer")        # no traceback: an error fails the test here
+                        finally:
+                            tempfile.mkstemp, os.replace = real_mk, real_rep
+                        self.assertEqual(box["n"], 1, "the second writer was not run inside the first")
+                        self.assertEqual(fread(f), text_of("first-writer"),
+                                         "the file does not hold one writer's bytes, whole (the first renamed last)")
+                        left = [x for x in os.listdir(os.path.dirname(f)) if x.startswith(os.path.basename(f) + ".")]
+                        self.assertEqual(left, [], "a temporary file was left beside it")
+                        if name == "record":
+                            self.assertIsNotNone(mirror.read_made(p)[0])
+
+    def test_G4_11_an_entry_noted_in_the_record_is_never_lost_to_another_commands_write(self):
+        """M162 (seen 2026-11-26 in a stand-in trial in a made home): claim() read the record, then wrote it, with no
+        lock; a second command's claim run whole between the two was written over, and its folder was then not the
+        skill's to setup. The record is read and written under one lock: another process's claim, started while
+        this one is between its read and its write, waits, and both entries are kept."""
+        with Home():
+            p = mirror.paths()
+            mirror.write_file(os.path.join(p["data"], "first-note"), "x\n")
+            ours, theirs = os.path.join(p["data"], "noted-here"), os.path.join(p["data"], "noted-by-another")
+            for f in (ours, theirs):
+                with open(f, "w") as fh:
+                    fh.write("x\n")
+            code = (f"import sys; sys.path.insert(0, {os.path.dirname(SCRIPT)!r}); import mirror; "
+                    f"mirror.claim({theirs!r})")
+            real, box = mirror.read_made, {}
+
+            def read_then_another(p_):
+                got = real(p_)
+                if "pr" not in box:
+                    box["pr"] = subprocess.Popen([sys.executable, "-I", "-c", code], env=dict(os.environ))
+                    try:
+                        box["pr"].wait(3)
+                        box["ended_between"] = True
+                    except subprocess.TimeoutExpired:
+                        box["ended_between"] = False
+                return got
+            mirror.read_made = read_then_another
+            try:
+                mirror.claim(ours)
+            finally:
+                mirror.read_made = real
+            self.assertEqual(box["pr"].wait(30), 0)
+            self.assertFalse(box["ended_between"], "the other command's claim ran whole between this one's read and "
+                             "its write")
+            rec, why = mirror.read_made(p)
+            self.assertIsNotNone(rec, why)
+            self.assertEqual((rec.get(ours), rec.get(theirs)), ("file", "file"), "an entry was lost")
+            self.assertEqual(mirror.not_ours(p), [])
 
 class G5(unittest.TestCase):
     def test_G5_1_a_rewritten_or_deleted_branch_is_kept_before_the_copy_follows(self):
@@ -2420,6 +5094,154 @@ class G5(unittest.TestCase):
             st = mirror.load_json(w.p["state"], {})
             self.assertEqual([r["full_name"] for r in st["repos"].values() if r.get("gone_since")], [])
 
+    def test_G5_6_a_tag_deleted_on_github_leaves_the_copy_its_commit_kept(self):
+        """M125 (seen 2026-11-25 in a reviewer's world): a tag deleted on GitHub stayed in the copy for ever, because
+        the fetch from the forge followed tags and wrote the forge's tag back into the cache."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "tag", "t1", one)
+            w.gh.git("someone/alpha", "tag", "t2")
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            self.assertEqual(w.forge_refs("someone--alpha")["refs/tags/t1"], one)       # the premise: it was copied
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            w.gh.git("someone/alpha", "tag", "-d", "t1")
+            tags = lambda refs: {r: v for r, v in refs.items() if r.startswith("refs/tags/")}
+            want = tags(w.gh_refs("someone/alpha"))           # read once: a read of the stand-in moves its pushed_at
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2002-01-01T00:00:00Z"   # GitHub's time moved (not to the second)
+            fetched = lambda: len(git_calls(w.gh, "someone/alpha"))     # its git calls to GitHub (a skip makes none)
+            # The sync after the delete, then one with nothing changed on GitHub but its time (so the project is
+            # fetched and pushed again, not skipped as unchanged), then one skipped as unchanged.
+            for step in ("after the delete", "nothing changed", "unchanged"):
+                if step == "nothing changed":
+                    w.gh.repos["someone/alpha"]["pushed_at"] = "2001-01-01T00:00:00Z"
+                was = fetched()
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, f"{step}: {out}")
+                self.assertEqual(fetched() == was, step == "unchanged", f"{step}: fetched again or not")
+                refs = w.forge_refs("someone--alpha")
+                self.assertEqual(tags(refs), want, step)
+                self.assertEqual(sorted(r for r in refs if "/kept/" in r), [f"refs/heads/kept/{day}/tags/t1"], step)
+                self.assertEqual(refs[f"refs/heads/kept/{day}/tags/t1"], one, step)
+                said = f"someone/alpha: tags/t1 was deleted on GitHub; its old commit is kept as kept/{day}/tags/t1"
+                (self.assertIn if step == "after the delete" else self.assertNotIn)(said, out)
+            rc, out = status()
+            self.assertIn("\ncopies: 1 on GitHub, 1 copied, 0 behind", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
+
+    def test_G5_7_an_annotated_tag_moved_or_deleted_keeps_its_commit(self):
+        """M126 (seen 2026-11-25 in a reviewer's world): an annotated tag moved on GitHub ended its project's refresh
+        for good, because the tag object, not its commit, was pushed to a kept branch, which git refuses."""
+        with World(self) as w:
+            full = "someone/alpha"
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit(full, {"a": b"1"})
+            two = w.gh.commit(full, {"a": b"2"})
+            blob = w.gh.git(full, "rev-parse", "main:a").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            for name, at in (("ta", one), ("tam", one), ("tfile", blob)):
+                w.gh.git(full, *me, "tag", "-a", "-m", f"the tag {name}", name, at)
+            w.gh.git(full, *me, "tag", "-a", "-m", "a tag of a tag", "ttag", "ta")
+            w.gh.git(full, "tag", "plain", one)                                     # a plain tag that stays
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            tags = lambda refs: {r: v for r, v in refs.items() if r.startswith("refs/tags/")}
+            self.assertEqual(tags(w.forge_refs("someone--alpha")), tags(w.gh_refs(full)))   # the premise
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            # On GitHub: an annotated tag deleted, one moved, a tag of a tag deleted, a tag at a file deleted.
+            w.gh.git(full, "tag", "-d", "ta")
+            w.gh.git(full, *me, "tag", "-a", "-f", "-m", "the tag tam, moved", "tam", two)
+            w.gh.git(full, "tag", "-d", "ttag")
+            w.gh.git(full, "tag", "-d", "tfile")
+            want = tags(w.gh_refs(full))                      # read once: a read of the stand-in moves its pushed_at
+            w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"              # GitHub's time moved (not to the second)
+            fetched = lambda: len(git_calls(w.gh, "someone/alpha"))     # its git calls to GitHub (a skip makes none)
+            for step in ("after the change", "nothing changed", "unchanged"):
+                if step == "nothing changed":
+                    w.gh.repos[full]["pushed_at"] = "2001-01-01T00:00:00Z"
+                was = fetched()
+                rc, out = w.sync()
+                self.assertEqual(rc, 0, f"{step}: {out}")
+                self.assertEqual(fetched() == was, step == "unchanged", f"{step}: fetched again or not")
+                refs = w.forge_refs("someone--alpha")
+                self.assertEqual(tags(refs), want, step)
+                kept = {r: v for r, v in refs.items() if "/kept/" in r}
+                self.assertEqual(kept, {f"refs/heads/kept/{day}/tags/{n}": one for n in ("ta", "tam", "ttag")}, step)
+                lines = [f"someone/alpha: tags/{n} was {what} on GitHub; its old commit is kept as kept/{day}/tags/{n}"
+                         for n, what in (("ta", "deleted"), ("tam", "moved"), ("ttag", "deleted"))]
+                lines.append(mirror.TAG_NOT_KEPT.format(full=full, short="tags/tfile", what="deleted", at="a file"))
+                for line in lines:
+                    (self.assertIn if step == "after the change" else self.assertNotIn)(line, out)
+            rc, out = status()
+            self.assertIn("\ncopies: 1 on GitHub, 1 copied, 0 behind", out)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("1 copies, 1 whole, 0 difference(s)", out)
+            # tam moved again: a read of its kind that failed is never taken for a no (G5.4), so the copy is not moved
+            # on that pass; the next pass keeps its commit under a name of its own.
+            w.gh.git(full, *me, "tag", "-a", "-f", "-m", "the tag tam, moved back", "tam", one)
+            w.gh.repos[full]["pushed_at"] = "2003-01-01T00:00:00Z"
+            saved, before = mirror.git, w.forge_refs("someone--alpha")
+
+            def unread(cache, *args, **kw):
+                if args[:2] == ("cat-file", "-t") and "^" not in args[2]:      # keep_before_moving's read only
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: a read that failed")
+                return saved(cache, *args, **kw)
+            mirror.git = unread
+            try:
+                rc, out = w.sync()
+            finally:
+                mirror.git = saved
+            self.assertEqual(rc, 1, out)
+            self.assertIn("problem: someone/alpha: an old commit could not be kept, so the copy was not moved", out)
+            self.assertEqual(w.forge_refs("someone--alpha"), before, "the copy moved on a read that failed")
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"someone/alpha: tags/tam was moved on GitHub; its old commit is kept as kept/{day}/tags/tam-2", out)
+            refs = w.forge_refs("someone--alpha")
+            self.assertEqual(tags(refs), tags(w.gh_refs(full)))
+            self.assertEqual(refs[f"refs/heads/kept/{day}/tags/tam-2"], two)
+
+    def test_G5_9_a_github_branch_named_kept_is_said_in_plain_words(self):
+        """M129 (a reviewer's world 16, 2026-11-25): with a branch named kept/... on GitHub, every sync after something
+        changed there ended on git's own "dst ref ... receives from more than one src", with no next step, and the
+        copy's main stayed behind GitHub's. Now the sync says what it is, before anything is pushed, and its one next
+        step, run, gives a sync that is good again. The cure is row M127, due 0.1.1."""
+        with World(self) as w:
+            for n, b in (("alpha", "kept/foo"), ("beta", "kept/2020-01-01/old"), ("gamma", None)):
+                w.gh.add_repo("someone", n)
+                one = w.gh.commit(f"someone/{n}", {"a": b"1"})
+                if b:
+                    w.gh.git(f"someone/{n}", "branch", b, one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)                       # this version copies such a project once
+            before = {n: w.forge_refs(f"someone--{n}") for n in ("alpha", "beta")}
+            for n in ("alpha", "beta", "gamma"):                         # then something changes on GitHub
+                w.gh.commit(f"someone/{n}", {"a": b"2"})
+                w.gh.repos[f"someone/{n}"]["pushed_at"] = "2002-01-01T00:00:00Z"
+            for _ in (1, 2):                                             # every sync after that, not by timing
+                rc, out = w.sync()
+                self.assertEqual(rc, 1, out)
+                for n, b in (("alpha", "kept/foo"), ("beta", "kept/2020-01-01/old")):
+                    self.assertIn(f"problem: someone/{n}: " + mirror.KEPT_CLASH.format(n=1, names=b), out)
+                    self.assertEqual(w.forge_refs(f"someone--{n}"), before[n], "the copy moved")
+                self.assertNotIn("receives from more than one src", out)
+                self.assertEqual(w.forge_refs("someone--gamma")["refs/heads/main"],
+                                 w.gh_refs("someone/gamma")["refs/heads/main"])     # the control follows
+            rc, out = status()
+            self.assertIn("cannot refresh: " + mirror.KEPT_CLASH.format(n=1, names="kept/foo"), out)
+            # The one next step, taken: the branch gets another name on GitHub, and the next sync is good.
+            w.gh.git("someone/alpha", "branch", "-m", "kept/foo", "foo")
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2003-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertNotIn("problem: someone/alpha", out)
+            refs, gh = w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha")
+            self.assertEqual({r: v for r, v in refs.items() if not r.startswith("refs/heads/kept/")}, gh)
+
 
 def status():
     return quiet(mirror.main, ["status"])
@@ -2454,7 +5276,10 @@ class G6(unittest.TestCase):
             self.assertEqual(lines[at], "copies: 3 on GitHub, 3 copied, 3 behind, 0 unreadable")
             problems = [x for x in lines[:at] if x.startswith("problem:")]
             self.assertTrue(any("someone/a: last good refresh" in x and "older than twice the sync interval" in x for x in problems))
-            self.assertTrue(any(x.startswith("problem: someone/b: cannot refresh: the fetch from GitHub failed") for x in problems))
+            b_good = next(r for r in st["repos"].values() if r["full_name"] == "someone/b")["last_good"]
+            self.assertTrue(b_good, st)              # b had a good refresh, so its line says since when first (G6.2)
+            self.assertTrue(any(x.startswith(f"problem: someone/b: not refreshed since {b_good}; cannot refresh: GitHub's "
+                                             "list of its branches and tags could not be read (") for x in problems), out)
             self.assertIn("problem: someone/c: the copy's branches and tags differ from what GitHub last showed", problems)
 
     def test_G6_2_a_refused_key_reads_as_not_refreshed_since_the_last_good_one(self):
@@ -2495,14 +5320,49 @@ class G6(unittest.TestCase):
                 self.assertIn("copies: 1 on GitHub, 1 copied, 1 behind, 0 unreadable", out, why)
                 line = [x for x in out.splitlines() if x.startswith("problem: someone/alpha: ")]
                 self.assertEqual(len(line), 1, (why, out))
-                self.assertIn("cannot refresh: ", line[0], why)
-                self.assertTrue(line[0].endswith(f"; not refreshed since {good}"), (why, line[0]))
+                self.assertTrue(line[0].startswith(f"problem: someone/alpha: not refreshed since {good}; cannot refresh: "),
+                                (why, line[0]))
                 self.assertIn(f"last good sync: {good_sync}", out, why)
                 self.assertNotIn("0 behind", out, why)
                 st = mirror.load_json(w.p["state"], {})
                 self.assertEqual(st["last_good_sync"], good_sync, why)
                 self.assertEqual(next(iter(st["repos"].values()))["last_good"], good, why)
                 self.assertFalse(mirror.copy_state(next(iter(st["repos"].values())), w.forge_refs("someone--alpha"), 10 ** 9)[0])
+
+    def test_G6_2_a_reason_that_ends_in_a_command_ends_its_status_line_with_it(self):
+        """The family's rule 31 (2026-11-24, found on reading the strings commit): status says a copy that stopped
+        for a git setting with the time of its last good refresh; the command its reason names stands alone on the
+        line after it and ends that line, so a shell given the line to its end runs nothing after the command. Both
+        reasons: a line for the project's whole address, and a setting git cannot read."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            good = next(iter(mirror.load_json(w.p["state"], {})["repos"].values()))["last_good"]
+            base = os.environ["WSM_GITHUB_GIT"].rstrip("/")
+            host = urllib.parse.urlsplit(base).hostname
+            gc = os.path.join(os.environ["HOME"], ".gitconfig")
+            for n, (form, cmd) in enumerate((
+                    (f'[url "ssh://git@{host}:1/someone/alpha.git"]\n\tinsteadOf = {base}/someone/alpha.git\n',
+                     "git config --global --get-regexp insteadof"),
+                    ("[url\n", "git config --global --list"))):
+                w.gh.commit("someone/alpha", {"n": str(n).encode()})
+                with open(gc, "w") as f:
+                    f.write(form)
+                try:
+                    rc, out = w.sync()
+                    self.assertNotEqual(rc, 0, out)
+                finally:
+                    os.remove(gc)             # status prints the reason the sync stored (a setting git cannot read
+                rc, out = status()            # would stop status's own read of the forge, a line with no command)
+                self.assertEqual(rc, 1, out)
+                lines = out.splitlines()
+                at = [i for i, x in enumerate(lines) if x.startswith("problem: someone/alpha: ")]
+                self.assertEqual(len(at), 1, out)
+                self.assertTrue(lines[at[0]].startswith(f"problem: someone/alpha: not refreshed since {good}; "), out)
+                self.assertTrue(lines[at[0]].endswith(":"), lines[at[0]])
+                self.assertEqual(lines[at[0] + 1], "    " + cmd, out)
 
     def test_G6_2_a_copy_that_cannot_refresh_is_never_shown_as_current(self):
         fresh = mirror.now_utc()
@@ -2591,6 +5451,21 @@ class G6(unittest.TestCase):
                 for sec in secrets_:
                     self.assertNotIn(sec, text)
 
+    def test_G6_12_no_printed_line_carries_a_backtick_or_a_dollar_parenthesis(self):
+        """The family's rule 31 (2026-11-24): a line the person is asked to report can reach a shell inside double
+        quotes, where a backticked command, or one in a dollar-parenthesis, is run and its answer lands in the text
+        that is sent. So no string the tool can print carries either; a whole command stands alone on a line of
+        its own. Read over every string constant in the script (docstrings aside), f-strings' parts too."""
+        import ast
+        tree = ast.parse(fread(SCRIPT))
+        docs = {id(n.body[0].value) for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+        found = sorted((n.lineno, n.value[:90]) for n in ast.walk(tree)
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
+                       and ("`" in n.value or "$(" in n.value))
+        self.assertEqual(found, [], f"{len(found)} printed string(s) carry a backtick or a dollar-parenthesis")
+
     def test_G6_12_a_printed_command_runs_as_printed_where_the_path_holds_a_space(self):
         """M60 (a Mac test account, 2026-11-23): the tool printed `python3 -I /Users/.../Application Support/
         windstorm-mirror/mirror.py uninstall --delete-copies`, which a shell splits at the space. Every command the
@@ -2600,6 +5475,8 @@ class G6(unittest.TestCase):
             os.environ["WSM_HOME"] = root
             p = mirror.paths()
             self.assertIn(" ", p["script"])
+            os.makedirs(os.path.dirname(p["script"]), exist_ok=True)     # the skill's own copy is there (M144)
+            shutil.copyfile(SCRIPT, p["script"])
             for args in (("uninstall",), ("uninstall", "--delete-copies"), ("status",)):
                 argv = shlex.split(mirror.own_command(p, *args))
                 self.assertEqual(argv, ["python3", "-I", p["script"], *args])
@@ -2616,12 +5493,112 @@ class G6(unittest.TestCase):
             self.assertIn("own_command(paths(), a.cmd)", inspect.getsource(mirror.main))
             self.assertNotIn("{script}", mirror.PLUGIN_GONE)
 
+    def test_G6_12_every_printed_command_names_a_copy_of_the_tool_that_is_there(self):
+        """M144 (seen 2026-11-25 on a Mac, macOS 27.2.1): after uninstall had taken the skill's own copy away,
+        `uninstall --delete-copies` with no terminal printed a line for the person that named that copy, so it could
+        not run. Every command line the tool prints is tried in the state it was printed in, with the skill's own copy
+        there and with it gone: the file it names is there when it is printed. While the own copy is there, every
+        line names it, as before; once it is gone, the line names the copy that runs, and run as printed in a
+        terminal it asks for the number of copies; the Kept line names a way with no copy of the tool left."""
+        printed = []
+        real_say = mirror.say
+
+        def say(msg=""):
+            for m in re.finditer(r"python3 -I ('[^']*'|[^ ]+)", str(msg)):
+                path = shlex.split(m.group(1))[0]
+                printed.append((path, os.path.exists(path), str(msg)[:100]))
+            return real_say(msg)
+        saved = sys.stdin
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            mirror.say = say
+            try:
+                sys.stdin = io.StringIO("")                           # no terminal, as an agent runs it
+                for argv in (["status"], ["go"], ["uninstall", "--delete-copies"]):
+                    mirror.DOOR_SEEN.clear()
+                    quiet(mirror.main, argv)
+                self.assertGreaterEqual(len(printed), 3, printed)
+                self.assertEqual({x[0] for x in printed}, {w.p["script"]}, "the own copy, as before")
+                self.assertTrue(all(x[1] for x in printed), printed)
+                del printed[:]
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(os.path.exists(w.p["script"]))
+                kept = [x for x in out.splitlines() if x.startswith("Kept: the folder of copies")]
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                self.assertEqual(rc, 2, out)
+                self.assertTrue(printed, out)
+                self.assertEqual([x for x in printed if not x[1]], [], "a printed line names a file that is not there")
+                self.assertEqual(len(kept), 1, kept)
+                self.assertIn("once no copy of this skill is left on this computer, as you delete any folder of yours",
+                              kept[0])
+                cmd = out.split("in a terminal window of their own, they run ", 1)[1].split(" and type the number")[0]
+                argv = shlex.split(cmd)
+                self.assertEqual(argv[:3], ["python3", "-I", os.path.abspath(mirror.__file__)])
+                self.assertEqual(argv[3:], ["uninstall", "--delete-copies"])
+                sys.stdin = AtTerminal("7\n")                        # run as printed, at a terminal (not 0)
+                rc, out = quiet(mirror.main, argv[3:])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The copies were not deleted.", out)
+                self.assertTrue(os.path.exists(w.p["data"]))
+            finally:
+                mirror.say = real_say
+                sys.stdin = saved
+        # The maintainer's finding on this row's first commit (2026-11-25): uninstall run from the skill's OWN copy, the
+        # copy every printed line names, reads that copy gone once it has taken it, and the copy that runs is that same
+        # path, so no copy of the tool was read there. The Kept line said "no copy of this skill is left on this
+        # computer", which the tool had not read (a clone or the plugin's folder can still be there). It says what was
+        # read and no more: the own copy is gone now, and another copy only as an "if". "Run from the own copy" is stood
+        # in for by one thing: mirror.__file__, the path the tool reads as the copy that runs, is set to the own copy's
+        # path before uninstall; the tree's own scripts/mirror.py stays on the disk.
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            running = mirror.__file__
+            mirror.__file__ = w.p["script"]
+            try:
+                rc, out = quiet(mirror.main, ["uninstall"])
+            finally:
+                mirror.__file__ = running
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(w.p["script"]))
+            self.assertTrue(os.path.exists(running), "the tree's own copy stays on the disk, unread by uninstall")
+            kept = [x for x in out.splitlines() if x.startswith("Kept: the folder of copies")]
+            self.assertEqual(len(kept), 1, out)
+            self.assertNotIn("no copy of this skill is left", kept[0])
+            self.assertIn("delete it only when you are sure, as you delete any folder of yours; the skill's own copy is "
+                          "gone now, and if another copy of this skill is on this computer, its uninstall "
+                          "--delete-copies does it, in a terminal window of your own. Setup run again later", kept[0])
+
     def test_G6_11_a_reader_that_stops_reading_never_gets_a_traceback(self):
         """A real machine (2026-11-23): `status | head -3` ended in a Python traceback (a broken pipe). The tool is
         run with its output going to a pipe nobody reads: it ends with its own code, says nothing on stderr, and
-        does the whole of its work (setup --dry-run reads this computer to its end and changes nothing)."""
+        does the whole of its work (setup --dry-run reads this computer to its end and changes nothing). Its own
+        code is the one the same run gives with a reader: where setup's floors stop it (G8.7, G1.24: a shell with
+        no user bus), that is 2 both ways; past them, 0."""
         home = tempfile.mkdtemp(prefix="wsm-pipe-")
         TEMPS.append(home)
+        read = subprocess.run([sys.executable, "-I", SCRIPT, "setup", "--dry-run"], capture_output=True, text=True,
+                              timeout=120, env=dict(os.environ, WSM_HOME=home))
+        self.assertIn(read.returncode, (0, 2), read.stdout + read.stderr)
+        if read.returncode == 2:            # 2 only from a floor's own line, read here as the tool reads it
+            saved_home = os.environ.get("WSM_HOME")
+            os.environ["WSM_HOME"] = home
+            try:
+                p = mirror.paths()
+                p["script"] = SCRIPT
+                floors = {mirror.bus_floor(p)} | {(mirror.door_floor() or "") + " Setup made nothing."}
+            finally:
+                if saved_home is None:
+                    os.environ.pop("WSM_HOME")
+                else:
+                    os.environ["WSM_HOME"] = saved_home
+            self.assertIn(read.stdout.strip().splitlines()[-1], floors, read.stdout)
+        self.assertEqual(read.stderr, "")
+        self.assertEqual(os.listdir(home), [])
         r, w = os.pipe()
         os.close(r)                                   # the reader is gone before the first word
         try:
@@ -2629,7 +5606,7 @@ class G6(unittest.TestCase):
                                 text=True, timeout=120, env=dict(os.environ, WSM_HOME=home))
         finally:
             os.close(w)
-        self.assertEqual(pr.returncode, 0, pr.stderr)
+        self.assertEqual(pr.returncode, read.returncode, pr.stderr)
         self.assertEqual(pr.stderr, "")
         self.assertEqual(os.listdir(home), [])
 
@@ -2659,6 +5636,63 @@ class G6(unittest.TestCase):
             rc, out = w.sync("--announce")
             self.assertEqual(rc, 0, out)
             self.assertIn("tell the person 1 of", out)
+
+    def test_G6_10_status_ends_the_forge_does_not_answer_line_with_its_step_taken_as_printed(self):
+        """M105 (the family's rule 7; seen 2026-11-24 on a stock virtual machine, the service's python3 taken away):
+        status's problem line for a forge that does not answer ends with its one step, setup again by its own command
+        line. The step is taken exactly as printed, with no reset between: then status answers 0, the forge answers
+        and every copy is kept."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.home.forge_follows = True
+            pr = w.home.procs[-1]
+            pr.terminate()
+            pr.wait(60)
+            rc, out = status()
+            self.assertEqual(rc, 1, out)
+            step = mirror.own_command(w.p, "setup")
+            self.assertIn(f"problem: the forge does not answer on 127.0.0.1:{w.port}; run setup again, which starts it "
+                          f"and keeps every copy: {step}", out.splitlines())
+            argv = shlex.split(step)
+            self.assertEqual(argv[:3], ["python3", "-I", w.p["script"]], "the step names the skill's own copy")
+            rc, said = quiet(mirror.main, argv[3:])
+            self.assertEqual(rc, 0, said)
+            mirror.DOOR_SEEN.clear()                # status is a process of its own; setup's door read is not reused
+            rc, out = status()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("does not answer", out)
+            self.assertIn("next sync: " + ("every 15 min" if mirror.system()[0] == "darwin" else w.home.timer_next), out)
+            self.assertEqual(w.forge_refs("someone--alpha"), w.gh_refs("someone/alpha"), "every copy kept")
+
+    def test_G6_10_next_sync_is_no_promise_while_the_forge_does_not_answer(self):
+        """M105 (seen 2026-11-24 on a stock virtual machine: with the forge's service failing, status still said
+        "next sync: <time>" as if a sync would run there): while the forge does not answer, the line says the time a
+        sync is tried and that it cannot work until the forge answers; once it answers, the line is the time alone."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            when = "every 15 min (launchd keeps no next-run time)" if mirror.system()[0] == "darwin" else w.home.timer_next
+            def next_sync(out):
+                lines = [x for x in out.splitlines() if x.startswith("next sync: ")]
+                self.assertEqual(len(lines), 1, out)
+                return lines[0]
+            up = next_sync(status()[1])
+            self.assertTrue(up.startswith(f"next sync: {when}") and "cannot work" not in up, up)
+            pr = w.home.procs[-1]
+            pr.terminate()
+            pr.wait(60)
+            mirror.DOOR_SEEN.clear()
+            rc, out = status()
+            self.assertEqual(rc, 1, out)
+            down = next_sync(out)
+            # The time is still to come: "will be tried at" (the owner's word, 11-24); a Mac's line names no time.
+            self.assertEqual(down, f"next sync: {'' if mirror.system()[0] == 'darwin' else 'will be tried at '}{when}; "
+                                   "it cannot work until the forge answers")
 
     def test_G6_10_a_sync_says_when_the_forge_does_not_answer(self):
         """A real machine (2026-11-23): the forge's service was stopped, nothing had changed on GitHub, and sync said
@@ -2748,7 +5782,7 @@ class G6(unittest.TestCase):
             self.assertEqual(w.sync()[0], 0)
             rc, out = status()
             self.assertEqual(rc, 1)
-            self.assertIn(f"problem: the key for someone expires {near}, in 5 day(s): make a new one, then `key set someone`", out)
+            self.assertIn(f"problem: the key for someone expires {near}, in 5 day(s): make a new one, then run key set someone", out)
             w.gh.expires = None
             self.assertEqual(w.sync()[0], 0)
             out = status()[1]
@@ -2777,7 +5811,7 @@ class G6(unittest.TestCase):
             rc, out = status()
             self.assertNotIn("v0.3.0", out, "asked again within the day")
             rc, out = quiet(mirror.main, ["status", "--check-release"])
-            self.assertIn(f"newer release of this skill: v0.3.0 (this is {mirror.VERSION}); `self-update` is your choice", out)
+            self.assertIn(f"newer release of this skill: v0.3.0 (this is {mirror.VERSION}); self-update is your choice", out)
             self.assertIn(f"that release pins Gitea 28.9.1 (this forge runs {mirror.GITEA_VERSION}), and names it a SECURITY FIX", out)
             self.assertIn("Nothing was changed.", out)
             self.assertEqual(w.gh.release_calls, [False, False], "the release was asked for more than once a day, or with a key")
@@ -2809,6 +5843,1502 @@ class G6(unittest.TestCase):
             mirror.system = saved
 
 
+    def test_G6_21_a_kept_json_file_has_three_answers_and_never_a_value_in_its_words(self):
+        """M154 (G6.21; seen 2026-11-26 in a stand-in trial in a made home): a settings or state file whose top was a
+        JSON list ended five commands in a traceback. One reader, three answers: read, not there, could not be read;
+        the why names the error's class or where the parser stopped, never a byte or a value; a top that is not an
+        object, or an entry of a kind the tool never writes there, is "could not be read"."""
+        with Home() as h:
+            f = os.path.join(h.tmp, "kept.json")
+            self.assertEqual(mirror.kept_read(f), ("not there", None))
+            whole = b'{"owners": {"someone": {"kind": "user"}}, "include": ["someone/a"]}\n'
+            for form in KEPT_FORMS:
+                if form == "cannot be opened" and os.geteuid() == 0:
+                    continue
+                with self.subTest(form=form):
+                    plant_kept(f, form, whole, b'{"owners": ["someone"]}\n')
+                    answer, why = mirror.kept_read(f)
+                    if form == "an entry of the wrong kind":
+                        self.assertEqual(answer, "read")
+                        with self.assertRaises(mirror.KeptUnread) as cm:
+                            mirror.load_kept(f, mirror.settings_wrong)
+                        self.assertEqual(cm.exception.why, "its 'owners' entry is not of the kind the tool writes there")
+                        continue
+                    self.assertEqual(answer, "could not be read", form)
+                    want = {"cannot be opened": "it could not be opened (PermissionError)",
+                            "a folder": "it could not be opened (IsADirectoryError)", "0 bytes": "it is empty (0 bytes)",
+                            "blank space": "it holds only blank space", "not text": "it is not text (UnicodeDecodeError)",
+                            "a JSON list": "its top is a JSON list, where the tool keeps an object"}.get(form)
+                    if want:
+                        self.assertEqual(why, want)
+                    else:
+                        self.assertTrue(why.startswith("it is not well-formed JSON (cut short, or changed by hand; the "
+                                                       "read stopped at line "), why)
+                    for planted in ("owners", "someone", "\\x"):
+                        self.assertNotIn(planted, why)
+                    with self.assertRaises(mirror.KeptUnread):
+                        mirror.load_kept(f)
+            plant_kept(f, "a folder", whole, None)
+            shutil.rmtree(f)
+            with open(f, "wb") as fh:
+                fh.write(whole)
+            self.assertEqual(mirror.load_kept(f, mirror.settings_wrong)["include"], ["someone/a"])
+            with open(f, "wb") as fh:
+                fh.write(b'{"repos": ["someone/a"]}')
+            with self.assertRaises(mirror.KeptUnread):
+                mirror.load_kept(f, mirror.state_wrong)
+
+    def test_G6_22_a_key_file_that_cannot_be_read_is_said_and_the_other_owners_go_on(self):
+        """M155 (G6.22; seen 2026-11-26 in stand-in trials in made homes): an owner's key file that could not be
+        opened, was not text, or was a folder ended left-out, sync and go in a traceback (status too when not text),
+        and key set with a folder there ended in a traceback and left a file of its own beside it. Each form: status
+        says it in a problem line; sync and left-out say that owner and go on with the other (an organisation);
+        key set, on the person's own typed key, replaces the file and says it could not be read, or, for a folder,
+        stops with its step; never a traceback, never a byte of it."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            w.gh.add_repo("team", "c", owner_type="Organization")
+            w.gh.commit("team/c", {"f": b"1"})
+            self.assertEqual(w.key_set("someone")[0], 0)
+            self.assertEqual(w.key_set("team")[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            kp = mirror.key_path(p, "someone")
+            whole = fread_bytes(kp)
+            forms = [f for f in ("cannot be opened", "not text", "a folder", "0 bytes", "blank space", "two lines")
+                     if f != "cannot be opened" or os.geteuid() != 0]
+            for i, form in enumerate(forms):
+                with self.subTest(form=form):
+                    def plant():
+                        if form == "two lines":
+                            plant_kept(kp, "0 bytes", whole, None)
+                            with open(kp, "wb") as fh:
+                                fh.write(b"ab12\ncd34\n")
+                        else:
+                            plant_kept(kp, form, whole, None)
+                    plant()
+                    mark = kept_mark(kp)
+                    w.gh.commit("team/c", {"f": str(i + 2).encode()})
+                    new_c = w.gh.git("team/c", "rev-parse", "main").strip()
+                    line = f"someone: its key file {kp} could not be read: "
+                    for cmd in (["status"], ["left-out"], ["sync"], ["go"]):
+                        rc, out = run_kept_cmd(w, cmd)
+                        self.assertNotIn("Traceback", out)
+                        if cmd != ["go"]:                # after the first copy, go reads no key: it ends whole
+                            self.assertIn(line, out, (cmd, out))
+                        self.assertEqual(kept_mark(kp), mark)
+                        self.assertNotIn("ab12", out)
+                    self.assertEqual(w.forge_refs("team--c").get("refs/heads/main"), new_c)   # the other went on
+                    rc, out = run_kept_cmd(w, ["key", "set", "someone"])
+                    if form == "a folder":
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: {kp} is a folder", out)
+                        self.assertTrue(os.path.isdir(kp))
+                        self.assertEqual([x for x in os.listdir(os.path.dirname(kp)) if x.startswith("someone.key.")], [])
+                        shutil.rmtree(kp)
+                        rc, out = run_kept_cmd(w, ["key", "set", "someone"])
+                        self.assertEqual(rc, 0, out)
+                    else:
+                        self.assertEqual(rc, 0, out)
+                        self.assertIn("The key file it replaced could not be read (", out)
+                    self.assertEqual(fread_bytes(kp), whole)
+                    self.assertEqual(run_kept_cmd(w, ["status"])[0], 0)
+
+    def test_G6_23_a_forge_key_that_cannot_be_read_is_said_as_that_and_setup_makes_it_whole(self):
+        """M156 (G6.23; seen 2026-11-26 in stand-in trials in made homes): the mirror account's key file at 0 bytes or
+        cut short made status, sync and restore --check say "the forge does not answer" (it answered), and setup
+        ended 0 and left it so; one that could not be opened, was not text or was a folder ended them in a
+        traceback. Each form: status says the file in a problem line with its step; sync and restore --check stop
+        naming it; the step taken as printed (setup) gives the account a new key and keeps every copy; for a folder,
+        setup stops with its own step and changes nothing. Second case (seen 2026-11-26 in a made home: the key at
+        mode 000, setup --dry-run ended 0 and said nothing of the file the real setup then wrote over): the dry run
+        names that write-over, and the folder's stop, and changes nothing."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            mk = p["mirror_key"]
+            whole = fread_bytes(mk)
+            forms = [f for f in ("cannot be opened", "not text", "a folder", "0 bytes", "cut short", "two lines")
+                     if f != "cannot be opened" or os.geteuid() != 0]
+            for i, form in enumerate(forms):
+                with self.subTest(form=form):
+                    if form == "two lines":
+                        plant_kept(mk, "0 bytes", whole, None)
+                        with open(mk, "wb") as fh:
+                            fh.write(whole.strip()[:20] + b"\n" + whole.strip()[20:] + b"\n")
+                    else:
+                        plant_kept(mk, form, whole, None)
+                    mark = kept_mark(mk)
+                    rc, out = run_kept_cmd(w, ["status"])
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(f"problem: {mk} could not be read: ", out)
+                    self.assertIn(f"run setup again: {mirror.own_command(p, 'setup')}", out)
+                    for cmd in (["sync"], ["restore", "--check"]):
+                        rc, out = run_kept_cmd(w, cmd)
+                        self.assertEqual(rc, 2, (cmd, out))
+                        self.assertIn(f"Stopped: {mk} could not be read: ", out)
+                        self.assertNotIn("does not answer", out)
+                        self.assertNotIn(whole.strip()[:20].decode(), out)
+                    self.assertEqual(kept_mark(mk), mark)
+                    # M156's second case: the dry run says every stop and every write-over the real run makes, and
+                    # writes nothing
+                    rc, out = w.home.setup("--dry-run")
+                    if form == "a folder":
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: {mk} is a folder", out)
+                    else:
+                        self.assertEqual(rc, 0, out)
+                        self.assertIn(f"Setup would give the '{mirror.MIRROR_USER}' account that owns the copies a new "
+                                      f"key of its own in {mk}, readable by you only, in place of the key file there "
+                                      "now, which could not be read: ", out)
+                        self.assertIn("; that file is written over.", out)
+                    self.assertEqual(kept_mark(mk), mark)
+                    rc, out = w.home.setup()                                     # the step, as printed
+                    if form == "a folder":
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: {mk} is a folder", out)
+                        self.assertTrue(os.path.isdir(mk))
+                        shutil.rmtree(mk)
+                        rc, out = w.home.setup()
+                    else:
+                        self.assertIn(f"key file {mk} could not be read: ", out)
+                    self.assertEqual(rc, 0, out)
+                    self.assertEqual(mirror.key_file_read(mk, mirror.FORGE_KEY_FORM)[0], "read")
+                    w.port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+                    w.gh.commit("someone/a", {"f": str(i + 2).encode()})
+                    rc, out = w.sync()
+                    self.assertEqual(rc, 0, out)
+                    self.assertEqual(w.forge_refs("someone--a").get("refs/heads/main"),
+                                     w.gh.git("someone/a", "rev-parse", "main").strip())
+                    self.assertEqual(len(w.forge_get("/user/repos?limit=50")[1]), 1)    # kept, never made again
+                    whole = fread_bytes(mk)
+
+    def test_G6_26_a_forge_settings_file_that_cannot_be_read_has_a_step_that_ends_with_the_forge_up(self):
+        """M159 (G6.26; seen 2026-11-26 in stand-in trials in made homes, Gitea 28.4.0): with the forge's settings file
+        damaged, status said nothing while the forge ran, and after its next start said "the forge does not answer;
+        run setup again", and setup stopped on Gitea's own startup line with "Run setup again": the step looped. Each
+        form, the forge stopped (as after a restart) and still running: status names the file with its step; sync
+        and setup stop and change nothing; the step taken as printed (the file moved out of its folder, then setup)
+        writes a new one, keeps the forge's address, starts the forge with it, and a sync after brings a change.
+        Tried on the pinned Gitea only (28.4.0, 2026-11-26); a forge version that writes SECRET_KEY into that file is not tried."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            ini = p["app_ini"]
+            port = int(mirror.ini_value(ini, "server", "HTTP_PORT"))
+            forms = [f for f in ("cannot be opened", "0 bytes", "cut short", "not text", "a folder")
+                     if f != "cannot be opened" or os.geteuid() != 0]
+            n = 0
+            for road in ("the forge stopped", "the forge running"):
+                for form in forms:
+                    n += 1
+                    with self.subTest(road=road, form=form):
+                        whole = fread_bytes(ini)
+                        if road == "the forge stopped":
+                            for pr in h.procs:
+                                if pr.poll() is None:
+                                    pr.terminate()
+                                    pr.wait(30)
+                        plant_kept(ini, form, whole, None)
+                        mark = kept_mark(ini)
+                        rc, out = run_kept_cmd(w, ["status"])
+                        self.assertEqual(rc, 1, out)
+                        self.assertIn(f"problem: {ini} could not be read: ", out)
+                        self.assertIn("it is the forge's own settings as they were, yours to keep", out)
+                        self.assertIn(f"the forge keeps its address, http://127.0.0.1:{port}/", out)
+                        self.assertIn(mirror.own_command(p, "setup"), out)
+                        for cmd in (["sync"], ["setup"]):
+                            rc, out = run_kept_cmd(w, cmd)
+                            self.assertEqual(rc, 2, (cmd, out))
+                            self.assertIn(f"Stopped: {ini} could not be read: ", out)
+                            self.assertNotIn("Traceback", out)
+                        self.assertEqual(kept_mark(ini), mark)
+                        kept = os.path.join(h.tmp, f"kept-{n}")
+                        os.makedirs(kept)
+                        os.rename(ini, os.path.join(kept, "app.ini"))           # the step, as printed
+                        rc, out = h.setup()
+                        self.assertEqual(rc, 0, out)
+                        self.assertIn(f"keeps its address, http://127.0.0.1:{port}/", out)
+                        self.assertEqual(mirror.forge_ini_read(p), ("read", None))
+                        self.assertEqual(kept_mark(os.path.join(kept, "app.ini")), mark)
+                        w.gh.commit("someone/a", {"f": str(n + 1).encode()})
+                        rc, out = w.sync()
+                        self.assertEqual(rc, 0, out)
+                        self.assertEqual(w.forge_refs("someone--a").get("refs/heads/main"),
+                                         w.gh.git("someone/a", "rev-parse", "main").strip(), out)
+                        self.assertEqual(len(w.forge_get("/user/repos?limit=50")[1]), 1)
+                        self.assertEqual(run_kept_cmd(w, ["status"])[0], 0)
+                        if os.path.isdir(os.path.join(kept, "app.ini")):
+                            shutil.rmtree(kept)
+                        else:
+                            os.chmod(os.path.join(kept, "app.ini"), 0o600)
+
+    def test_G6_26_the_forge_starts_again_only_as_its_own_service_never_under_a_sync_and_every_copy_stays(self):
+        """M159 (G6.26, the owner's four limits on the start again, 11-26). The forge's settings file moved out of
+        its folder by the person (the stop's step), the forge still running from it as it was: (3) while a sync holds
+        its lock, setup stops with the one step (run setup again when the sync has ended), writes no settings file
+        and stops nothing; (2) where systemd shows the forge's service running another copy than this home's, setup
+        stops nothing and says so; (4) after the start again: one sync bringing a change into the forge and restore
+        --check both fine, the forge's key and the person's password both answer, both accounts there, and every
+        copy's refs as before. Tried on the pinned Gitea only (28.4.0): it writes three values of its own into that
+        file at its first start (LFS_JWT_SECRET, INTERNAL_TOKEN, JWT_SECRET); a forge version that writes a fourth
+        value is not tried, and tokens of two kinds the skill does not use stop working."""
+        with World(self) as w:
+            for n in ("a", "b"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            refs = {r["name"]: w.forge_refs(r["name"]) for r in w.forge_get("/user/repos?limit=50")[1]}
+            person = mirror.load_state(p)["person"]
+            kept = os.path.join(h.tmp, "kept-by-the-person")
+            os.makedirs(kept)
+            os.rename(p["app_ini"], os.path.join(kept, "app.ini"))        # the step, as printed
+            stops = lambda n: [c for c in h.calls[n:] if c == ["systemctl", "--user", "stop", mirror.SERVICE]]
+            # (3) a sync holds the lock
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                with open(os.path.join(p["data"], "sync.lock"), "w") as f:
+                    f.write(str(sleeper.pid))
+                n = len(h.calls)
+                rc, out = h.setup()
+                self.assertEqual(rc, 3, out)
+                self.assertIn(f"Not now: a sync is running (process {sleeper.pid})", out)
+                self.assertIn(f"The one next step: run setup again when the sync has ended: "
+                              f"{mirror.own_command(p, 'setup')}", out)
+                self.assertFalse(os.path.exists(p["app_ini"]))
+                self.assertEqual(stops(n), [])
+                self.assertEqual(fread(os.path.join(p["data"], "sync.lock")), str(sleeper.pid))
+            finally:
+                sleeper.kill()
+                sleeper.wait()
+            os.remove(os.path.join(p["data"], "sync.lock"))
+            # (2) systemd shows another copy for the forge's service just before the stop (Linux's road)
+            if mirror.system()[0] != "darwin":
+                real = mirror.service_read
+                mirror.service_read = lambda p_, which, _r=real: ("equal", None, None) if which == "forge" else _r(p_, which)
+                h.bus_starts = [["/usr/bin/python3", ["/usr/bin/python3", "-I", "/srv/another-home/mirror.py",
+                                                      "run-forge"], False, 0, 0, 0, 0, 0, 0, 0]]
+                try:
+                    n = len(h.calls)
+                    rc, out = h.setup()
+                finally:
+                    mirror.service_read, h.bus_starts = real, None
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("is not this home's own copy, so setup stops nothing", out)
+                self.assertEqual(stops(n), [])
+                os.remove(p["app_ini"])                                     # as it was, for the road itself
+            # the road: setup writes the file and starts the forge's own service again
+            n = len(h.calls)
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(os.path.join(p["data"], "sync.lock")))     # setup let its lock go
+            if mirror.system()[0] != "darwin":
+                self.assertEqual(len(stops(n)), 1, out)
+            w.port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+            end = time.time() + 60
+            while time.time() < end and quiet(mirror.main, ["status"])[0] != 0:
+                time.sleep(1)
+            # (4) what a person needs to be true after it
+            self.assertEqual({r["name"]: w.forge_refs(r["name"]) for r in w.forge_get("/user/repos?limit=50")[1]}, refs)
+            code, _, body = http_get(f"http://127.0.0.1:{w.port}/api/v1/user", fread(p["mirror_key"]).strip())
+            self.assertEqual((code, json.loads(body)["login"]), (200, "mirror"))
+            req = urllib.request.Request(f"http://127.0.0.1:{w.port}/api/v1/user", headers={
+                "Authorization": "Basic " + __import__("base64").b64encode(f"{person}:{fread(p['password']).strip()}".encode()).decode()})
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as r:
+                self.assertEqual((r.status, json.loads(r.read())["login"]), (200, person))
+            new = w.gh.commit("someone/a", {"f": b"2"})
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(w.forge_refs("someone--a").get("refs/heads/main"), new)
+            self.assertEqual(w.forge_refs("someone--b"), refs["someone--b"])
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 0, out)
+
+    def test_G6_24_a_state_file_that_cannot_be_read_is_never_set_up_first(self):
+        """M157 (G6.24; seen 2026-11-26 in stand-in trials in made homes): status, sync, restore --check and go said
+        "Run setup first." and key set "Setup comes first", and setup ended 0 and wrote a new state file over one
+        it could not read. Every form, before every command that reads it: never written over, GitHub never asked;
+        the stop names the file, where the read stopped and one step, with what follows said plainly. The step
+        taken as printed (0.1.0's road, row M165 for its rebuild): setup, the go again, a sync: every copy kept, each
+        made again beside its old one, nothing deleted."""
+        with World(self) as w:
+            for n in ("a", "b"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p = w.p
+            kept_file_trial(self, w, p["state"], b'{"repos": ["someone/a"]}\n')
+            before = sorted(r["name"] for r in w.forge_get("/user/repos?limit=50")[1])
+            plant_kept(p["state"], "0 bytes", b"", None)
+            rc, out = run_kept_cmd(w, ["sync"])
+            self.assertEqual(rc, 2, out)
+            step = out.split("The one next step: ", 1)[1]
+            self.assertIn(f"move that file out of {os.path.dirname(p['state'])}", step)
+            self.assertIn(mirror.own_command(p, "setup"), step)
+            for said in ("the go for the first copy is asked again", "beside its old one", "with its kept history",
+                         "doubles", "Nothing is deleted"):
+                self.assertIn(said, step)
+            kept = os.path.join(w.home.tmp, "kept-by-the-person")
+            os.makedirs(kept)
+            os.rename(p["state"], os.path.join(kept, "state.json"))              # the step, as printed
+            rc, out = w.home.setup()
+            self.assertEqual(rc, 0, out)
+            w.port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+            self.assertEqual(w.first_sync()[0], 0)
+            after = sorted(r["name"] for r in w.forge_get("/user/repos?limit=50")[1])
+            self.assertTrue(set(before) <= set(after), (before, after))       # nothing deleted
+            self.assertEqual(len(after), 2 * len(before), after)              # each made again beside its old one
+            self.assertEqual(quiet(mirror.main, ["status"])[0], 0)
+
+    def test_G6_25_a_record_that_cannot_be_read_is_said_as_that_and_the_way_back_goes_on_from_the_folder(self):
+        """M158 (G6.25; seen 2026-11-26 in stand-in trials in made homes): with the skill's record of what it made in
+        a form that could not be read, or not there, setup said the skill's own service files were "not as the skill
+        wrote it", uninstall named the skill's own files as "Not the skill's" and made a new record, and the way back
+        it named ended at a second home. Each form planted in the record, then status, setup, uninstall
+        --delete-copies (typed at a terminal) and uninstall: said as that; nothing in the skill's folders deleted,
+        written or made (the whole made home, paths and bytes, its service files aside); each kept key named; the
+        need-you block printed last. Then the step as printed (setup --use-this-folder): status 0, and one sync
+        moves no copy aside and makes none twice; the keys byte for byte; the set-aside record its own kind."""
+        forms = [f for f in ("cannot be opened", "0 bytes", "not there", "cut short", "not text", "a JSON list")
+                 if f != "cannot be opened" or os.geteuid() != 0]
+        for form in forms:
+            with self.subTest(form=form), World(self) as w:
+                for n in ("a", "b"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"f": b"1"})
+                self.assertEqual(w.key_set()[0], 0)
+                self.assertEqual(w.first_sync()[0], 0)
+                p, h = w.p, w.home
+                made = os.path.join(p["data"], mirror.MADE_RECORD)
+                whole = fread_bytes(made)
+                copies = {r["name"]: w.forge_refs(r["name"]) for r in w.forge_get("/user/repos?limit=50")[1]}
+                keys = {k: fread_bytes(k) for k in (os.path.join(p["keys"], "someone.key"), p["mirror_key"],
+                                                    p["password"], p["settings"])}
+                if form == "not there":
+                    os.remove(made)
+                else:
+                    plant_kept(made, form, whole, None)
+                said = "is not there" if form == "not there" else "could not be read: "
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"problem: {made} {said}", out)
+                self.assertNotIn("not as the skill wrote it", out)
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"Stopped: {made} {said}", out)
+                self.assertNotIn("not as the skill wrote it", out)
+                self.assertNotIn("WSM_HOME", out.replace("WSM_HOME is set", ""))
+                lines = [x for x in out.strip().split("\n") if x.strip()]
+                step = mirror.own_command(p, "setup", "--use-this-folder")
+                self.assertEqual(lines[-2], f"tell the person 1 of 2: {mirror.USE_FOLDER_STEP}{step}")
+                self.assertTrue(lines[-1].startswith("tell the person 2 of 2: "), lines[-1])
+                for pr in h.procs:                        # the forge stopped, so the whole made home holds still
+                    if pr.poll() is None:
+                        pr.terminate()
+                        pr.wait(30)
+                before = made_home_tree(h, p), launchd_log_bytes(p)
+                saved = sys.stdin
+                sys.stdin = AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 1, out)
+                self.assertNotIn("type the number", out)
+                self.assertIn(f"The copies were not deleted: {made} {said}", out)
+                self.assertIn(f"it is yours now", out)
+                self.assertEqual(out.count("--use-this-folder"), 1, out)
+                self.assertEqual([x for x in out.strip().split("\n") if x.strip()][-1], mirror.USE_FOLDER_STEP + step)
+                made_home_held(self, h, p, before)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                made_home_held(self, h, p, before)
+                self.assertIn(f"Not taken: {made} {said}", out)
+                for k in (os.path.join(p["keys"], "someone.key"), p["mirror_key"], p["password"]):
+                    self.assertIn(f"({k})", out.split("kept because that record cannot show them")[1].split("\n")[0])
+                self.assertNotIn("Not the skill's", out)
+                self.assertNotIn("not as the skill wrote it", out)
+                self.assertNotIn("goes on from it", out)
+                self.assertEqual([x for x in out.strip().split("\n") if x.strip()][-1], mirror.USE_FOLDER_STEP + step)
+                self.assertEqual(os.path.lexists(made), form != "not there")     # no new record by uninstall
+                rc, out = run_printed(w, step)                                   # the step, exactly as printed
+                self.assertEqual(rc, 0, out)
+                self.assertIn("Taken on again, on your word (--use-this-folder)", out)
+                w.port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+                end = time.time() + 60                       # the stand-in's service starts the forge on its own
+                rc, out = quiet(mirror.main, ["status"])
+                while rc != 0 and time.time() < end and "the forge does not answer" in out:
+                    time.sleep(1)
+                    rc, out = quiet(mirror.main, ["status"])
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(w.sync()[0], 0)
+                now = {r["name"]: w.forge_refs(r["name"]) for r in w.forge_get("/user/repos?limit=50")[1]}
+                self.assertEqual(now, copies)                 # none moved aside, none made twice, each as it was
+                self.assertEqual({k: fread_bytes(k) for k in keys}, keys)
+                rec = mirror.read_made(p)[0]
+                aside = [k for k, v in rec.items() if v == "set-aside record"]
+                self.assertEqual(len(aside), 0 if form == "not there" else 1, rec)
+                for k in aside:
+                    self.assertTrue(os.path.basename(k).startswith(mirror.MADE_RECORD + ".could-not-be-read-"))
+                    self.assertEqual(kept_mark(k)[2], len(whole) if form in ("cannot be opened",) else kept_mark(k)[2])
+                    os.chmod(k, 0o600)
+
+    def test_G6_25_the_way_back_takes_on_only_a_folder_that_holds_a_mirror(self):
+        """M158 (G6.25), by paths: a folder that holds a mirror (the forge's settings file planted) with no record
+        stops setup with the need-you block; a folder setup never made (a person's own file, no record) is never
+        taken on, with or without the option, and its step stays a folder of its own. With a whole record, or in
+        folders that held nothing, the option changes nothing and says so. The stop and SKILL.md both say the option
+        is the person's own word."""
+        skill = fread(SKILL)
+        self.assertIn("Never type `setup --use-this-folder` unless the person asks for it in their own words", skill)
+        with Home(linger="yes") as h:
+            p = mirror.paths()
+            self.assertTrue(mirror.home_fresh(p))
+            mine = os.path.join(os.environ["WSM_HOME"], "a-letter-of-the-persons.txt")
+            os.makedirs(os.path.dirname(mine), exist_ok=True)
+            with open(mine, "w") as f:
+                f.write("mine\n")
+            self.assertFalse(mirror.home_fresh(p))
+            for args in ((), ("--use-this-folder",)):
+                rc, out = h.setup(*args)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("set WSM_HOME to a folder that does not exist yet", out)
+                self.assertNotIn("Taken on again", out)
+                self.assertNotIn(mirror.USE_FOLDER_STEP, out)
+                self.assertFalse(os.path.lexists(os.path.join(p["data"], mirror.MADE_RECORD)))
+            self.assertEqual(fread(mine), "mine\n")
+            os.makedirs(os.path.dirname(p["app_ini"]))                    # now it holds a mirror, by its paths
+            with open(p["app_ini"], "w") as f:
+                f.write(mirror.app_ini(p, 3000))
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            self.assertIn(f"{os.path.join(p['data'], mirror.MADE_RECORD)} is not there, and {p['data']} holds a mirror",
+                          out)
+            self.assertTrue(out.strip().split("\n")[-2].startswith(f"tell the person 1 of 2: {mirror.USE_FOLDER_STEP}"))
+            self.assertFalse(os.path.lexists(os.path.join(p["data"], mirror.MADE_RECORD)))
+            # uninstall names only what is there (a stock Ubuntu 24.04 guest, 2026-11-26: it named a settings file that was not)
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            line = next(x for x in out.split("\n") if x.startswith("Not taken: "))
+            for f in (p["settings"], p["bin"], p["cache"]):
+                self.assertFalse(os.path.lexists(f))
+                self.assertNotIn(f, line)
+        with World(self) as w:
+            rec = mirror.read_made(w.p)[0]
+            rc, out = w.home.setup("--use-this-folder")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("--use-this-folder changes nothing here: the record of what the skill made", out)
+            self.assertEqual(set(mirror.read_made(w.p)[0]), set(rec))
+
+    def test_G6_25_a_folder_that_holds_no_mirror_names_each_entry_by_its_path(self):
+        """M158 (G6.25; found 2026-11-26 in a reading of the code, a step backward): a data folder that holds one file of
+        the person's own and no record (never set up there, or left so by uninstall --delete-copies) stopped setup
+        with "already holds things the skill did not make: <the record> is not there", a thing that cannot be
+        moved, and the person's file unnamed. Where the folder holds no mirror, setup's stop names each entry by its
+        path, as before the cure, with WSM_HOME set and without it; a record there that could not be read is named
+        with them. Then the step as printed, taken: setup goes on to its end, and the person's file is byte for
+        byte as planted."""
+        def stop_names(out):
+            self.assertIn(" already holds things the skill did not make: ", out)
+            return out.split(" already holds things the skill did not make: ", 1)[1].split(". The skill writes", 1)[0]
+
+        def full_setup(h):
+            # place_gitea stands in for setup's own download of the pinned program; it is a new start of the
+            # skill's, as each command is (main reads the folders again when it starts)
+            mirror._made_start.update(data=None, fresh=None, use=False)
+            h.place_gitea()
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("already holds things the skill did not make", out)
+
+        for wsm in (True, False):
+            with self.subTest(wsm_home=wsm), Home(linger="yes") as h:
+                if not wsm:
+                    os.environ.pop("WSM_HOME")                    # put back by Home on its way out
+                p = mirror.paths()
+                made = os.path.join(p["data"], mirror.MADE_RECORD)
+                mine = os.path.join(p["data"], "my-notes.txt")
+                os.makedirs(p["data"])
+                with open(mine, "w") as f:
+                    f.write("mine\n")
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                self.assertEqual(stop_names(out), mine)
+                self.assertNotIn(f"{made} is not there", out)
+                self.assertNotIn(mirror.USE_FOLDER_STEP, out)
+                self.assertFalse(os.path.lexists(made))
+                with open(made, "wb"):
+                    pass                                          # a record at 0 bytes beside it: named with it
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                self.assertEqual(stop_names(out), f"{made} (could not be read: it is empty (0 bytes)), {mine}")
+                self.assertEqual(fread_bytes(made), b"")
+                os.remove(made)
+                rc, out = h.setup()
+                self.assertEqual(rc, 2, out)
+                if wsm:                                           # the step as printed: a folder of its own
+                    self.assertIn("The one next step: set WSM_HOME to a folder that does not exist yet, or is empty, "
+                                  "and run setup again.", out)
+                    os.environ["WSM_HOME"] = os.path.join(h.tmp, "a-new-folder")
+                else:                                             # the step as printed: moved out, setup again
+                    self.assertIn("The one next step: move those out of it (into a folder of your own, to keep them), "
+                                  "and run setup again.", out)
+                    kept = os.path.join(h.tmp, "kept-by-the-person")
+                    os.makedirs(kept)
+                    os.rename(mine, os.path.join(kept, "my-notes.txt"))
+                    mine = os.path.join(kept, "my-notes.txt")
+                full_setup(h)
+                self.assertEqual(fread(mine), "mine\n")
+        with World(self) as w:                                    # left so by uninstall --delete-copies
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            mine = os.path.join(p["data"], "my-notes.txt")
+            with open(mine, "w") as f:
+                f.write("mine\n")
+            saved = sys.stdin
+            sys.stdin = AtTerminal("0\n")            # its number of copies
+            try:
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.lexists(made))
+            self.assertFalse(mirror.holds_mirror(p))
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            self.assertEqual(stop_names(out), mine)
+            self.assertIn("The one next step: set WSM_HOME to a folder that does not exist yet", out)
+            os.environ["WSM_HOME"] = os.path.join(h.tmp, "a-new-folder")
+            full_setup(h)
+            self.assertEqual(fread(mine), "mine\n")
+        # A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest, log
+        # sha256 85971716290afec1): with no WSM_HOME, a folder the skill did not make in the settings folder (keys,
+        # made by hand) was said to be in the folder of copies, and the step said to move it out of "it". The stop
+        # names the folder that holds the entry; with entries in both, both folders, and each entry by its path.
+        # On a Mac with no WSM_HOME the settings folder lies inside the data folder (the maintainer's ruling,
+        # 2026-11-27; seen on GitHub's macOS 26 runner image): an entry in the settings folder is in both, and both
+        # are named. The paths decide here, never the system's name.
+        with Home(linger="yes") as h:
+            os.environ.pop("WSM_HOME")                            # put back by Home on its way out
+            p = mirror.paths()
+            nested = mirror.inside(os.path.abspath(p["conf"]), os.path.abspath(p["data"]))
+            full_setup(h)
+            theirs = os.path.join(p["conf"], "keys")
+            os.makedirs(theirs, mode=0o700)
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            if nested:
+                self.assertIn(f"Stopped: {p['data']} and {p['conf']} already hold things the skill did not make: "
+                              f"{theirs}. ", out)
+                self.assertIn("The one next step: move those out of the folder each is in (into a folder of your own, "
+                              "to keep them), and run setup again.", out)
+            else:
+                self.assertIn(f"Stopped: {p['conf']} already holds things the skill did not make: {theirs}. ", out)
+                self.assertNotIn(f"Stopped: {p['data']} ", out)
+                self.assertIn("The one next step: move those out of it (into a folder of your own, to keep them), and "
+                              "run setup again.", out)
+            mine = os.path.join(p["data"], "my-notes.txt")
+            with open(mine, "w") as f:
+                f.write("mine\n")
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            self.assertIn(f"Stopped: {p['data']} and {p['conf']} already hold things the skill did not make: ", out)
+            self.assertIn(mine, out)
+            self.assertIn(theirs, out)
+            self.assertIn("The one next step: move those out of the folder each is in (into a folder of your own, to "
+                          "keep them), and run setup again.", out)
+            self.assertEqual(fread(mine), "mine\n")
+            self.assertTrue(os.path.isdir(theirs))
+
+    def test_G6_29_a_folder_of_the_skills_that_cannot_be_entered_is_never_said_as_an_absence(self):
+        """M167 (G6.29; found 2026-11-26 in a reading of the code, then seen at command level in made homes): the
+        readers began with os.path.lexists, which answers False for any error, so with the settings folder at mode
+        000 status and sync said "Run setup first", key set and config include ended in a traceback, and with the data
+        folder at mode 000 config include wrote the settings file, then ended in a traceback. Now "not there" is said
+        only when the system said the name is not there; every other error is "could not be read", with the error's
+        class and the folder that could not be entered. Each folder of the skill's (WSM_HOME's, data, settings, keys)
+        at mode 000: every command stops first, exit 2, naming the folder, and nothing in the made home changes; the
+        step as printed (a chmod line) is run in a shell, and the command then goes on. The readers' own answers, by
+        name. A folder another account owns gives a chown line (only for a folder of the skill's own), the account's number stood
+        in for here (NOT SEEN BY US here; seen on a stock Ubuntu 24.04 guest, 2026-11-26)."""
+        if os.geteuid() == 0:
+            self.skipTest("root enters every folder whatever its mode")
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            for pr in h.procs:                        # the forge stopped, so the whole made home holds still
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            h.forge_follows = False
+            commands = (["status"], ["sync"], ["key", "set", "someone"], ["config", "include", "someone/a"],
+                        ["setup", "--dry-run"], ["left-out"], ["go"], ["restore", "--check"], ["uninstall"])
+            for folder in (os.environ["WSM_HOME"], p["data"], p["conf"], p["keys"]):
+                before = made_home_tree(h, p)
+                mode = os.stat(folder).st_mode & 0o7777
+                os.chmod(folder, 0)
+                try:
+                    for cmd in commands:
+                        with self.subTest(folder=folder, cmd=cmd):
+                            saved = sys.stdin
+                            sys.stdin = io.StringIO(w.gh.key + "\n")
+                            kept_env = {k: os.environ[k] for k in mirror.TEST_SETTINGS if k in os.environ}
+                            try:
+                                rc, out = quiet(mirror.main, cmd)
+                            finally:
+                                sys.stdin = saved
+                                # with WSM_HOME's folder shut the suite's marker cannot be read, so the tool drops
+                                # its test-only settings, as it must; they are given back for the next command
+                                os.environ.update(kept_env)
+                            self.assertEqual(rc, 2, out)
+                            last = out.strip().split("\n")[-1]
+                            name = cmd[0] + (" set" if cmd[0] == "key" else "")
+                            self.assertEqual(last, f"Stopped: {folder} is a folder of the skill's that this account "
+                                             "cannot read, write and enter (it is yours, and its mode does not let "
+                                             f"you), so {name} cannot read what is kept there, and changes nothing: "
+                                             "nothing was copied, written or taken away. The one next step: give it "
+                                             f"back its mode: chmod u+rwx {shlex.quote(folder)}; then run the same "
+                                             "command again." + (" " + mirror.still_running(p) if name == "uninstall"
+                                                                 else ""))
+                            for never in ("Run setup first", "Traceback", "not there", "has not run"):
+                                self.assertNotIn(never, out)
+                finally:
+                    step = last.split("give it back its mode: ", 1)[1].split("; then run", 1)[0]   # as printed
+                    ran = subprocess.run(step, shell=True, capture_output=True, text=True)   # the step, as printed
+                    if ran.returncode:
+                        os.chmod(folder, mode)
+                self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+                os.chmod(folder, mode)        # chmod u+rwx gives the person's bits back; the skill made it 0700
+                self.assertEqual(made_home_tree(h, p), before)
+                rc, out = quiet(mirror.main, ["left-out"])
+                self.assertEqual(rc, 0, out)
+            # the readers' own answers, by name
+            keyf = mirror.key_path(p, "someone")
+            for f, read in ((p["settings"], mirror.kept_read), (p["state"], mirror.kept_read),
+                            (keyf, mirror.key_file_read), (p["mirror_key"], mirror.key_file_read),
+                            (p["app_ini"], lambda _f: mirror.forge_ini_read(p))):
+                d = os.path.dirname(f)
+                mode = os.stat(d).st_mode & 0o7777
+                os.chmod(d, 0)
+                try:
+                    self.assertEqual(read(f), ("could not be read", "it could not be opened (PermissionError): the "
+                                                                     f"folder {d} could not be entered"))
+                finally:
+                    os.chmod(d, mode)
+            gone = os.path.join(p["conf"], "not-a-file.json")
+            self.assertEqual(mirror.kept_read(gone), ("not there", None))
+            os.symlink(os.path.join(h.tmp, "nowhere"), gone)
+            self.assertEqual(mirror.kept_read(gone), ("could not be read", "it is a link to a file that is not there"))
+            os.remove(gone)
+            os.makedirs(gone)
+            self.assertEqual(mirror.kept_read(gone), ("could not be read", "it could not be opened (IsADirectoryError)"))
+            os.rmdir(gone)
+            os.remove(p["mirror_key"])                 # an absent key file is said as absent, never as a failed read
+            with self.assertRaises(mirror.KeptUnread) as e:
+                mirror.Forge(p, mirror.load_state(p))
+            self.assertEqual(str(e.exception), f"{p['mirror_key']} is not there")
+            rc, out = quiet(mirror.main, ["status"])           # (status says it as setup not finished: its step)
+            self.assertEqual(out.strip().split("\n")[-1], "Run setup first.")
+
+    def test_G6_29_only_the_skills_own_folders_get_a_line_and_the_cause_is_read_not_assumed(self):
+        """M167 (G6.29), found 2026-11-26 in a read of the cure (trials of its functions in made homes):
+        (1) with a folder ABOVE the skill's own shut, the floor called it "a folder of the skill's" and printed chmod
+        on it, or, owned by another account, "sudo chown -R" over a folder that is not the skill's. Now such a folder
+        is named as what it is, with whose it is by number, and no line. (2) The mode is named as the cause only where
+        its own bits lack what is asked: a folder of mode 0700 that the system still refuses (as a disk mounted
+        read-only refuses writing; stood in here) gets no chmod line, which would change nothing. (3) The name in the
+        chown line comes from the account's number, never USER or LOGNAME; a number with no name gives the number.
+        (4) Uninstall's stop says what of the skill's still runs, or that it could not be read. (5) A record that is
+        a link to a file that is not there is "could not be read", handed on as a value: setup's stop in a folder
+        with no mirror names it so, never as an absence."""
+        if os.geteuid() == 0:
+            self.skipTest("root enters every folder whatever its mode")
+        saved_sys, saved_env = mirror.system, dict(os.environ)
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            with Home() as h:
+                # (1) a folder above the skill's own
+                outer = os.path.join(h.tmp, "outer")
+                wsm = os.path.join(outer, "wsm")
+                os.makedirs(wsm)
+                os.environ["WSM_HOME"] = wsm
+                p = mirror.paths()
+                os.makedirs(p["data"])
+                os.chmod(outer, 0)
+                try:
+                    stop = mirror.folders_floor(p, "status")
+                    unread = mirror.KeptUnread(p["state"], "it could not be opened (PermissionError)")
+                    kept = mirror.kept_step(p, unread)
+                    real = os.getuid
+                    mirror.os.getuid = lambda: real() + 1
+                    try:
+                        theirs = mirror.folder_words(p, outer)
+                    finally:
+                        mirror.os.getuid = real
+                finally:
+                    os.chmod(outer, 0o700)
+                self.assertEqual(stop, f"Stopped: {outer} is a folder above the skill's folder {wsm}, and this account "
+                                 "cannot enter it (it is yours, and not the skill's), so status cannot read what is "
+                                 "kept there, and changes nothing: nothing was copied, written or taken away. The one "
+                                 "next step: it is not the skill's, so the tool gives no line that changes it: let "
+                                 "this account into it again, as you choose; then run the same command again.")
+                self.assertIn(f"{outer}, a folder above the skill's own, cannot be entered", kept)
+                self.assertEqual(theirs[:2], (False, f"it belongs to {mirror.owner_words(real())}, and not to the "
+                                              "skill"))
+                for words in (stop, kept, theirs[2]):
+                    for never in ("chmod", "chown", "sudo"):
+                        self.assertNotIn(never, words)
+                # (2) the mode is read, not assumed: 0700 and still refused, then 0500
+                os.environ["WSM_HOME"] = wsm
+                p = mirror.paths()
+                data = os.path.abspath(p["data"])
+                real_access = os.access
+                mirror.os.access = lambda path, mode, *a, **k: (
+                    False if os.path.abspath(path) == data and mode & os.W_OK else real_access(path, mode, *a, **k))
+                try:
+                    os.chmod(data, 0o700)
+                    refused = mirror.folders_floor(p, "status")
+                finally:
+                    mirror.os.access = real_access
+                self.assertIn(f"Stopped: {data} is a folder of the skill's that this account cannot read, write and "
+                              "enter (it is yours, and its mode lets you, and this computer still refuses it, as a disk mounted "
+                              "read-only refuses writing), so status", refused)
+                self.assertNotIn("chmod", refused)
+                os.chmod(data, 0o500)
+                try:
+                    lacking = mirror.folders_floor(p, "status")
+                finally:
+                    os.chmod(data, 0o700)
+                self.assertIn(f"(it is yours, and its mode does not let you), so status cannot read", lacking)
+                self.assertIn(f"chmod u+rwx {shlex.quote(data)}; then run the same command again.", lacking)
+                # (3) the chown line's name, from the number
+                import pwd
+                os.environ["USER"] = os.environ["LOGNAME"] = "someone-else"
+                self.assertEqual(mirror.chown_name(), pwd.getpwuid(os.getuid()).pw_name)
+                nobody = next(n for n in range(2 ** 31 - 9, 2 ** 31 - 99, -1) if not
+                              any(e.pw_uid == n for e in pwd.getpwall()))
+                real = os.getuid
+                mirror.os.getuid = lambda: nobody
+                try:
+                    self.assertEqual(mirror.chown_name(), str(nobody))
+                    ours, why, step = mirror.folder_words(p, data)
+                finally:
+                    mirror.os.getuid = real
+                self.assertEqual((ours, why), (True, f"another account owns it, {mirror.owner_words(real())}"))
+                self.assertIn(f"sudo chown -R {nobody} {shlex.quote(data)}", step)
+                self.assertNotIn("someone-else", step)
+                os.environ["USER"], os.environ["LOGNAME"] = saved_env.get("USER", ""), saved_env.get("LOGNAME", "")
+                # (4) uninstall's stop says what still runs
+                h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                os.chmod(data, 0)
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    h.user_bus = False
+                    rc2, out2 = quiet(mirror.main, ["uninstall"])
+                    h.user_bus = True
+                finally:
+                    os.chmod(data, 0o700)
+                self.assertEqual(rc, 2, out)
+                self.assertTrue(out.strip().endswith(
+                    "then run the same command again. systemd still shows the forge's service (active) and the sync's "
+                    "timer (active) of the skill's, and they go on running until uninstall can go on."), out)
+                self.assertEqual(rc2, 2, out2)
+                self.assertTrue(out2.strip().endswith("What systemd runs of the skill's could not be read, so it may "
+                                                      "still run."), out2)
+                # (5) a record that is a link to a file that is not there, in a folder with no mirror
+                record = os.path.join(p["data"], mirror.MADE_RECORD)
+                os.symlink(os.path.join(h.tmp, "nowhere"), record)
+                mirror.write_file(os.path.join(p["data"], "my-notes.txt"), "mine\n")
+                rec, why = mirror.read_made(p)
+                self.assertEqual((rec, why.answer), (None, "could not be read"))
+                stop = mirror.home_is_not_ours(p)
+                self.assertIn(f"{record} (could not be read: it is a link to a file that is not there)", stop)
+                self.assertIn(os.path.join(p["data"], "my-notes.txt"), stop)
+        finally:
+            mirror.system = saved_sys
+            mirror.os.access = os.access
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    def test_G6_34_a_password_the_person_set_is_theirs_and_a_new_one_comes_only_on_their_word(self):
+        """M175 (G6.34), seen 2026-11-26 in a made home: plain uninstall takes the kept password of the person's Gitea
+        account while the account stays, and setup after it said "setup did not change it or its password" with no
+        word that the skill holds none. Without --new-password, setup changes nothing of the account and says the
+        skill holds no password for it, with the one step. With it (the person's own word), the account gets a new
+        password by the forge's own token on standard output and the password in a request's body on 127.0.0.1, the
+        token taken away before setup ends, kept in the file, readable by the person only, never a byte said; no
+        process's command line or environment ever holds it. A password file that could not be read is a stop that
+        names it and one step, with or without the option, and is never written over."""
+        def api(port, method, path, body=None, basic=None, token=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1{path}", method=method,
+                                         data=json.dumps(body).encode() if body is not None else None)
+            req.add_header("Content-Type", "application/json")
+            if token:
+                req.add_header("Authorization", "token " + token)
+            if basic:
+                req.add_header("Authorization", "Basic " + __import__("base64").b64encode(basic.encode()).decode())
+            try:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=20) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+
+        with World(self) as w:
+            G7.world_with_copies(self, w)
+            p = w.p
+            person = mirror.load_state(p)["person"]
+            port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+            first = fread(p["password"]).strip()
+            own = "the-persons-own-" + os.urandom(6).hex()          # the person sets a password of their own
+            self.assertEqual(api(port, "PATCH", f"/admin/users/{person}", {"login_name": person, "source_id": 0,
+                                 "password": own, "must_change_password": False}, basic=f"{person}:{first}")[0], 200)
+            rc, out = quiet(mirror.main, ["uninstall"])
+            self.assertEqual(rc, 0, out)
+            self.assertFalse(os.path.exists(p["password"]), "as seen: plain uninstall takes the kept password")
+            step = mirror.own_command(p, "setup", "--new-password")
+            # (1) without the option: nothing of the account changes, and the dry run's block and setup say so
+            rc, out = w.home.setup("--dry-run")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Setup would leave your Gitea account '{person}' as it is, from before: setup does not "
+                          "change it or its password, and the skill holds no password for it; if you do not know its "
+                          f"password, the one step: {step}.", out)
+            self.assertRegex(out, r"tell the person \d+ of \d+: Setup would leave your Gitea account")
+            w.home.place_gitea()
+            rc, out = w.home.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Your Gitea account '{person}' is there from before: setup did not change it or its "
+                          "password, and the skill holds no password for it. If you do not know its password, the "
+                          f"one step: {step} (a password you set for it yourself then stops working).", out)
+            lines = out.splitlines()
+            said = next(i for i, x in enumerate(lines) if x.startswith(f"Your Gitea account '{person}' is there"))
+            forge = next(i for i, x in enumerate(lines) if x.startswith("The forge's service is started")
+                         or x.startswith("The forge runs as your own service"))
+            self.assertGreater(said, forge, "the line stands among setup's last lines")
+            self.assertFalse(os.path.exists(p["password"]), out)
+            port = int(mirror.ini_value(p["app_ini"], "server", "HTTP_PORT"))
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 200, "the person's own password")
+            # (2) the dry run with the option names it, and changes nothing
+            rc, out = w.home.setup("--dry-run", "--new-password")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Setup would give your Gitea account '{person}' a new password, kept in {p['password']}, "
+                          "readable by you only; a password you set for it yourself stops working.", out)
+            self.assertFalse(os.path.exists(p["password"]), out)
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 200)
+            # (3) with the option: every process's command line and environment is read as it starts
+            started, real_init = [], subprocess.Popen.__init__
+
+            def seen(self_, args, *a, **k):
+                started.append((args if isinstance(args, str) else " ".join(map(str, args)),
+                                " ".join(f"{x}={y}" for x, y in (k.get("env") or {}).items())))
+                real_init(self_, args, *a, **k)
+            subprocess.Popen.__init__ = seen
+            wait, mirror.SETUP_WAIT = mirror.SETUP_WAIT, 60          # the World's forge follows its service: wait for it
+            try:
+                rc, out = w.home.setup("--new-password")
+            finally:
+                subprocess.Popen.__init__ = real_init
+                mirror.SETUP_WAIT = wait
+            self.assertEqual(rc, 0, out)
+            self.assertIn(f"Your Gitea account '{person}' has a new password, in {p['password']} (readable by you "
+                          "only). A password you set for it yourself no longer works.", out)
+            self.assertEqual(os.stat(p["password"]).st_mode & 0o777, 0o600)
+            kept = fread(p["password"]).strip()
+            self.assertTrue(kept and kept not in out and own not in out, "never a byte said")
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200, "the kept password signs in")
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{own}")[0], 401, "the person's own stops")
+            self.assertTrue(started, "setup started processes")
+            for argv, env in started:
+                self.assertNotIn(kept, argv)
+                self.assertNotIn(kept, env)
+            code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{kept}")
+            self.assertEqual((code, json.loads(body)), (200, []), "the token is taken away before setup ends")
+            # (4) a password file that could not be read: a stop, the file named, one step; never written over
+            os.chmod(p["password"], 0)
+            try:
+                for opt in ((), ("--new-password",)):
+                    with self.subTest(option=opt):
+                        rc, out = w.home.setup(*opt)
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: the password file of your Gitea account, {p['password']}, could not be "
+                                      "read: it could not be opened (PermissionError). Setup changed nothing, and never "
+                                      f"writes over that file. The one next step: move that file out of "
+                                      f"{os.path.dirname(p['password'])} (into a folder of your own, to keep it), then "
+                                      "run the same command again", out)
+                        self.assertEqual(os.stat(p["password"]).st_mode & 0o777, 0)
+            finally:
+                os.chmod(p["password"], 0o600)
+            self.assertEqual(fread(p["password"]).strip(), kept)
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
+            # (5) the forge refuses the change: said, the kept password as it was, nothing left under another name,
+            # and the token the change could not take away is named (as read: it still answers)
+            real_call = mirror.Forge.call
+
+            def refused(self_, method, path, *a, **k):
+                return ((500, None) if method == "PATCH" and path.startswith("/admin/users/") else
+                        real_call(self_, method, path, *a, **k))
+            mirror.Forge.call, wait, mirror.SETUP_WAIT = refused, mirror.SETUP_WAIT, 60
+            try:
+                rc, out = w.home.setup("--new-password")
+            finally:
+                mirror.Forge.call, mirror.SETUP_WAIT = real_call, wait
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"Your Gitea account '{person}' was not given a new password: the forge answered 500, and "
+                          "its password is as it was. A key named windstorm-mirror-password-", out)
+            self.assertIn(f"Run the same command again: {mirror.own_command(p, 'setup', '--new-password')}", out)
+            self.assertEqual(fread(p["password"]).strip(), kept)
+            self.assertEqual(sorted(os.listdir(os.path.dirname(p["password"]))),
+                             sorted(x for x in os.listdir(os.path.dirname(p["password"])) if not x.endswith(".new")))
+            self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
+            code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{kept}")
+            self.assertEqual([t["name"][:len("windstorm-mirror-password-")] for t in json.loads(body)],
+                             ["windstorm-mirror-password-"], "the token named is the one left")
+            left5 = json.loads(body)
+            step = mirror.own_command(p, "setup", "--new-password")
+
+            def tokens(password):
+                code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{password}")
+                self.assertEqual(code, 200, body)
+                return sorted((t["id"], t["name"]) for t in json.loads(body))
+            def no_key_part(out, password):
+                """A line that names a key gives its name only: no line carries the last eight characters of any
+                key on the account (the ones the forge lists), nor the mirror account's key."""
+                code, body = api(port, "GET", f"/users/{person}/tokens", basic=f"{person}:{password}")
+                self.assertEqual(code, 200, body)
+                eights = [t["token_last_eight"] for t in json.loads(body)]
+                self.assertTrue(eights and all(len(x) == 8 for x in eights), body)
+                for x in eights + [fread(p["mirror_key"]).strip()]:
+                    self.assertNotIn(x, out)
+            # (6) a key of the name this run would make already stands: one an earlier run left when it broke off
+            # (the one (5) left), or one made by hand. Not made by this run: left as it is, named, nothing changed
+            hand = "made-by-hand-" + os.urandom(3).hex()
+            made = mirror.gitea(p, "admin", "user", "generate-access-token", "--username", person, "--token-name",
+                                hand, "--scopes", "read:user", "--raw")
+            self.assertEqual(made.returncode, 0, made.stderr)
+            before = tokens(kept)
+            real_tag = mirror.password_token_tag
+            for name in (left5[0]["name"], hand):
+                with self.subTest(standing=name):
+                    mirror.password_token_tag, wait, mirror.SETUP_WAIT = (lambda: name), mirror.SETUP_WAIT, 60
+                    try:
+                        rc, out = w.home.setup("--new-password")
+                    finally:
+                        mirror.password_token_tag, mirror.SETUP_WAIT = real_tag, wait
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(f"Your Gitea account '{person}' was not given a new password: a key named {name} "
+                                  "already stands on that account, one this run of setup did not make, so setup left "
+                                  "it as it is and changed nothing of the account. Run the same command again (it "
+                                  f"makes a key of another name): {step}", out)
+                    self.assertEqual(fread(p["password"]).strip(), kept)
+                    self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{kept}")[0], 200)
+                    self.assertEqual(tokens(kept), before, "the key that stood is still there, by its number")
+                    no_key_part(out, kept)
+                    self.assertFalse(any(x.endswith(".new") for x in os.listdir(os.path.dirname(p["password"]))))
+            # (7) the account's list of keys could not be read after the change, and (8) it was read and names no
+            # key with this run's name and the last eight characters of this run's key: nothing taken away, named
+            for world in ("unread", "not this run's"):
+                with self.subTest(world=world):
+                    def listed(self_, method, path, *a, **k):
+                        code, body = real_call(self_, method, path, *a, **k)
+                        if method == "GET" and path == f"/users/{person}/tokens":
+                            if world == "unread":
+                                return 500, None
+                            body = [dict(t, token_last_eight="00000000") for t in body]
+                        return code, body
+                    mirror.Forge.call, wait, mirror.SETUP_WAIT = listed, mirror.SETUP_WAIT, 60
+                    try:
+                        rc, out = w.home.setup("--new-password")
+                    finally:
+                        mirror.Forge.call, mirror.SETUP_WAIT = real_call, wait
+                    self.assertEqual(rc, 1, out)
+                    now = fread(p["password"]).strip()
+                    self.assertNotEqual(now, kept)
+                    self.assertEqual(api(port, "GET", "/user", basic=f"{person}:{now}")[0], 200)
+                    self.assertIn(f"Your Gitea account '{person}' has a new password, in {p['password']} (readable "
+                                  "by you only). A password you set for it yourself no longer works.", out)
+                    self.assertIn(("Whether the key named windstorm-mirror-password-" if world == "unread" else
+                                   "The key named windstorm-mirror-password-"), out)
+                    self.assertIn(("that setup made for the change still stands could not be read (the forge "
+                                   "answered 500), so nothing was taken away: " if world == "unread" else
+                                   "that setup made for the change was not found as this run's own on that "
+                                   "account's list, so nothing was taken away: ")
+                                  + "take it away in Gitea's settings of that account (Applications), signing in "
+                                  "with the new password.", out)
+                    no_key_part(out, now)
+                    after = tokens(now)
+                    self.assertEqual(len(after), len(before) + 1, "nothing was taken away; this run's key stands")
+                    self.assertTrue(set(before) < set(after))
+                    before, kept = after, now
+
+    def test_G6_35_a_command_started_as_root_in_another_accounts_mirror_stops_at_the_door(self):
+        """M177 (G6.35), seen on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): with sudo -E, which keeps the
+        person's home, status wrote the state file and sync the record of what the skill made as root's, at mode
+        600; the person's own status, sync and setup then stopped on a file they could not read, with a step that
+        doubles the disk the copies take. Now every command started as root whose folders are another account's, or
+        started by sudo where root has no mirror of its own, stops before it reads or writes anything, names whose
+        mirror it is by number, and gives the command as typed, every option kept, to run as that account. Root's
+        own mirror runs as before. The
+        administrator's number is moved here to stand for root: the suite does not run as root."""
+        me = os.getuid()
+        saved_root, saved_euid, saved_env = mirror.ROOT_UID, os.geteuid, dict(os.environ)
+
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = mirror.main(list(argv))
+            return rc, said(out.getvalue())
+
+        def tree(top):
+            return sorted((os.path.relpath(os.path.join(r, n), top), os.lstat(os.path.join(r, n)).st_mtime_ns)
+                          for r, ds, fs in os.walk(top) for n in ds + fs)
+        try:
+            with Home() as h:
+                self.assertEqual(h.setup("--no-linger")[0], 0)
+                p = mirror.paths()
+                before = tree(h.tmp)
+                # the person's folders, and this command as root (account number 0 moved away from the suite's own)
+                mirror.ROOT_UID = me + 1
+                mirror.os.geteuid = lambda: me + 1
+                os.environ.pop("SUDO_UID", None)
+                who = mirror.owner_words(me)
+                for argv in (["status"], ["sync"], ["setup", "--dry-run"], ["setup"], ["uninstall"], ["go"],
+                             ["config", "include", "someone/a"], ["left-out"], ["restore", "--check"],
+                             ["key", "set", "someone"], ["run-forge"]):
+                    rc, out = run(*argv)
+                    cmd = " ".join(argv[:2]) if argv[0] == "key" else argv[0]
+                    self.assertEqual(rc, 2, (argv, out))
+                    self.assertEqual(out, (
+                        f"Stopped: {cmd} runs here as root (account 0), and the skill runs as the account whose "
+                        f"mirror it is, {who}: a run as root would leave files in that account's folders that it "
+                        f"cannot read. So {cmd} reads nothing and changes nothing: nothing was copied, written or "
+                        f"taken away. The one next step: run the same command again as {who}, without sudo: "
+                        f"{mirror.own_command(p, *map(shlex.quote, argv))}"), argv)
+                    self.assertNotIn("Traceback", out)
+                # every option kept (setup --dry-run pasted is never a setup); a name the tool does not print as
+                # it is gets no line
+                rc, out = run("config", "include", "someone/a`b`")
+                self.assertEqual(rc, 2)
+                self.assertTrue(out.endswith(f"without sudo, with the options you gave it ({mirror.SHOWN_CHANGED} in "
+                                             "them, so no line is given)"), out)
+                self.assertEqual(tree(h.tmp), before, "a command started as root changed a file")
+                # started by sudo: the account it came from is named, by number
+                os.environ["SUDO_UID"] = str(me)
+                rc, out = run("status")
+                self.assertEqual(rc, 2)
+                self.assertIn(f"Stopped: status runs here as root (account 0), started by sudo from {who}, and", out)
+                # root's own mirror, in root's own home: runs as before (here: the suite's own number stands for root)
+                mirror.ROOT_UID = me
+                mirror.os.geteuid = lambda: me
+                self.assertIsNone(mirror.root_door(p, "status"))
+            with Home() as h:
+                # sudo with no mirror of root's own: the mirror it means is the account's it came from
+                os.environ["WSM_HOME"] = os.path.join(h.tmp, "roots-home-has-none")
+                mirror.ROOT_UID = me + 1
+                mirror.os.geteuid = lambda: me + 1
+                os.environ["SUDO_UID"] = str(me)
+                rc, out = run("status")
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"started by sudo from {mirror.owner_words(me)}, and the skill runs as the account "
+                              f"whose mirror it is, {mirror.owner_words(me)}: a run as root looks for a mirror in "
+                              "the home this run was given, where there is none, and would make one there as "
+                              "root's. So status reads nothing", out)
+                self.assertFalse(os.path.exists(mirror.paths()["data"]))
+                # the person's home kept (sudo -E), no folder of the skill's in it yet: a first-ever setup typed
+                # with sudo. The same words, which never say whose home it is, and nothing is made in it
+                kept_home = os.path.join(h.tmp, "the-persons-home")
+                os.makedirs(kept_home, mode=0o700)
+                os.environ.pop("WSM_HOME", None)
+                os.environ["HOME"] = kept_home
+                before = tree(kept_home)
+                rc, out = run("setup")
+                self.assertEqual(rc, 2, out)
+                self.assertIn("a run as root looks for a mirror in the home this run was given, where there is none, "
+                              "and would make one there as root's. So setup reads nothing and changes nothing", out)
+                self.assertNotIn("root's own home", out)
+                self.assertEqual(tree(kept_home), before, "a first setup started with sudo made something")
+                # root with no sudo and no mirror: as before ("Run setup first.")
+                os.environ.pop("SUDO_UID", None)
+                self.assertIsNone(mirror.root_door(mirror.paths(), "status"))
+        finally:
+            mirror.ROOT_UID, mirror.os.geteuid = saved_root, saved_euid
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    def test_G6_25_the_way_back_is_taken_only_once_no_stop_of_setups_is_left(self):
+        """M158 (G6.25; seen 2026-11-26 on a stock Ubuntu 24.04 guest, real systemd 255): setup
+        --use-this-folder set the record aside and wrote a new one, then stopped on lingering not yet chosen with
+        "Nothing was changed". The take-on is made only once no stop of setup's is left before its first write: with
+        lingering not chosen, and with a sync holding the lock while the forge's settings file is to be written new,
+        setup stops and the record is as it was, none set aside; with both cleared, the way back goes on, one record
+        set aside. Lingering is asked on Linux only. On a Mac with nobody logged in at the screen, the folder is taken
+        on and setup then stops on the screen session (1), the take-on said once and one record set aside; with a
+        session there, plain setup goes on (0) and takes nothing on twice."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            aside = lambda: sorted(x for x in os.listdir(p["data"]) if x.startswith(mirror.MADE_RECORD + "."))
+            with open(made, "wb"):
+                pass                                                    # 0 bytes
+            if mirror.system()[0] != "darwin":          # lingering is systemd's question; a Mac never asks it
+                saved = mirror.linger_state
+                mirror.linger_state = lambda: "no"
+                try:
+                    rc, out = h.setup("--use-this-folder", choose=False)   # the line exactly as printed, to its
+                finally:                                                    # next stop (lingering not yet chosen)
+                    mirror.linger_state = saved
+                self.assertEqual(rc, 2, out)
+                self.assertIn(mirror.LINGER_CHOICE, out)
+                self.assertNotIn("Taken on again", out)
+                self.assertEqual(fread_bytes(made), b"")
+                self.assertEqual(aside(), [])
+            kept = os.path.join(h.tmp, "kept-by-the-person")
+            os.makedirs(kept)
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            os.rename(p["app_ini"], os.path.join(kept, "app.ini"))
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                with open(os.path.join(p["data"], "sync.lock"), "w") as f:
+                    f.write(str(sleeper.pid))
+                rc, out = h.setup("--use-this-folder")
+                self.assertEqual(rc, 3, out)
+                self.assertIn(f"Not now: a sync is running (process {sleeper.pid})", out)
+                self.assertIn("Nothing was changed.", out)
+                self.assertNotIn("Taken on again", out)
+                self.assertEqual(fread_bytes(made), b"")
+                self.assertEqual(aside(), [])
+            finally:
+                sleeper.kill()
+                sleeper.wait()
+            os.remove(os.path.join(p["data"], "sync.lock"))
+            rc, out = h.setup("--use-this-folder")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(out.count("Taken on again, on your word (--use-this-folder)"), 1, out)
+            self.assertEqual(len(aside()), 1)
+            self.assertEqual(fread_bytes(os.path.join(p["data"], aside()[0])), b"")
+            self.assertIsNotNone(mirror.read_made(p)[0])
+        if mirror.system()[0] != "darwin":
+            return
+        # The Mac's own stop, after the take-on (the owner's ruling 11-26: kept for 0.1.0, its words true as printed):
+        # with nobody logged in at the screen, the folder is taken on and setup then stops on the screen session; once
+        # a session is there, plain setup goes on and takes nothing on twice.
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            aside = lambda: sorted(x for x in os.listdir(p["data"]) if x.startswith(mirror.MADE_RECORD + "."))
+            with open(made, "wb"):
+                pass                                                    # 0 bytes
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            h.mac_session = False
+            rc, out = h.setup("--use-this-folder")
+            self.assertEqual(rc, 1, out)
+            self.assertEqual(out.count("Taken on again, on your word (--use-this-folder)"), 1, out)
+            self.assertIn(f"The forge's service did not start: {mirror.MAC_NO_SESSION}", out)
+            self.assertNotIn("Nothing was changed", out)
+            self.assertEqual(len(aside()), 1)
+            self.assertEqual(fread_bytes(os.path.join(p["data"], aside()[0])), b"")
+            self.assertIsNotNone(mirror.read_made(p)[0])
+            h.mac_session = True
+            rc, out = h.setup()
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("Taken on again", out)
+            self.assertEqual(len(aside()), 1)
+
+    def test_G6_25_the_way_back_takes_only_the_skills_own_names_and_forms(self):
+        """M158 (G6.25, the owner's ruling 11-26: never by a name alone): with the record not there, setup
+        --use-this-folder takes on the forge's program only under the pinned name and with the pin's SHA-256, and a
+        key file only under a name the skill gives, mode 0600, one line; it names each file it took and each it did
+        not, with the two counts, never a byte of a key. A file of the person's own (a .key under a name the skill
+        does not give, a file named like the forge's program with other bytes) stays through the way back and
+        through uninstall --delete-copies, named both times. A file at the place the forge's program goes, with
+        other bytes, stops setup before any write."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "a")
+            w.gh.commit("someone/a", {"f": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            p, h = w.p, w.home
+            made = os.path.join(p["data"], mirror.MADE_RECORD)
+            os.remove(made)
+            held = os.path.join(h.tmp, "the-pinned-program")
+            os.rename(p["bin"], held)                               # (the forge runs it: moved, never written)
+            with open(p["bin"], "wb") as f:                        # the program's own place, other bytes
+                f.write(b"not the pinned program\n")
+            rc, out = h.setup("--use-this-folder")
+            self.assertEqual(rc, 2, out)
+            self.assertIn(p["bin"], out.split("already holds things the skill did not make: ", 1)[1])
+            self.assertFalse(os.path.lexists(made))
+            self.assertEqual(fread_bytes(p["bin"]), b"not the pinned program\n")
+            os.replace(held, p["bin"])
+            mine = {os.path.join(p["keys"], "a-note.key"): b"the person's own\n",
+                    os.path.join(os.path.dirname(p["bin"]), "gitea-28.3.0"): b"the person's own program\n",
+                    os.path.join(p["data"], "notes.txt"): b"the person's own\n"}
+            for x, data in mine.items():
+                with open(x, "wb") as f:
+                    f.write(data)
+                os.chmod(x, 0o600)
+            rc, out = h.setup("--use-this-folder")
+            self.assertEqual(rc, 0, out)
+            took = out.split("Taken on as the skill's (", 1)[1].split("Not taken (", 1)
+            n_took, took_lines = int(took[0].split(")", 1)[0]), [x.strip() for x in took[0].split("\n")[1:] if x.strip()]
+            n_left = int(took[1].split(")", 1)[0])
+            left_lines = [x.strip() for x in took[1].split("\n")[1:] if x.startswith("  ")]
+            self.assertEqual(len(took_lines), n_took)
+            self.assertEqual(sorted(left_lines), sorted(mine))
+            self.assertEqual(n_left, len(mine))
+            for x in (p["bin"], key_path := mirror.key_path(p, "someone"), p["mirror_key"], p["password"]):
+                self.assertIn(x, took_lines)
+            for x in mine:
+                self.assertNotIn(x, took_lines)
+            for k in (key_path, p["mirror_key"], p["password"]):
+                self.assertNotIn(fread(k).strip(), out)
+            for pr in h.procs:
+                if pr.poll() is None:
+                    pr.terminate()
+                    pr.wait(30)
+            saved = sys.stdin
+            sys.stdin = AtTerminal("1\n")
+            try:
+                rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+            self.assertEqual(rc, 0, out)
+            kept = out.split("Not the skill's, so left where they are", 1)[1]
+            for x, data in mine.items():
+                self.assertEqual(fread_bytes(x), data)
+                self.assertIn(f"  {x}\n", kept)
+            self.assertFalse(os.path.lexists(p["bin"]))
+            self.assertFalse(os.path.lexists(key_path))
+            left = {q for q in made_home_tree(h, p) if not os.path.isdir(q)}
+            self.assertEqual(left - set(mine), {os.path.join(os.environ["WSM_HOME"], mirror.SUITE_MARKER)}
+                             | ({made} if os.path.lexists(made) else set()))
+
+    def test_G6_25_a_service_file_not_as_setup_writes_it_is_never_written_over_whatever_the_kept_files_say(self):
+        """The owner's Q1 (11-26), the meant file's road: with the meant file not readable (0 bytes, cut short, not
+        there) and a person's own line in one service file (the forge's unit, or the sync's timer), setup stops and
+        writes neither the meant file nor any service file, and switches nothing; with the record of what the skill
+        made unreadable as well, the same, and so with --use-this-folder too (no new record is written). On a Mac the
+        two files are the forge's and the sync's launch agents, the person's line a comment in the property list, and
+        nothing is loaded, taken off or started."""
+        mac = mirror.system()[0] == "darwin"
+        for record in ("read", "0 bytes"):
+            with World(self) as w:
+                p, h = w.p, w.home
+                if mac:
+                    base = os.path.dirname(p["plist"])
+                    files = {"the forge's launch agent": p["plist"],
+                             "the sync's launch agent": os.path.join(base, mirror.SYNC_LABEL + ".plist")}
+                else:
+                    base = os.path.dirname(p["unit"])
+                    files = {"the forge's unit": p["unit"],
+                             "the sync's timer": os.path.join(base, mirror.SYNC_UNIT + ".timer")}
+                meant = os.path.join(p["data"], mirror.SERVICE_MEANT)
+                made = os.path.join(p["data"], mirror.MADE_RECORD)
+                whole_meant, whole_made = fread_bytes(meant), fread_bytes(made)
+                for which, f in files.items():
+                    for form in ("0 bytes", "cut short", "not there"):
+                        with self.subTest(record=record, file=which, meant=form):
+                            text = fread(f)
+                            theirs = (text.replace("</plist>", "<!-- a line of the person's own -->\n</plist>", 1)
+                                      if mac else text + "# a line of the person's own\n")
+                            self.assertNotEqual(theirs, text)
+                            with open(f, "w") as fh:
+                                fh.write(theirs)
+                            if form == "not there":
+                                os.remove(meant)
+                            else:
+                                plant_kept(meant, form, whole_meant, None)
+                            if record != "read":
+                                plant_kept(made, record, whole_made, None)
+                            sums = {x: mirror.sha256_of(x) for x in mirror.service_files(p)}
+                            marks = {x: (kept_mark(x) if os.path.lexists(x) else None) for x in (meant, made)}
+                            for args in ((), ("--use-this-folder",)) if record != "read" else ((),):
+                                n = len(h.calls)
+                                rc, out = h.setup(*args)
+                                self.assertEqual(rc, 2, out)
+                                self.assertEqual({x: mirror.sha256_of(x) for x in mirror.service_files(p)}, sums)
+                                self.assertEqual({x: (kept_mark(x) if os.path.lexists(x) else None)
+                                                  for x in (meant, made)}, marks)
+                                self.assertEqual([c for c in h.calls[n:] if c[:2] == ["systemctl", "--user"] and any(
+                                    v in c for v in ("enable", "start", "stop", "restart", "disable"))], [])
+                                self.assertEqual([c for c in h.calls[n:] if c[:1] == ["launchctl"] and c[1:2] in (
+                                    ["bootstrap"], ["bootout"], ["kickstart"], ["enable"], ["disable"], ["load"],
+                                    ["unload"])], [])
+                                if args:
+                                    self.assertIn(f"{f}, and not what setup writes there now", out)
+                                    self.assertNotIn("Taken on again", out)
+                            with open(f, "w") as fh:
+                                fh.write(text)
+                            with open(meant, "wb") as fh:
+                                fh.write(whole_meant)
+                            with open(made, "wb") as fh:
+                                fh.write(whole_made)
+
+    def test_G6_19_a_name_in_the_older_sentences_is_never_printed_in_a_form_a_shell_runs(self):
+        """M134 (family rule 31(B), the maintainer's word for 0.1.0, 2026-11-25): a name on GitHub is chosen by
+        whoever can push there. In every line of sync, status and restore --check, a branch's or a tag's name with a
+        backtick or a dollar-parenthesis is shown changed, and the line says so; the names themselves are stored,
+        kept and pushed as they are, and two names that show alike stay two."""
+        forms = lambda out: [l for l in out.splitlines() if "`" in l or "$(" in l]
+        note = f" ({mirror.SHOWN_CHANGED})"
+        with World(self) as w:
+            full = "someone/alpha"
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit(full, {"a": b"1"})
+            two = w.gh.commit(full, {"a": b"2"})
+            blob = w.gh.git(full, "rev-parse", "main:a").strip()
+            me = ["-c", "user.name=a", "-c", "user.email=a@example.invalid"]
+            for b in ("d`x`", "d$(x)", "c$(q)", "plain"):
+                w.gh.git(full, "branch", b, one)
+            w.gh.git(full, "tag", "t$(y)", one)
+            w.gh.git(full, *me, "tag", "-a", "-m", "a note", "t`z`", one)
+            w.gh.git(full, "tag", "f$(b)", blob)
+            odd = disk_holds(os.path.dirname(w.p["state"]), "n`\udcff")   # a Mac's disk cannot hold it
+            if odd:
+                w.gh.plant(full, "refs/heads/n`\udcff", "main")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            said = out
+            if odd:                                   # M120: left out, named at every sync and in status
+                limit = "problem: someone/alpha: " + mirror.NOT_TEXT.format(n=1, names="n??; " + mirror.SHOWN_CHANGED)
+                self.assertIn(limit, out)
+            # GitHub moves and deletes them: each kept line shows the name changed, and says so.
+            for b in ("d`x`", "d$(x)"):
+                w.gh.git(full, "update-ref", "-d", "refs/heads/" + b)
+            w.gh.git(full, "update-ref", "refs/tags/t$(y)", two)
+            w.gh.git(full, "update-ref", "-d", "refs/tags/t`z`")
+            w.gh.git(full, "update-ref", "-d", "refs/tags/f$(b)")
+            w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            said += out
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            for was, what in (("d?x?", "deleted"), ("d??x)", "deleted"), ("tags/t??y)", "moved"),
+                              ("tags/t?z?", "deleted")):
+                self.assertIn(f"{full}: {was} was {what} on GitHub; its old commit is kept as kept/{day}/{was}{note}",
+                              out)
+            self.assertIn(mirror.TAG_NOT_KEPT.format(full=full, short="tags/f??b)", what="deleted", at="a file")
+                          + note, out)
+            # Only the printed form changed: the forge holds every name as it is, each kept ref by its own name.
+            held = w.forge_refs("someone--alpha")
+            for r in ("refs/heads/kept/%s/d`x`", "refs/heads/kept/%s/d$(x)", "refs/heads/kept/%s/tags/t$(y)",
+                      "refs/heads/kept/%s/tags/t`z`"):
+                self.assertIn(r % day, held)
+            out = subprocess.run(["git", "--git-dir", os.path.join(w.gh.root, "someone", "alpha.git"), "for-each-ref",
+                                  "--format=%(refname)"], capture_output=True, check=True).stdout
+            gh = {os.fsdecode(r) for r in out.split(b"\n") if r}
+            gh = {r for r in gh if not mirror.written_not_text(r)}
+            self.assertEqual({r for r in held if not r.startswith("refs/heads/kept/")}, gh)
+            rc, out = quiet(mirror.main, ["status"])
+            said += out
+            if odd:
+                self.assertIn(limit, out)
+            # restore --check's difference line: a name taken out of the copy behind the tool's back.
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            subprocess.run(["git", "--git-dir", folder, "update-ref", "-d", "refs/heads/c$(q)"], check=True)
+            rc, out = quiet(mirror.main, ["restore", "--check"])
+            self.assertEqual(rc, 1, out)
+            said += out
+            self.assertRegex(out, re.escape(f"{full}: refs/heads/c??q) is missing in the copy, ") + r"[0-9a-f]{12}"
+                             + re.escape(" when GitHub was last seen" + note))
+            # Two lines that need a world the guard alone makes (NOT_AS_LISTED, FORGE_NOT_AS_LISTED), read by their
+            # one builder; two names that show alike stay two.
+            for words in (mirror.NOT_AS_LISTED, mirror.FORGE_NOT_AS_LISTED):
+                line = mirror.not_as_listed_line([("refs/heads/a`b", "missing"), ("refs/heads/a$(b", "missing"),
+                                                  ("refs/tags/v`1", "at another commit")], words)
+                self.assertEqual(line, words.format(n=3, names="a?b: missing, a??b: missing, tag v?1: at another "
+                                                    "commit; " + mirror.SHOWN_CHANGED))
+                said += line + "\n"
+            self.assertEqual(mirror.shown_names(["x`1", "x\udcff1"]), "x?1, x?1; " + mirror.SHOWN_CHANGED)
+            self.assertEqual(forms(said), [], said)
+            # Inside double quotes a shell reads a dollar and a question mark as the last exit code: a shown name
+            # never holds that pair, so it never shows a digit that was never in it.
+            self.assertNotIn("$" + "?", said)
+            self.assertNotIn(mirror.SHOWN_CHANGED, mirror.shown_names(["plain", "x;y"]))
+        # git's and the forge's own words (M134's second part, the maintainer's word 11-25): they quote a name that
+        # somebody else chose. Each is read on the printed line (what the sync's service writes to its log) and in
+        # status, which reads the problem the sync wrote down; only the two forms change, the rest letter for letter.
+        bad = "e`x`$(y)"
+        for road in ("git", "forge"):
+            with World(self) as w:
+                full = "someone/beta"
+                w.gh.add_repo("someone", "beta")
+                one = w.gh.commit(full, {"a": b"1"})
+                w.gh.git(full, "branch", bad, one)
+                w.key_set()
+                rc, out = w.first_sync()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("refs/heads/" + bad, w.forge_refs("someone--beta"))          # the premise
+                w.gh.git(full, "update-ref", "refs/heads/" + bad, w.gh.commit(full, {"a": b"2"}))   # it moves too
+                w.gh.repos[full]["pushed_at"] = "2002-01-01T00:00:00Z"
+                folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--beta.git")
+                saved = mirror.forge_call
+                if road == "git":
+                    # The name taken out of the cache between the listing and the push: git itself says
+                    # "src refspec <the name> does not match any".
+                    def gone(forge, cache, *args, **kw):
+                        if args[:1] == ("push",):
+                            subprocess.run(["git", "--git-dir", cache, "update-ref", "-d", "refs/heads/" + bad],
+                                           check=True)
+                        return saved(forge, cache, *args, **kw)
+                    mirror.forge_call = gone
+                    words = "error: src refspec refs/heads/e?x???y) does not match any; " + mirror.SHOWN_CHANGED
+                else:
+                    # The forge refuses the push and names the ref in its own words: a hook in the copy's own folder,
+                    # run by Gitea's pre-receive and relayed by git as "remote: error: ...".
+                    hooks = os.path.join(folder, "hooks", "pre-receive.d")
+                    self.assertTrue(os.path.isdir(hooks), os.listdir(os.path.join(folder, "hooks")))
+                    hook = os.path.join(hooks, "zz-refuse")
+                    with open(hook, "w") as f:
+                        f.write("#!/bin/sh\nwhile read o n r; do case \"$r\" in *e?x?*) echo \"error: refusing $r\" >&2"
+                                ";; esac; done\nexit 1\n")
+                    os.chmod(hook, 0o755)
+                    words = ("refusing refs/heads/e?x???y); " + mirror.SHOWN_CHANGED + "; pre-receive hook declined")
+                try:
+                    rc, out = w.sync()
+                finally:
+                    mirror.forge_call = saved
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"{full}: the push into the forge failed, so nothing in its copy was moved (the push is "
+                              f"all or nothing): {words}", out)
+                said = out
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertIn(words, out, road)
+                said += out
+                self.assertEqual(forms(said), [], (road, said))
+                self.assertIn("refs/heads/" + bad, w.forge_refs("someone--beta"))          # the name, as it is
+
+
 def bare_home(root, name, with_commit=False):
     path = os.path.join(root, name + ".git")
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", path], check=True)
@@ -2819,6 +7349,13 @@ def bare_home(root, name, with_commit=False):
                         "--allow-empty", "-m", "already here"], check=True)
         subprocess.run(["git", "-C", work, "push", "-q", path, "main"], check=True)
     return path
+
+
+def git_all_refs(path):
+    """Every ref a bare folder holds, as git holds it: {name: commit or tag object}."""
+    out = subprocess.run(["git", "--git-dir", path, "for-each-ref", "--format=%(objectname) %(refname)"],
+                         capture_output=True, text=True, check=True).stdout
+    return dict(reversed(l.split(" ", 1)) for l in out.splitlines())
 
 
 def lsremote(path):
@@ -2952,7 +7489,7 @@ class G7(unittest.TestCase):
                 rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
                 self.assertEqual(rc, 2, url)
                 self.assertIn("This skill never writes to GitHub", out)
-                self.assertIn("git push --mirror", out)
+                self.assertIn(" push --mirror ", out)                       # the line itself: G7.8
             self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
             self.assertEqual(w.gh.writes(), [])
             if mirror.has_git_lfs():
@@ -2961,6 +7498,276 @@ class G7(unittest.TestCase):
                 self.assertEqual(rc, 0, out)
                 self.assertTrue([f for d, _, fs in os.walk(os.path.join(lhome, "lfs", "objects")) for f in fs],
                                 "the large file did not reach the new home")
+
+    def test_G7_7_a_restore_never_leaves_a_name_out_unsaid(self):
+        """M128 (seen 2026-11-25 on 0.1.0's head with the guard and the tag cures): restore --to of a project whose
+        GitHub branches include kept/... exited 0 and left them out of the new home, without a word. Now each is
+        named, and each gets one whole line a person runs as it is printed (rule 31: a name we did not write never
+        reaches a shell raw); a name this tool does not print as it is (a character no one can see, a backtick, a
+        dollar-parenthesis: rule 31(B)) gets no line, the text says so, and no printed line carries either form."""
+        with World(self) as w:
+            plain = [f"kept/{x}" for x in ("a", "b", "c", "d", "e", "f")] + ["kept/2020-01-01/old"]
+            semi = "kept/x;id>m3"                                                 # runs a command if typed raw
+            hidden = {"kept/$(id>m1)": "kept/??id>m1)", "kept/`id>m2`": "kept/?id>m2?",   # rule 31(B): never printed
+                      "kept/zero\u200bwidth": "kept/zero?width"}                  # a character no one can see
+            names = plain + [semi] + sorted(hidden)
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                one = w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.gh.git(f"someone/{n}", "tag", "v1", one)
+                for b in names if n == "alpha" else ():
+                    w.gh.git("someone/alpha", "branch", b, one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            held = w.forge_refs("someone--alpha")
+            self.assertEqual(sorted(r for r in held if r.startswith("refs/heads/kept/")),
+                             sorted("refs/heads/" + b for b in names))           # the premise: the copy holds them
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "alpha")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"restored someone/alpha: 1 branch(es) and 1 tag(s) to {home}", out)
+            shown = [hidden.get(b, b) for b in sorted(names)]
+            said = mirror.RESTORE_LEFT_OUT.format(n=11, names=", ".join(shown[:5]) + " and 6 more; "
+                                                  + mirror.SHOWN_CHANGED)
+            self.assertIn(said, out)
+            # Rule 31(B): no line restore --to prints carries a backtick or a dollar-parenthesis.
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
+                                              if not r.startswith("refs/heads/kept/")})
+            # One line per name that can be shown, every one of them (not only the first five), none for the other.
+            lines = [l for l in out.splitlines() if l.startswith("  git ") and " push " in l]
+            self.assertEqual(len(lines), 8, out)
+            self.assertFalse([l for l in lines if "\u200b" in l], "a line for a name no one can read")
+            self.assertEqual(len([l for l in lines if shlex.quote("refs/heads/" + semi) in l]), 1, out)
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            self.assertTrue(os.path.isdir(folder), "stock Gitea keeps the copy elsewhere")
+            self.assertIn(mirror.RESTORE_HIDDEN.format(n=3) + f"\n  git --git-dir {shlex.quote(folder)} for-each-ref "
+                          "refs/heads/kept/\n", out)
+            listing = [l for l in out.splitlines() if l.startswith("  git ") and " for-each-ref " in l]
+            self.assertEqual(len(listing), 1, out)
+            listed = subprocess.run(["bash", "-c", listing[0].strip()],
+                                    capture_output=True, text=True, cwd=root, stdin=subprocess.DEVNULL)
+            for b in hidden:
+                self.assertIn("refs/heads/" + b, listed.stdout)                  # that line lists each, as git holds it
+            self.assertIn("Run each git line above as it stands, in a terminal", out)
+            # Every line run through a real shell exactly as printed, in a folder of its own, with nothing added
+            # (the text gives the person nothing to supply): no command inside a name runs, and the names arrive.
+            # (The listing line above was run in root, not here.)
+            here = tempfile.mkdtemp(prefix="wsm-shell-")
+            TEMPS.append(here)
+            for l in lines:
+                r = subprocess.run(["bash", "-c", l.strip()], cwd=here, capture_output=True, text=True,
+                                   env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), stdin=subprocess.DEVNULL)
+                self.assertEqual(r.returncode, 0, (l, r.stderr))
+            self.assertEqual(os.listdir(here), [], "a command inside a name ran")
+            self.assertEqual(lsremote(home), {r: v for r, v in w.gh_refs("someone/alpha").items()
+                                              if r[len("refs/heads/"):] not in hidden})
+            # The road without the copy's folder ("open an issue with these lines"): the same left-out sentence in
+            # the shown form, no git line, and still no line with either form.
+            home = bare_home(root, "alpha-again")
+            real = mirror.forge_folder
+            mirror.forge_folder = lambda p, forge, name: ""
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/alpha"])
+            finally:
+                mirror.forge_folder = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn(said, out)
+            self.assertIn("open an issue with these lines", out)
+            self.assertNotIn("  git ", out)
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            # The control, a project without such a name: exit 0 and no such line.
+            home = bare_home(root, "beta")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/beta"])
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("not in the new home", out)
+            self.assertNotIn("  git ", out)
+            self.assertEqual(lsremote(home), w.gh_refs("someone/beta"))
+
+    def test_G7_9_restore_says_what_the_new_home_lacks_from_githubs_last_list(self):
+        """M135 (a reviewer's world 18, 2026-11-25): GitHub held a branch the copy did not (a name that is not text),
+        and restore --to said "restored ... 3 branch(es)" and exited 0, with no word of it. Now restore --to reads
+        GitHub's list as the sync last read it, as restore --check does, and says what the new home lacks of it: a
+        count, the names through the shown form, why where the record knows why; exit 1. A record without that list
+        is said as not read, never as none missing. What restore pushes does not change."""
+        with World(self) as w:
+            full = "someone/aa"
+            w.gh.add_repo("someone", "aa")
+            w.gh.add_repo("someone", "bb")
+            one = w.gh.commit(full, {"a": b"1"})
+            w.gh.git(full, "tag", "v1", one)
+            for b in ("b1", "c`x`", "d`y", "d\u200by"):           # the last two show alike: they stay two
+                w.gh.git(full, "branch", b, one)
+            w.gh.commit("someone/bb", {"a": b"1"})
+            odd = disk_holds(os.path.dirname(w.p["state"]), "a\udcffb")   # a Mac's disk cannot hold it
+            if odd:
+                w.gh.plant(full, "refs/heads/a\udcffb", "main")
+            w.key_set()
+            rc, out = w.first_sync()
+            self.assertEqual(rc, 0, out)
+            # Taken out of the copy behind the tool's back (the record does not know why), and kept by GitHub.
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--aa.git")
+            for b in ("b1", "c`x`", "d`y", "d\u200by"):
+                subprocess.run(["git", "--git-dir", folder, "update-ref", "-d", "refs/heads/" + b], check=True)
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "aa")
+            n = len(w.gh.log)
+            rc, out = quiet(mirror.main, ["restore", "--to", home, full])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"restored {full}: 1 branch(es) and 1 tag(s) to {home}; the kept refs stay in your forge\n",
+                          out)
+            names = (["a?b"] if odd else []) + ["b1", "c?x?", "d?y", "d?y"]
+            self.assertIn(mirror.RESTORE_LACKS.format(
+                n=len(names), names=", ".join(names) + "; " + mirror.SHOWN_CHANGED,
+                why="; 1 of them are not UTF-8 text, which the forge cannot hold" if odd else ""), out)
+            self.assertFalse([l for l in out.splitlines() if "`" in l or "$(" in l], out)
+            self.assertEqual(set(lsremote(home)), {"refs/heads/main", "refs/tags/v1"})   # what it pushes: as before
+            self.assertEqual(w.gh.log[n:], [], "restore asked GitHub")
+            # The control: a project the copy holds whole is restored with exit 0 and no such line.
+            home = bare_home(root, "bb")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("but ", out)
+            # A record without GitHub's list: said as not read, never as none missing; the exit is not 0.
+            st = mirror.load_json(w.p["state"], {})
+            rec = next(r for r in st["repos"].values() if r["full_name"] == "someone/bb")
+            rec.pop("seen_refs", None)
+            rec.pop("refs", None)
+            mirror.save_state(w.p, st)
+            home = bare_home(root, "bb-again")
+            rc, out = quiet(mirror.main, ["restore", "--to", home, "someone/bb"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(mirror.RESTORE_LIST_UNREAD.format(full="someone/bb"), out)
+            self.assertEqual(set(lsremote(home)), {"refs/heads/main"})
+
+    def test_G7_8_the_line_to_put_a_copy_back_on_github_runs_as_printed(self):
+        """M132 (a reviewer's read, 2026-11-25): restore --to refuses GitHub and said how to do it yourself with a
+        clone over the forge's address, which asks for a login the text never names, and "cd <that folder>". Now it
+        gives one line that runs as printed: git pushes the copy as a mirror from the copy's own folder in the forge
+        (on this computer, no login there) to the new, empty GitHub repository, each part through shlex.quote. It
+        sends what the old pair would have sent. Run here against a local bare folder standing in for the new home,
+        through git's own insteadOf, with no call to GitHub."""
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            one = w.gh.commit("someone/alpha", {"a": b"1"})
+            w.gh.git("someone/alpha", "tag", "v1", one)
+            w.gh.git("someone/alpha", "-c", "user.email=a@example.invalid", "-c", "user.name=a",
+                     "tag", "-a", "-m", "a note", "v2", one)
+            w.gh.commit("someone/alpha", {"a": b"2"})
+            w.gh.git("someone/alpha", "branch", "topic", one)
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+            w.gh.git("someone/alpha", "update-ref", "refs/heads/main", one)   # main moved back: its old commit kept
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2002-01-01T00:00:00Z"
+            rc, out = w.sync()
+            self.assertEqual(rc, 0, out)
+            folder = os.path.join(w.p["forge"], "data", "gitea-repositories", "mirror", "someone--alpha.git")
+            held = git_all_refs(folder)
+            self.assertTrue([r for r in held if r.startswith("refs/heads/kept/")], held)   # the premise: kept refs
+            url = "https://github.com/someone/new.git"
+            n = len(w.gh.log)
+            rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+            self.assertEqual(rc, 2, out)
+            self.assertIn("This skill never writes to GitHub", out)
+            self.assertIn("make a new, empty repository there", out)
+            lines = [l for l in out.splitlines() if l.startswith("  ")]
+            self.assertEqual(lines, [f"  git --git-dir {shlex.quote(folder)} push --mirror {shlex.quote(url)}"], out)
+            self.assertNotIn("<", out)                                 # nothing for the person to fill in
+            self.assertNotIn("clone", out)
+            # Run as printed, in an empty folder, nothing added but git's own address rewrite to the stand-in home.
+            root = tempfile.mkdtemp(prefix="wsm-home-")
+            TEMPS.append(root)
+            home = bare_home(root, "new")
+            here = tempfile.mkdtemp(prefix="wsm-shell-")
+            TEMPS.append(here)
+            road = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0=f"url.{home}.insteadOf", GIT_CONFIG_VALUE_0=url)
+            r = subprocess.run(["bash", "-c", lines[0].strip()], cwd=here, capture_output=True, text=True, env=road,
+                               stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.listdir(here), [])
+            self.assertEqual(git_all_refs(folder), held, "the line changed the copy")
+            self.assertEqual(git_all_refs(home), held)
+            # What the old pair would have sent: a mirror clone over the forge's address (with the tool's own login
+            # here, which a person did not have), then a mirror push into a second empty home.
+            key = fread(w.p["mirror_key"]).strip()
+            hdr = "Authorization: Basic " + __import__("base64").b64encode(f"mirror:{key}".encode()).decode()
+            old = os.path.join(root, "old.git")
+            subprocess.run(["git", "-c", f"http.http://127.0.0.1:{w.port}/.extraheader={hdr}", "clone", "-q",
+                            "--mirror", f"http://127.0.0.1:{w.port}/mirror/someone--alpha.git", old],
+                           check=True, capture_output=True, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+            home2 = bare_home(root, "new2")
+            subprocess.run(["git", "--git-dir", old, "push", "-q", "--mirror", home2], check=True, capture_output=True)
+            self.assertEqual(git_all_refs(home), git_all_refs(home2))
+            self.assertEqual(w.gh.log[n:], [], "the refused restore talked to GitHub")
+            self.assertEqual(w.gh.writes(), [])
+            # No copy, or a folder this tool does not print as it is: no line, and what to do.
+            for repo, words in (("someone/nothere", "could not be found"),):
+                rc, out = quiet(mirror.main, ["restore", "--to", url, repo])
+                self.assertEqual(rc, 2, out)
+                self.assertIn(words, out)
+                self.assertNotIn("  git ", out)
+            real = mirror.forge_folder
+            mirror.forge_folder = lambda p, forge, name: folder + "$(id>m4)"
+            try:
+                rc, out = quiet(mirror.main, ["restore", "--to", url, "someone/alpha"])
+            finally:
+                mirror.forge_folder = real
+            self.assertEqual(rc, 2, out)
+            self.assertIn("does not print as it is", out)
+            self.assertNotIn("  git ", out)
+            # The --to value (a reviewer's world 20): typed by a person or their agent, and passed on. Each line is
+            # read both ways: a git line run as printed, and every line relayed inside double quotes, as an agent
+            # passes a tool's line on; a command inside the value never runs, and no line carries either form.
+            def relayed(out):
+                here = tempfile.mkdtemp(prefix="wsm-relay-")
+                TEMPS.append(here)
+                for l in out.splitlines():
+                    if l.startswith("  git "):
+                        subprocess.run(["bash", "-c", l.strip()], cwd=here, capture_output=True,
+                                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), stdin=subprocess.DEVNULL)
+                    subprocess.run(["bash", "-c", 'printf "%s\\n" "' + l.replace('"', '\\"') + '"'], cwd=here,
+                                   capture_output=True, stdin=subprocess.DEVNULL)
+                return os.listdir(here)
+            forms = lambda out: [l for l in out.splitlines() if "`" in l or "$(" in l or "$" + "?" in l]
+            for bad in ("https://github.com/someone/n$(touch m1).git", "https://github.com/someone/n`touch m2`.git",
+                        "git@github.com:someone/n$(touch m3).git"):
+                rc, out = quiet(mirror.main, ["restore", "--to", bad, "someone/alpha"])
+                self.assertEqual(rc, 2, out)
+                self.assertIn("This skill never writes to GitHub", out)
+                self.assertIn("The address given holds a character this tool does not print as it is", out)
+                self.assertIn(mirror.SHOWN_CHANGED, out)
+                self.assertNotIn("  git ", out)
+                self.assertEqual(forms(out), [], out)
+                self.assertEqual(relayed(out), [], (bad, out))
+            # A new home on this computer whose path holds such a character: the restore itself works (a person's
+            # folder name is theirs), and the line that names it shows it changed and says so.
+            w.gh.add_repo("someone", "beta")
+            w.gh.commit("someone/beta", {"a": b"1"})
+            w.gh.git("someone/alpha", "branch", "kept/x", one)            # M128's lines, with such a home
+            w.gh.repos["someone/alpha"]["pushed_at"] = "2003-01-01T00:00:00Z"
+            self.assertEqual(w.sync()[0], 0)
+            odd = os.path.join(root, "h$(touch m4)`touch m5`")
+            os.makedirs(odd)
+            for repo, rc_want in (("someone/beta", 0), ("someone/alpha", 1)):
+                home = bare_home(odd, repo.split("/")[1])
+                rc, out = quiet(mirror.main, ["restore", "--to", home, repo])
+                self.assertEqual(rc, rc_want, out)
+                self.assertIn(f"restored {repo}: ", out)
+                self.assertIn(f" to {mirror.shown_as_is(home)}; the kept refs stay in your forge ({mirror.SHOWN_CHANGED})",
+                              out)
+                self.assertEqual({r: v for r, v in lsremote(home).items() if not r.endswith("^{}")},
+                                 {r: v for r, v in w.gh_refs(repo).items() if not r.startswith("refs/heads/kept/")})
+                self.assertEqual(forms(out), [], out)
+                self.assertEqual(relayed(out), [], (repo, out))
+                if repo == "someone/alpha":
+                    self.assertIn(mirror.RESTORE_TO_HIDDEN + f"\n  git --git-dir {shlex.quote(folder)} for-each-ref "
+                                  "refs/heads/kept/\n", out)
+                    self.assertFalse([l for l in out.splitlines() if l.startswith("  git ") and " push " in l], out)
+            self.assertNotIn("$(", out)
 
     def test_G7_4_a_new_computer_gets_every_copy_back_from_the_backup(self):
         with World(self) as w:
@@ -2997,7 +7804,7 @@ class G7(unittest.TestCase):
                 self.assertIn("The forge runs as your own service.", out)
                 self.assertIn("After a restart it starts by itself.", out)
                 self.assertNotIn(mirror.NO_LOGIN_NOTE, out)
-                self.assertIn("make new keys and run `key set` for each owner: someone", out)
+                self.assertIn("make new keys and run key set for each owner: someone", out)
                 rc, out = quiet(mirror.main, ["restore", "--check"])
                 self.assertEqual(rc, 0, out)
                 self.assertIn("restore check: 2 copies, 2 whole, 0 difference(s)", out)
@@ -3083,8 +7890,8 @@ def restore_with_the_forge_answering(home, backup):
     the road where the forge answers, as on a person's computer."""
     real, wait = mirror.install_service, mirror.SETUP_WAIT
 
-    def install_and_start(p):
-        r = real(p)
+    def install_and_start(p, **kw):
+        r = real(p, **kw)
         if r[0]:
             home.start_forge()
         return r
@@ -3093,6 +7900,133 @@ def restore_with_the_forge_answering(home, backup):
         return home.setup("--from", backup)
     finally:
         mirror.install_service, mirror.SETUP_WAIT = real, wait
+
+
+STRANGER = r'''
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def answer(self):
+        print("REQ", self.command, self.path.split("?")[0], "auth=%d" % ("Authorization" in self.headers), flush=True)
+        body = b'{"version": "28.4.0"}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = answer
+import errno, time
+start = time.monotonic()
+refused = 0
+while True:
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+        break
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE or time.monotonic() - start > 90:
+            print("NOT LISTENING after %.1f s, %d refusal(s) of Address already in use" % (time.monotonic() - start,
+                  refused), flush=True)
+            raise
+        refused += 1
+        time.sleep(0.5)
+print("LISTENING after %.1f s, %d refusal(s) of Address already in use" % (time.monotonic() - start, refused),
+      flush=True)
+srv.serve_forever()
+'''
+
+
+class Stranger:
+    """G8.7: another program on the forge's port, answering every request as a forge would (200, a version) and
+    writing down each one it is sent, and whether it carried an Authorization header. as_account: the account it runs
+    as (another account, by sudo without a password), or None for this account's own. Its bind waits up to 90 s on
+    "Address already in use": seen on GitHub's Mac runners at 649ee99, where the forge's port, free to this account,
+    was refused to the stranger; a Mac keeps another account off a port this account's closed connections still
+    hold (TIME_WAIT), where Linux does not (our reading; the next Mac leg is its test). It prints how long it waited
+    and how many refusals; the test writes that into the run's log whenever it was refused at all."""
+
+    def __init__(self, port, as_account=None):
+        py = "/usr/bin/python3" if as_account and os.path.exists("/usr/bin/python3") else sys.executable
+        cmd = [py, "-I", "-c", STRANGER, str(port)]
+        if as_account:
+            cmd = ["sudo", "-n", "-u", as_account, *cmd]
+        self.pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd="/")
+        first = self.pr.stdout.readline()
+        who = as_account or "this account"
+        if not first.startswith("LISTENING"):
+            self.pr.kill()
+            raise AssertionError(f"the stranger ({who}) did not listen on {port}: "
+                                 f"{first}{self.pr.stdout.read()[-300:]}")
+        self.refusals = int(first.split(", ")[1].split()[0])
+        if self.refusals:                       # the run's log says the wait, so a Mac leg can be read for it
+            print(f"\nG8.7: the stranger ({who}) on 127.0.0.1:{port}: {first.strip()}", file=sys.stderr, flush=True)
+        self.seen = []
+
+    def close(self):
+        if self.pr.poll() is None:
+            self.pr.terminate()
+            try:
+                self.pr.wait(10)
+            except subprocess.TimeoutExpired:
+                self.pr.kill()
+                self.pr.wait(10)
+        self.seen = [x for x in self.pr.stdout.read().splitlines() if x.startswith("REQ ")]
+        return self.seen
+
+
+def left_in(d):
+    """What is left in a folder, each path below it, for a failure's message."""
+    return sorted(os.path.relpath(os.path.join(r, x), d) for r, ds, fs in os.walk(d) for x in ds + fs)
+
+
+def stop_forge(h):
+    """The forge stops (its service told to stop), as a person's computer might do it, and the port is free."""
+    for pr in h.procs:
+        if pr.poll() is None:
+            pr.terminate()
+            pr.wait(30)
+    port = int(mirror.ini_value(mirror.paths()["app_ini"], "server", "HTTP_PORT"))
+    end = time.monotonic() + 30
+    while not mirror.port_is_free(port):
+        if time.monotonic() > end:
+            raise AssertionError(f"the forge did not let go of {port}")
+        time.sleep(0.2)
+    mirror.DOOR_SEEN.clear()
+    return port
+
+
+def backup_of_one_copy(tc):
+    """A backup file of a forge holding one copy (Gitea's dump needs a copy to hold), made by the skill's own backup."""
+    with World(tc) as w:
+        w.gh.add_repo("someone", "alpha")
+        w.gh.commit("someone/alpha", {"a": b"1"})
+        tc.assertEqual(w.key_set()[0], 0)
+        tc.assertEqual(w.first_sync()[0], 0)
+        folder = tempfile.mkdtemp(prefix="wsm-bk-")
+        TEMPS.append(folder)
+        w.home.forge_follows = True
+        rc, out = quiet(mirror.main, ["backup", folder])
+        tc.assertEqual(rc, 0, out)
+        return os.path.join(folder, os.listdir(folder)[0])
+
+
+def said(out):
+    """What a command said, without the line every command in the suite starts with (WSM_HOME is set: ...)."""
+    return "\n".join(x for x in out.strip().splitlines() if not x.startswith("WSM_HOME is set:"))
+
+
+def other_account():
+    """The account another program runs as for the second half of G8.7's proof: WSM_OTHER_ACCOUNT (CI names
+    'nobody', and its runners lend sudo without a password). Where it is not named, that half is not run here and the
+    test says so; on CI it must be named."""
+    name = os.environ.get("WSM_OTHER_ACCOUNT")
+    if not name:
+        if os.environ.get("CI"):
+            raise AssertionError("CI runs G8.7 with another account: WSM_OTHER_ACCOUNT is not set")
+        return None
+    out = subprocess.run(["sudo", "-n", "-u", name, "true"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise AssertionError(f"WSM_OTHER_ACCOUNT={name}, and sudo -n -u {name} does not run: {out.stderr[-200:]}")
+    return name
 
 
 class G8(unittest.TestCase):
@@ -3388,6 +8322,767 @@ class G8(unittest.TestCase):
             self.assertEqual(w.forge_get("/user/repos")[1], [], "something was copied before the person was told")
 
 
+    def test_G8_7_a_mac_process_of_the_account_nobody_is_another_programs(self):
+        """Seen 2026-11-24 in GitHub's Mac runner (M102's stranger, run as `nobody`): `ps -o uid=` prints that account
+        as -2 on macOS (read on another Mac too: `id -u nobody` 4294967294, ps -2), and the door read said "could not
+        be read" of a port another program held. A uid with its sign is read as a uid, another account's; anything
+        that is not a number stays "could not be read"."""
+        saved = mirror.subprocess.run
+        answers = {}
+        def fake(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, answers["uid" if "uid=" in cmd else "args"], "")
+        mirror.subprocess.run = fake
+        try:
+            answers.update(uid="   -2 /usr/bin/python3\n", args="python3 stranger.py\n")
+            self.assertEqual(mirror.mac_proc(4242), (-2, "/usr/bin/python3", "python3 stranger.py"))
+            for bad in ("   - /usr/bin/python3\n", "  x2 /usr/bin/python3\n", "   -2\n", ""):
+                answers["uid"] = bad
+                with self.assertRaises(mirror.DoorUnread, msg=bad):
+                    mirror.mac_proc(4242)
+        finally:
+            mirror.subprocess.run = saved
+
+    def test_G8_7_nothing_with_the_key_goes_to_a_port_that_is_not_the_forges_own(self):
+        """M102 (the owner's ruling, 11-24): every road reads who holds the forge's port first; another program there,
+        of this account or of another, gets nothing: no request at all, so no key and no copy. sync and status each
+        say it in one line with one next step, the sync's own record says it, and setup moves the forge to a free
+        port only while its own forge is stopped, saying the new address."""
+        if not real_gitea() and not os.environ.get("WSM_REQUIRE_GITEA"):
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        other = other_account()
+        with contextlib.ExitStack() as stack:
+            w = stack.enter_context(World(self))
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            self.assertEqual(mirror.read_door(w.p, w.port), ("mine", "this mirror's own forge holds it"))
+            backups = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(backups)
+            rounds = [(None, "a program of this account that is not this mirror's forge holds it")]
+            if other:
+                rounds.append((other, "a program of another account holds it"))
+            else:
+                print("\nG8.7: the other account's half is not run here (WSM_OTHER_ACCOUNT unset); CI runs it",
+                      file=sys.stderr)
+            for who, why in rounds:
+                w.home.forge_follows = False
+                port = stop_forge(w.home)
+                s = Stranger(port, who)
+                stack.callback(s.close)
+                self.assertEqual(mirror.read_door(w.p, port), ("other", why))
+                line = (f"problem: another program answers on the forge's port 127.0.0.1:{port}, not this mirror's own "
+                        f"forge ({why}), so nothing was sent to it: no key, no copy. Run setup: it moves the forge "
+                        "to a free port and starts it again; every copy stays.")
+                rc, out = w.sync()
+                self.assertEqual((rc, said(out)), (1, line))
+                self.assertEqual(mirror.load_json(w.p["state"], {})["last_sync"]["stopped"],
+                                 "another program holds the forge's port")
+                rc, out = quiet(mirror.main, ["status"])
+                self.assertEqual(rc, 1)
+                self.assertEqual([x for x in out.splitlines() if x.startswith("problem:")], [line], out)
+                self.assertIn("last sync: ", out)
+                self.assertIn("stopped: another program holds the forge's port", out)
+                for cmd in (["restore", "--check"], ["restore", "--to", "/nowhere/new.git", "someone/alpha"]):
+                    rc, out = quiet(mirror.main, cmd)
+                    self.assertEqual((rc, said(out)), (1, line), cmd)
+                with pinned("28.4.1", mirror.PINS):
+                    rc, out = quiet(mirror.main, ["upgrade-forge"])
+                self.assertEqual((rc, said(out)), (1, line + " Nothing was upgraded."))
+                self.assertEqual(mirror.load_json(w.p["state"], {})["gitea"], mirror.GITEA_VERSION)
+                rc, out = quiet(mirror.main, ["backup", backups])        # the forge is stopped: a backup of it is whole
+                self.assertEqual(rc, 1, out)                              # its service cannot start on a held port
+                self.assertIn("backup: ", out)
+                self.assertEqual(said(out).splitlines()[-1], line)
+                self.assertEqual(w.key_set()[0], 0)
+                self.assertEqual(s.close(), [], f"the stranger was sent requests ({who or 'this account'})")
+                # setup: moves the forge only now that its own is stopped, says the new address, and starts it there
+                s = Stranger(port, who)
+                stack.callback(s.close)
+                w.home.forge_follows = True
+                rc, out = w.home.setup()
+                self.assertEqual(rc, 0, out)
+                new = mirror.load_json(w.p["state"], {})["port"]
+                self.assertNotEqual(new, port)
+                self.assertTrue(mirror.PORT_FLOOR <= new < mirror.short_lived_start(), new)
+                self.assertIn(f"The forge's address changed: another program holds 127.0.0.1:{port}, so the forge "
+                              f"moves to http://127.0.0.1:{new}/. Every copy stays.", out)
+                self.assertNotIn("problem", out)
+                self.assertEqual(mirror.ini_value(w.p["app_ini"], "server", "HTTP_PORT"), str(new))
+                self.assertEqual(mirror.ini_value(w.p["app_ini"], "server", "ROOT_URL"), f"http://127.0.0.1:{new}/")
+                w.port, _ = w.home.start_forge()          # the service's start, as World stands in for it
+                self.assertEqual(w.port, new)
+                self.assertEqual(mirror.read_door(w.p, new)[0], "mine")
+                self.assertEqual(w.sync()[0], 0)
+                self.assertEqual(quiet(mirror.main, ["restore", "--check"])[0], 0)
+                self.assertEqual(s.close(), [], f"the stranger was sent requests ({who or 'this account'})")
+
+    def test_G8_7_setup_never_starts_a_second_forge_on_one_folder(self):
+        """The owner's condition 5: the port moves only on a certain "other", after the service is stopped and no
+        process of this account runs the forge's binary on this folder; otherwise setup stops and says so."""
+        with World(self) as w:
+            w.home.forge_follows = False                  # the service manager does not stop it: it runs on
+            ini = fread(w.p["app_ini"])
+            real = mirror.read_door
+            try:
+                mirror.read_door = lambda p, port: ("other", "a program of another account holds it")
+                rc, out = w.home.setup()
+            finally:
+                mirror.read_door = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: another program holds the forge's port 127.0.0.1:{w.port}, and this mirror's "
+                          "own forge may still run on its folder, so setup did not move it: two forges on one folder "
+                          "would harm the copies. Nothing else was changed. Run setup again in a minute.", out)
+            self.assertEqual(fread(w.p["app_ini"]), ini)
+            self.assertEqual(mirror.load_json(w.p["state"], {})["port"], w.port)
+            self.assertTrue(mirror.own_forge_running(w.p))
+            mirror.DOOR_SEEN.clear()
+            self.assertEqual(mirror.read_door(w.p, w.port)[0], "mine")
+            # an unread door is not "other": setup moves nothing and says the read's own line
+            try:
+                def unread(p, port):
+                    raise mirror.DoorUnread(False, "a process holding it could not be read")
+                mirror.read_door = unread
+                rc, out = w.home.setup()
+            finally:
+                mirror.read_door = real
+            self.assertEqual(rc, 1, out)
+            self.assertIn(f"problem: who holds the forge's port 127.0.0.1:{w.port} could not be read this time (a "
+                          "process holding it could not be read), so nothing was sent to it: no key, no copy. Run "
+                          "setup again.", out)
+            self.assertEqual(fread(w.p["app_ini"]), ini)
+
+    def test_G8_7_a_door_that_cannot_be_read_stops_every_road_and_setup_makes_nothing(self):
+        """The owner's conditions b and 4: each read fails in turn, and none is taken for "other" or for "mine";
+        a computer that cannot say makes setup stop as its first act, having made nothing."""
+        mac = mirror.system()[0] == "darwin"
+        bad_head = os.path.join(tempfile.mkdtemp(prefix="wsm-door-"), "tcp")
+        TEMPS.append(os.path.dirname(bad_head))
+        with open(bad_head, "w") as f:
+            f.write("  sl  local_address rem_address   st something_new uid inode\n")
+        # setup, as its first act, on a computer whose table this release cannot read
+        with Home() as h:
+            saved = mirror.PROC_TCP, mirror.NETSTAT
+            try:
+                if mac:
+                    mirror.NETSTAT = [sys.executable, "-I", "-c", "print('Proto Recv-Q Local Address (state) pid')"]
+                else:
+                    mirror.PROC_TCP = (bad_head,)
+                rc, out = h.setup()
+            finally:
+                mirror.PROC_TCP, mirror.NETSTAT = saved
+            self.assertEqual(rc, 2, out)
+            self.assertRegex(said(out), r"^problem: who holds the forge's port 127\.0\.0\.1:\d+ cannot be read on "
+                             r"this computer \((?:netstat names|\S+ has) columns this release does not know\), so "
+                             r"nothing was sent to it: no key, no copy\.")
+            self.assertTrue(said(out).endswith("\"What it runs\" says where it can. Setup made nothing."), out)
+            self.assertEqual(os.listdir(h.env["WSM_HOME"]), [mirror.SUITE_MARKER], "setup made something")
+            self.assertEqual(os.listdir(h.env["HOME"]), [])
+        # each read of this platform failing in turn, on a set-up mirror: sync, status and restore say it, send nothing
+        with World(self) as w:
+            opened = []
+            real_opener = mirror.forge_opener
+            mirror.forge_opener = lambda: opened.append(1) or real_opener()
+            faults = {
+                "the table is not there": ("PROC_TCP", ("/nonexistent/tcp",), True),
+                "the table cannot be read": ("PROC_TCP", (os.path.dirname(bad_head),), False),
+                "the table's columns are new": ("PROC_TCP", (bad_head,), True),
+                "a process holding it is gone": ("linux_proc", None, False),
+                "its holder is not found": ("linux_holders", None, False),
+            } if not mac else {
+                "netstat is not there": ("NETSTAT", ["/nonexistent/netstat"], True),
+                "netstat fails": ("NETSTAT", [sys.executable, "-I", "-c", "import sys; sys.exit(1)"], False),
+                "netstat's columns are new": ("NETSTAT", [sys.executable, "-I", "-c", "print('Proto Local pid')"], True),
+                "ps cannot read the process": ("mac_proc", None, False),
+            }
+            try:
+                for name, (attr, val, never) in faults.items():
+                    saved = getattr(mirror, attr)
+                    if val is None:
+                        def fail(*a, **k):
+                            if attr == "linux_holders":
+                                return {}
+                            raise mirror.DoorUnread(False, "a process holding it could not be read")
+                        val = fail
+                    setattr(mirror, attr, val)
+                    mirror.DOOR_SEEN.clear()
+                    try:
+                        with self.assertRaises(mirror.DoorUnread, msg=name) as e:
+                            mirror.read_door(w.p, w.port)
+                        self.assertEqual(e.exception.never, never, name)
+                        word = "cannot be read on this computer" if never else "could not be read this time"
+                        rc, out = w.sync()
+                        self.assertEqual(rc, 1, (name, out))
+                        self.assertEqual(len(said(out).splitlines()), 1, (name, out))
+                        self.assertIn(f"problem: who holds the forge's port 127.0.0.1:{w.port} {word}", out)
+                        self.assertTrue(said(out).endswith("\"What it runs\" says where it can." if never else
+                                                             "Run sync again."), (name, out))
+                        self.assertEqual(mirror.load_json(w.p["state"], {})["last_sync"]["stopped"],
+                                         "who holds the forge's port could not be read")
+                        rc, out = quiet(mirror.main, ["status"])
+                        self.assertEqual(rc, 1, name)
+                        self.assertIn(f"problem: who holds the forge's port 127.0.0.1:{w.port} {word}", out)
+                        self.assertNotIn("does not answer", out)
+                        rc, out = quiet(mirror.main, ["restore", "--check"])
+                        self.assertEqual(rc, 1, name)
+                        self.assertIn(word, out)
+                        self.assertEqual(opened, [], f"{name}: a request went to the forge's port")
+                    finally:
+                        setattr(mirror, attr, saved)
+            finally:
+                mirror.forge_opener = real_opener
+            mirror.DOOR_SEEN.clear()
+            self.assertEqual(mirror.read_door(w.p, w.port)[0], "mine")
+            self.assertNotIn("forge's port", w.sync()[1])         # past the door: the read works again
+
+    def test_G8_7_the_listener_tables_are_read_by_their_headers(self):
+        """The two reads, Linux's tables and the Mac's netstat, each from its header; rows read as the kernel and
+        netstat write them (the Mac's as read on a real Mac, 11-24); anything else is unread, never mine."""
+        d = tempfile.mkdtemp(prefix="wsm-door-")
+        TEMPS.append(d)
+        me = os.getuid()
+        tcp, tcp6 = os.path.join(d, "tcp"), os.path.join(d, "tcp6")
+        with open(tcp, "w") as f:
+            f.write("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+                    f"   0: 0100007F:5208 00000000:0000 0A 00000000:00000000 00:00000000 00000000  {me}        0 4242 1\n"
+                    "   1: 0100007F:5208 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  999        0 4243 1\n"
+                    "   2: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 17 1\n")
+        with open(tcp6, "w") as f:
+            f.write("  sl  local_address                         remote_address                        st tx_queue "
+                    "rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+                    "   0: 00000000000000000000000000000000:5208 00000000000000000000000000000000:0000 0A "
+                    "00000000:00000000 00:00000000 00000000   999        0 5151 1\n")
+        self.assertEqual(mirror.linux_listeners(0x5208, (tcp,)), [(me, 4242)])
+        self.assertEqual(mirror.linux_listeners(0x5208, (tcp, tcp6)), [(me, 4242), (999, 5151)])
+        self.assertEqual(mirror.linux_listeners(22, (tcp,)), [(0, 17)])
+        self.assertEqual(mirror.linux_listeners(1, (tcp, os.path.join(d, "no-tcp6"))), [])
+        with open(tcp, "a") as f:
+            f.write("   3: garbled\n")
+        with self.assertRaises(mirror.DoorUnread) as e:
+            mirror.linux_listeners(1, (tcp,))
+        self.assertTrue(e.exception.never)
+        head = ("Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      "
+                "txbytes  rhiwat  shiwat          process:pid    state  options           gencnt    flags   flags1 "
+                "usecnt rtncnt fltrs")
+        rows = [
+            "tcp4       0      0  127.0.0.1.21000        *.*                    LISTEN                 0            0 "
+            " 131072  131072        gitea-28.4.0:812 00000 00000006 0000000000a1b2c3 00000000 00000800      1      0 000000",
+            "tcp46      0      0  *.21000                *.*                    LISTEN                 0            0 "
+            " 131072  131072     Google Chrome H:913 00000 00000006 0000000000a1b2c4 00000000 00000800      1      0 000000",
+            "tcp4       0      0  127.0.0.1.21000        127.0.0.1.50000        ESTABLISHED            0            0 "
+            " 131072  131072        gitea-28.4.0:812 00000 00000006 0000000000a1b2c5 00000000 00000800      1      0 000000",
+            "tcp4       0      0  127.0.0.1.2100         *.*                    LISTEN                 0            0 "
+            " 131072  131072            other:77 00000 00000006 0000000000a1b2c6 00000000 00000800      1      0 000000",
+        ]
+        text = "Active Internet connections (including servers)\n" + head + "\n" + "\n".join(rows) + "\n"
+        self.assertEqual(mirror.mac_listeners(21000, text), [812, 913])
+        self.assertEqual(mirror.mac_listeners(2100, text), [77])
+        self.assertEqual(mirror.mac_listeners(9, text), [])
+        # macOS 13.7.8 Intel, read 11-24: a plain pid column, then epid
+        head13 = ("Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)      rhiwat  shiwat    "
+                  "pid   epid state  options           gencnt    flags   flags1 usscnt rtncnt fltrs")
+        rows13 = [
+            "tcp4       0      0  127.0.0.1.21000        *.*                    LISTEN       131072  131072    812      0 "
+            "00000 00000006 0000000000a1b2c3 00000000 00000800      1      0 000000",
+            "tcp46      0      0  *.21000                *.*                    LISTEN       131072  131072    913      0 "
+            "00000 00000006 0000000000a1b2c4 00000000 00000800      1      0 000000",
+            "tcp4       0      0  127.0.0.1.2100         *.*                    LISTEN       131072  131072     77      0 "
+            "00000 00000006 0000000000a1b2c6 00000000 00000800      1      0 000000",
+        ]
+        text13 = "Active Internet connections (including servers)\n" + head13 + "\n" + "\n".join(rows13) + "\n"
+        self.assertEqual(mirror.mac_listeners(21000, text13), [812, 913])
+        self.assertEqual(mirror.mac_listeners(2100, text13), [77])
+        for changed in (head.replace("process:pid", "pid"), head + " newcolumn", "nothing like a header",
+                        head13.replace("epid", "xpid")):
+            with self.assertRaises(mirror.DoorUnread) as e:
+                mirror.mac_listeners(21000, text.replace(head, changed) if "xpid" not in changed else
+                                     text13.replace(head13, changed))
+            self.assertTrue(e.exception.never, changed)
+        # our forge: our pinned binary (any version beside it), on our settings file; nothing else
+        with Home():
+            p = mirror.paths()
+            b = os.path.dirname(p["bin"])
+            ours = [os.path.join(b, "gitea-28.4.0"), "--config", p["app_ini"], "--work-path", p["forge"], "web"]
+            self.assertTrue(mirror.our_forge(p, ours[0], ours))
+            self.assertTrue(mirror.our_forge(p, os.path.join(b, "gitea-28.3.0"), ours))
+            self.assertTrue(mirror.our_forge(p, ours[0], " ".join(ours)))
+            self.assertFalse(mirror.our_forge(p, os.path.join(b, "gitea-28.4.0.download"), ours))
+            self.assertFalse(mirror.our_forge(p, "/usr/bin/gitea-28.4.0", ours))
+            self.assertFalse(mirror.our_forge(p, ours[0], [*ours[:2], p["app_ini"] + ".other", *ours[3:]]))
+            self.assertFalse(mirror.our_forge(p, sys.executable, ours))
+
+    def test_G8_7_every_road_to_the_forge_reads_the_door_and_every_caller_is_named(self):
+        """The owner's condition c: one place. Every request to the forge's port goes through Forge.call, forge_call
+        or wait_forge (and wait_stopped for a stop), each reads the door first; the commands that reach the port are
+        named here, so a new road fails this test until it is named; key set and uninstall send the forge nothing."""
+        import ast
+        src = fread(SCRIPT)
+        tree_ = ast.parse(src)
+        funcs, cls = {}, {}
+        for node in ast.walk(tree_):
+            if isinstance(node, ast.ClassDef):
+                for f in node.body:
+                    if isinstance(f, ast.FunctionDef):
+                        cls[f] = node.name
+        for node in ast.walk(tree_):
+            if isinstance(node, ast.FunctionDef):
+                funcs[(cls[node] + "." if node in cls else "") + node.name] = node
+
+        def called(fn):
+            out = set()
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Call):
+                    f = n.func
+                    out.add(f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None)
+            return out - {None}
+
+        def first_call(fn):
+            for st in fn.body:
+                if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant):
+                    continue
+                return st
+        # 1. the only openers of a connection to the forge
+        openers = {k for k, f in funcs.items() if "forge_opener" in called(f)}
+        self.assertEqual(openers, {"Forge.call", "wait_forge"})
+        self.assertEqual({k for k, f in funcs.items() if {"create_connection", "urlopen"} & called(f)},
+                         {"gh_get", "gh_public", "fetch_forge"},
+                         "a connection made outside the forge's one opener, GitHub's two roads and the pinned download")
+        self.assertNotIn("def port_answers", src)
+        # 2. each road reads the door before it sends, and sends only on "mine" (the owner's ruling F1: on "none"
+        # nothing is sent either): its first act is `if door(...) != 'mine': return ...`
+        for name in ("Forge.call", "forge_call"):
+            st = first_call(funcs[name])
+            self.assertIsInstance(st, ast.If, name)
+            self.assertRegex(ast.unparse(st.test), r"^door\(.*\) != 'mine'$", name)
+            self.assertEqual([type(x) for x in st.body], [ast.Return], name)
+            self.assertEqual(st.orelse, [], name)
+        self.assertIn("door", called(funcs["wait_forge"]))
+        self.assertIn("door", called(funcs["wait_stopped"]))
+        wf = ast.unparse(funcs["wait_forge"])
+        self.assertLess(wf.index("door("), wf.index("forge_opener()"))
+        # 3. every command, and what of the forge's roads it reaches
+        roads = {"Forge", "forge_call", "wait_forge", "wait_stopped"}
+        reach = {}
+        for k, f in funcs.items():
+            reach[k] = called(f)
+        names = {k.split(".")[-1]: k for k in funcs}
+
+        def reaches(start, seen=None):
+            seen = seen if seen is not None else set()
+            for c in reach.get(start, ()):
+                if c in roads:
+                    return True
+                k = names.get(c)
+                if k and k not in seen:
+                    seen.add(k)
+                    if reaches(k, seen):
+                        return True
+            return False
+        cmds = {k for k in funcs if k.startswith("cmd_")}
+        to_forge = {k for k in cmds if reaches(k)}
+        self.assertEqual(to_forge, {"cmd_sync", "cmd_go", "cmd_status", "cmd_restore", "cmd_setup", "cmd_backup",
+                                    "cmd_upgrade_forge"},
+                         "a command reaches the forge's port that this test does not name")
+        self.assertNotIn("cmd_key_set", to_forge)
+        self.assertNotIn("cmd_uninstall", to_forge)
+        # the commands named read the door before their first request (sync, restore, setup and upgrade-forge read
+        # it fresh as an act of their own; status, backup, left-out and go through the roads above)
+        for k in ("sync", "cmd_restore", "cmd_upgrade_forge", "cmd_setup"):
+            self.assertIn("door", called(funcs[k]) | ({"door_floor"} & called(funcs[k])), k)
+        self.assertEqual(ast.unparse(funcs["cmd_setup"].body[1]), "floor = door_floor()",
+                         "setup's first act is not the floor")
+
+
+    def test_G8_7_our_own_forge_reads_mine_on_every_road_that_starts_it(self):
+        """The owner's condition ii: setup, restore and the service's own restart after a failure each start the
+        forge, and on each the door reads it as ours, with every read on the way "mine" or "none" (upgrade-forge,
+        at each step: test_G9_1). Never "other" for our own forge."""
+        if not real_gitea() and not os.environ.get("WSM_REQUIRE_GITEA"):
+            raise unittest.SkipTest("no real pinned Gitea for this system")
+        kinds, real_read = [], mirror.read_door
+
+        def record(p, port):
+            try:
+                k = real_read(p, port)
+            except mirror.DoorUnread as e:
+                kinds.append("unread: " + str(e))
+                raise
+            kinds.append(k[0])
+            return k
+        real_install, wait = mirror.install_service, mirror.SETUP_WAIT
+        mirror.read_door = record
+        try:
+            with contextlib.ExitStack() as stack:
+                h = stack.enter_context(Home(linger="yes"))
+                h.place_gitea()
+
+                def install_and_start(p, **kw):
+                    r = real_install(p, **kw)
+                    if r[0]:
+                        h.start_forge()
+                    return r
+                mirror.install_service, mirror.SETUP_WAIT = install_and_start, 30
+                rc, out = h.setup()                                     # setup
+                mirror.install_service, mirror.SETUP_WAIT = real_install, wait
+                port = mirror.load_json(mirror.paths()["state"], {})["port"]
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"The forge runs as your own service on http://127.0.0.1:{port}/", out)
+                self.assertIn("mine", kinds)
+                self.assertEqual(set(kinds) - {"mine", "none"}, set(), kinds)
+                # the service's own restart after a failure: the forge killed, run-forge started again
+                kinds.clear()
+                for pr in h.procs:
+                    if pr.poll() is None:
+                        pr.kill()
+                        pr.wait(30)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(mirror.paths(), port)[0], "none")
+                h.start_forge()
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(mirror.paths(), port)[0], "mine")
+            # restore: a backup, and setup --from on a new home
+            backup = backup_of_one_copy(self)
+            kinds.clear()
+            with Home(linger="yes") as h2:
+                h2.auto_login = mirror.getpass.getuser()
+                h2.place_gitea()
+                rc, out = restore_with_the_forge_answering(h2, backup)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("counted in the forge itself", out)
+                self.assertIn("mine", kinds)
+                self.assertEqual(set(kinds) - {"mine", "none"}, set(), kinds)
+        finally:
+            mirror.read_door, mirror.install_service, mirror.SETUP_WAIT = real_read, real_install, wait
+
+    def test_G8_7_on_no_listener_nothing_is_sent_even_to_one_that_comes_after_the_read(self):
+        """The owner's ruling F1 (11-24): "nothing listens" is exactly when another program can take the number, so on
+        "none" nothing is sent: the API call answers as no answer (0, said "it did not answer") from the read itself,
+        and git is not run at all. A listener that appears between the read and the call receives 0 requests; the
+        same listener, read as "mine", is sent both, so the 0 is the door's doing and not the listener's."""
+        port = mirror.free_port()
+        f = object.__new__(mirror.Forge)
+        f.p, f.port, f.base = {"app_ini": "/nowhere/app.ini"}, port, f"http://127.0.0.1:{port}"
+        f.key, f.user = "forge-key-" + "b2" * 10, "mirror"
+        url = f.base + "/mirror/alpha.git"
+        real = mirror.read_door
+        s = Stranger(port)                                 # it came after the read below was made
+        h = Home().__enter__()                             # a person's own home: git reads its settings there
+        try:
+            mirror.DOOR_SEEN.clear()
+            mirror.read_door = lambda p, port: ("none", "nothing listens")
+            code, body = f.call("GET", "/version")
+            self.assertEqual((code, body), (0, {"message": f"nothing listens on 127.0.0.1:{port}"}))
+            self.assertEqual(mirror.Forge.why(code, body), "it did not answer")
+            out = mirror.forge_call(f, None, "ls-remote", url)
+            self.assertEqual(out.returncode, 128)
+            self.assertIn(f"nothing listens on 127.0.0.1:{port}", out.stderr)
+            self.assertEqual(s.close(), [], "a request reached a listener the door read as none")
+            s = Stranger(port)
+            mirror.DOOR_SEEN.clear()
+            mirror.read_door = lambda p, port: ("mine", "this mirror's own forge holds it")
+            self.assertEqual(f.call("GET", "/version")[0], 200)
+            mirror.forge_call(f, None, "ls-remote", url)
+            seen = s.close()                               # git may ask again by the older road (its own choice)
+            self.assertEqual(seen[:2], ["REQ GET /api/v1/version auth=1", "REQ GET /mirror/alpha.git/info/refs auth=1"])
+            self.assertTrue(all(x.endswith(" auth=1") for x in seen), seen)
+        finally:
+            mirror.read_door = real
+            mirror.DOOR_SEEN.clear()
+            s.close()
+            h.__exit__(None, None, None)
+
+    def test_G8_7_a_stranger_beside_our_running_forge_is_not_taken_for_stopped(self):
+        """The owner's ruling F2 (11-24): read_door says "other" as soon as ONE listener on the number is not our
+        forge, at any address, so a stranger on ::1 while our forge still runs on 127.0.0.1 reads "other". The stop
+        wait takes that for "stopped" only when no process of this account runs this forge on this folder; while
+        ours runs, backup dumps nothing and upgrade-forge never says "the forge stopped". A real listener on ::1,
+        opened as the service is told to stop, beside the real forge that does not stop."""
+        real_read, real_own = mirror.read_door, mirror.own_forge_running
+        try:                                   # the wait's three answers on "other", by what our own processes read
+            mirror.read_door = lambda p, port: ("other", "a program of another account holds it")
+            for ours, kind in ((True, "running"), (None, "unread"), (False, "other")):
+                mirror.own_forge_running = lambda p, ours=ours: ours
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.wait_stopped({"app_ini": "/nowhere/app.ini"}, 20001, seconds=1), kind, ours)
+        finally:
+            mirror.read_door, mirror.own_forge_running = real_read, real_own
+            mirror.DOOR_SEEN.clear()
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            beside, stops, at = [], [], [1]
+            real_service, waits, real_fetch = mirror.service, mirror.wait_stopped.__defaults__, mirror.fetch_forge
+
+            def service(p, verb):
+                if verb == "stop":
+                    stops.append(verb)
+                    # at the chosen stop: our forge runs on (it is told to stop and does not), and a stranger
+                    # takes the number on ::1; at any other stop the forge stops as told
+                    w.home.forge_follows = len(stops) != at[0]
+                    if len(stops) == at[0]:
+                        s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                        s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                        s6.bind(("::1", w.port))
+                        s6.listen(1)
+                        beside.append(s6)
+                return real_service(p, verb)
+            backups = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(backups)
+            try:
+                mirror.service, mirror.wait_stopped.__defaults__ = service, (3,)
+                rc, out = quiet(mirror.main, ["backup", backups])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The forge did not stop, so no backup was made (a backup of a running forge can be "
+                              "torn). Run backup again; if the forge still does not stop, run status.", out)
+                self.assertEqual(os.listdir(backups), [])
+                self.assertTrue(beside)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(w.p, w.port)[0], "other")     # the stranger is there, beside ours
+                self.assertTrue(mirror.own_forge_running(w.p))
+                beside.pop().close()
+                mirror.DOOR_SEEN.clear()
+                # upgrade-forge: its backup's stop goes as told (the backup is made), and at its own stop the
+                # stranger comes beside our forge that runs on. The new binary is not what is read here.
+                stops[:], at[0] = [], 2
+                mirror.fetch_forge = lambda *a, **k: None
+                with pinned("28.4.1", mirror.PINS):
+                    rc, out = quiet(mirror.main, ["upgrade-forge"])
+                self.assertEqual(rc, 1, out)
+                self.assertEqual((len(stops), len(beside)), (2, 1), out)
+                self.assertIn("The forge did not stop, so it was not upgraded. Run upgrade-forge again; if the forge "
+                              "still does not stop, run status.", out)
+                self.assertNotIn("the forge stopped", out)
+                self.assertNotIn("migrat", out.lower())
+                self.assertEqual(mirror.load_json(w.p["state"], {})["gitea"], mirror.GITEA_VERSION)
+            finally:
+                mirror.service, mirror.wait_stopped.__defaults__ = real_service, waits
+                mirror.fetch_forge = real_fetch
+                w.home.forge_follows = True
+                for s6 in beside:
+                    s6.close()
+                mirror.DOOR_SEEN.clear()
+            self.assertEqual(mirror.read_door(w.p, w.port)[0], "mine")
+            self.assertEqual(w.sync()[0], 0)
+
+    def test_G8_7_setups_floor_says_its_unread_by_kind(self):
+        """The owner's ruling F3 (11-24): the floor's line follows the kind of unread. A read that is not there, or
+        names columns this release does not know: "cannot be read on this computer". A read that did not answer
+        this time (a netstat that failed or timed out once, a table that could not be read once): "could not be read
+        this time", and the next step is setup again, not that this computer cannot run the mirror."""
+        never = (r"^problem: who holds the forge's port 127\.0\.0\.1:\d+ cannot be read on this computer \(%s\), so "
+                 r"nothing was sent to it: no key, no copy\. The mirror needs that read to run; the README's section "
+                 r"\"What it runs\" says where it can\.$")
+        again = (r"^problem: who holds the forge's port 127\.0\.0\.1:\d+ could not be read this time \(%s\), so "
+                 r"nothing was sent to it: no key, no copy\. Run setup again\.")
+        real_system, real_netstat, real_run, real_ll = mirror.system, mirror.NETSTAT, subprocess.run, mirror.linux_listeners
+
+        def times_out(cmd, *a, **k):
+            if cmd == mirror.NETSTAT:
+                raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+            return real_run(cmd, *a, **k)
+
+        def once(port, files=None):
+            raise mirror.DoorUnread(False, "/proc/net/tcp could not be read")
+        cases = [("darwin", [sys.executable, "-I", "-c", "import sys; sys.exit(1)"], None, None,
+                  again % "netstat did not answer"),
+                 ("darwin", [sys.executable, "-I", "-c", "pass"], times_out, None, again % "netstat did not answer"),
+                 ("darwin", ["/nowhere/netstat"], None, None, never % "netstat is not there"),
+                 ("darwin", [sys.executable, "-I", "-c", "print('Proto Recv-Q Local Address (state) pid')"], None,
+                  None, never % "netstat names columns this release does not know"),
+                 ("linux", real_netstat, None, once, again % "/proc/net/tcp could not be read")]
+        for os_name, netstat, run, ll, want in cases:
+            try:
+                mirror.system = lambda os_name=os_name: (os_name, "x86_64")
+                mirror.NETSTAT = netstat
+                if run:
+                    mirror.subprocess.run = run
+                if ll:
+                    mirror.linux_listeners = ll
+                line = mirror.door_floor()
+            finally:
+                mirror.system, mirror.NETSTAT, mirror.linux_listeners = real_system, real_netstat, real_ll
+                mirror.subprocess.run = real_run
+            self.assertRegex(line or "", want + ("" if want.endswith("$") else "$"), (os_name, netstat))
+        with Home() as h:                              # and through setup itself: made nothing, run setup again
+            try:
+                mirror.linux_listeners = once
+                mirror.system = lambda: ("linux", "x86_64")
+                rc, out = h.setup()
+            finally:
+                mirror.system, mirror.linux_listeners = real_system, real_ll
+            self.assertEqual(rc, 2, out)
+            self.assertRegex(said(out), (again % "/proc/net/tcp could not be read") + r" Setup made nothing\.$")
+            self.assertFalse(os.path.exists(mirror.paths()["app_ini"]))
+
+    def test_G8_7_a_forge_that_closed_its_port_and_lives_on_is_not_stopped(self):
+        """The owner's ruling F4 (11-24): "stopped" needs both, no listener on the port AND no process of this account
+        running this forge on this folder: a forge that has closed its listener can still be writing its database
+        while it ends, and a dump or a migration then reads a torn one. True keeps the wait (it ends "running"); a
+        read of our own processes that fails ends it "unread". The real case: a real Gitea of ours on this folder,
+        our own binary on our own settings file, that no longer listens on the forge's port (started on another
+        port, as a forge that closed its listener and lives on); backup then dumps nothing."""
+        real_read, real_own = mirror.read_door, mirror.own_forge_running
+        try:                                   # the wait's three answers on "none", by what our own processes read
+            mirror.read_door = lambda p, port: ("none", "nothing listens")
+            for ours, kind in ((True, "running"), (None, "unread"), (False, "stopped")):
+                mirror.own_forge_running = lambda p, ours=ours: ours
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.wait_stopped({"app_ini": "/nowhere/app.ini"}, 20001, seconds=1), kind, ours)
+        finally:
+            mirror.read_door, mirror.own_forge_running = real_read, real_own
+            mirror.DOOR_SEEN.clear()
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            w.home.forge_follows = False
+            port = stop_forge(w.home)
+            ini = fread(w.p["app_ini"])
+            other = mirror.free_port()
+            lives = subprocess.Popen([mirror.running_bin(w.p), "--config", w.p["app_ini"], "--work-path", w.p["forge"],
+                                      "web", "--port", str(other)], env=mirror.forge_env(w.p),
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            STARTED.append(lives)
+            backups = tempfile.mkdtemp(prefix="wsm-bk-")
+            TEMPS.append(backups)
+            waits = mirror.wait_stopped.__defaults__
+            try:
+                end = time.monotonic() + mirror.FIRST_START_WAIT
+                while True:
+                    try:
+                        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                            f"http://127.0.0.1:{other}/api/healthz", timeout=2)
+                        break
+                    except (urllib.error.URLError, OSError):
+                        self.assertIsNone(lives.poll(), "the second Gitea of ours stopped")
+                        self.assertLess(time.monotonic(), end, "the second Gitea of ours did not answer")
+                        time.sleep(0.5)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(w.p, port)[0], "none")        # nothing on the forge's own port
+                self.assertTrue(mirror.own_forge_running(w.p))                  # and ours lives on, on this folder
+                mirror.wait_stopped.__defaults__ = (3,)
+                rc, out = quiet(mirror.main, ["backup", backups])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("The forge did not stop, so no backup was made (a backup of a running forge can be "
+                              "torn). Run backup again; if the forge still does not stop, run status.", out)
+                self.assertEqual(os.listdir(backups), [])
+            finally:
+                mirror.wait_stopped.__defaults__ = waits
+                lives.terminate()
+                lives.wait(30)
+            with open(w.p["app_ini"], "w") as f:      # Gitea's own `web --port` writes LOCAL_ROOT_URL there
+                f.write(ini)                           # (seen 11-24): the stand-in's mark, not the tool's, undone
+            # once ours has ended, the same backup is made: the wait's "stopped" is the process's end, not the port's
+            mirror.DOOR_SEEN.clear()
+            self.assertFalse(mirror.own_forge_running(w.p))
+            w.home.forge_follows = True
+            rc, out = quiet(mirror.main, ["backup", backups])
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(os.listdir(backups)), 1, out)
+            self.assertEqual(w.sync()[0], 0)
+
+    def test_G8_7_status_calls_what_answers_the_forge_only_when_the_door_read_it(self):
+        """The owner's ruling, 11-24 (the rehearsal's two lines): status says only what was read. The forge line by
+        the door's answer: other "(not asked: another program answers on its port)", unread "(not asked: who holds
+        its port could not be read)", none "(not answering)". The network line and its problem line call what
+        answers "the forge" only when the door read mine and the forge answered; otherwise the subject is "a
+        program". Read in four states: the forge down; another program on every address; the door unread; the
+        forge up (the words as before)."""
+        def lines(out, head):
+            return [x for x in out.splitlines() if x.startswith(head)]
+        with World(self) as w:
+            w.gh.add_repo("someone", "alpha")
+            w.gh.commit("someone/alpha", {"a": b"1"})
+            self.assertEqual(w.key_set()[0], 0)
+            self.assertEqual(w.first_sync()[0], 0)
+            read, caught, real_addrs, real_ans = [], [], mirror.own_addresses, mirror.answers_on
+
+            def addrs():
+                read.append(real_addrs())
+                return read[-1]
+
+            def ans(a, p):
+                caught.append(real_ans(a, p))
+                return caught[-1]
+
+            def others():
+                return len([a for a in read[-1] if not (a == "::1" or a.startswith("127."))])
+            mirror.own_addresses, mirror.answers_on = addrs, ans
+            wide = None
+            try:
+                w.home.forge_follows = False
+                port = stop_forge(w.home)
+                rc, out = status()                                   # 1. the forge down
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(lines(out, "forge: "), [f"forge: Gitea (not answering) on http://127.0.0.1:{port}/ "
+                                                         f"(pinned {mirror.GITEA_VERSION})"])
+                self.assertEqual(caught[-1], [])
+                self.assertEqual(lines(out, "network: "), [
+                    "network: the forge was not reached, so where it answers was not checked (nothing answers on this "
+                    f"port at the {others()} other address(es) of this computer)"])
+                self.assertNotIn("the forge answers on", out)
+                wide = socket.socket(socket.AF_INET, socket.SOCK_STREAM)       # 2. another program, every address
+                wide.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                wide.bind(("0.0.0.0", port))
+                wide.listen(8)
+                mirror.DOOR_SEEN.clear()
+                self.assertEqual(mirror.read_door(w.p, port)[0], "other")
+                rc, out = status()
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(lines(out, "forge: "), [
+                    f"forge: Gitea (not asked: another program answers on its port) on http://127.0.0.1:{port}/ "
+                    f"(pinned {mirror.GITEA_VERSION})"])
+                v4 = [a for a in read[-1] if ":" not in a and not a.startswith("127.")]
+                if v4:                                 # an address on a bridge that is down answers nothing at all
+                    self.assertTrue(caught[-1], "a listener on every address was not caught on any of them")
+                for a in caught[-1]:
+                    self.assertIn(f"problem: a program answers on port {port} at {a}, and it is not this mirror's "
+                                  "forge as far as this computer says", out)
+                self.assertEqual(lines(out, "network: "), [
+                    f"network: the forge was not reached; a program answers on this port at {', '.join(caught[-1])}"
+                    if caught[-1] else "network: the forge was not reached, so where it answers was not checked "
+                    f"(nothing answers on this port at the {others()} other address(es) of this computer)"])
+                self.assertNotIn("the forge answers on", out)
+                real_read = mirror.read_door                                   # 3. the door unread
+
+                def unread(p, port):
+                    raise mirror.DoorUnread(False, "a process holding it could not be read")
+                mirror.read_door = unread
+                mirror.DOOR_SEEN.clear()
+                try:
+                    rc, out = status()
+                finally:
+                    mirror.read_door = real_read
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(lines(out, "forge: "), [
+                    f"forge: Gitea (not asked: who holds its port could not be read) on http://127.0.0.1:{port}/ "
+                    f"(pinned {mirror.GITEA_VERSION})"])
+                for a in caught[-1]:
+                    self.assertIn(f"problem: a program answers on port {port} at {a}; whether it is this mirror's "
+                                  "forge could not be read", out)
+                self.assertNotIn("the forge answers on", out)
+                wide.close()
+                wide = None
+                mirror.DOOR_SEEN.clear()
+                w.port, _ = w.home.start_forge()                               # 4. the forge up: words as before
+                w.home.forge_follows = True
+                rc, out = status()
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(lines(out, "forge: "), [f"forge: Gitea {mirror.GITEA_VERSION} on http://127.0.0.1:"
+                                                         f"{w.port}/ (pinned {mirror.GITEA_VERSION})"])
+                self.assertEqual(lines(out, "network: "), [
+                    f"network: the forge answers on 127.0.0.1 only (tried {others()} other address(es) of this "
+                    "computer)"])
+            finally:
+                mirror.own_addresses, mirror.answers_on = real_addrs, real_ans
+                if wide:
+                    wide.close()
+                mirror.DOOR_SEEN.clear()
+
+
 PINS_28_3 = {("linux", "x86_64"): ("linux-amd64", "5f834e8f04986f3b9206cf14743b5a6e6996ceddc238dac6409866ebda2a0686"),
              ("darwin", "x86_64"): ("darwin-amd64", "4420bb44df8047cd4f3bec9162d559c0245dee7ef3b58bc5540d7a1eefd8b94f"),
              ("darwin", "arm64"): ("darwin-arm64", "0aca8f1f1d6a0b31abc2c7e5c40feec18f3e45ab0c7b11deaef259794ce45812")}
@@ -3676,62 +9371,103 @@ class G9(unittest.TestCase):
                 return mirror.plist_text(q) if mirror.system()[0] == "darwin" else mirror.unit_text(q)
             finally:
                 os.environ["WSM_HOME"] = was
-        with Home() as h:
-            p = mirror.paths()
-            f = p["plist"] if mirror.system()[0] == "darwin" else p["unit"]
-            os.makedirs(os.path.dirname(f), exist_ok=True)
-            other = os.path.join(h.tmp, "other home")
-            for text, want in ((service_text(other), f"WSM_HOME={shlex.quote(other)} python3 -I "
-                                f"{shlex.quote(mirror.paths(other)['script'])}"),
-                               (service_text(None), "unset WSM_HOME, then run python3 -I "
-                                f"{shlex.quote(mirror.paths(None)['script'])}"),
-                               ("[Service]\n", "could not be read")):
-                with open(f, "w") as fh:
-                    fh.write(text)
-                for cmd in (["setup", "--linger"], ["setup", "--dry-run"], ["uninstall"]):
-                    rc, out = quiet(mirror.main, cmd)
-                    self.assertEqual(rc, 2, (cmd, out))
-                    self.assertIn("Nothing was changed.", out)
-                    self.assertIn(want, out)
-                    self.assertEqual(fread(f), text)
-                    self.assertFalse(os.path.exists(p["data"]), "nothing made")
-            # The control: the service of this home's own copy, as the skill wrote it, is no reason to stop.
-            with open(f, "w") as fh:
-                fh.write(service_text(os.environ["WSM_HOME"]))
-            mirror.claim(f)                                       # what setup records when it writes it
-            rc, out = quiet(mirror.main, ["setup", "--dry-run"])
-            self.assertNotIn("uses another home", out)
-            self.assertEqual(rc, 0, out)
-            # Rule 23: the same file changed since (by the person, or by something else) is not written over by
-            # setup, nor removed by uninstall: it is named and left. Setup stops there; uninstall goes to its end
-            # (rule 8: a person who wants to leave is never refused because of the state of their own files).
-            with open(f, "a") as fh:
-                fh.write("# the person's own line\n")
-            changed = fread(f)
-            for cmd in (["setup", "--dry-run"], ["uninstall"]):
-                rc, out = quiet(mirror.main, cmd)
-                if cmd[0] == "setup":
-                    self.assertNotEqual(rc, 0, (cmd, out))
-                else:
-                    self.assertEqual(rc, 0, (cmd, out))
-                    self.assertIn("It is switched off; look at it, and keep or delete it as you choose.", out)
-                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
-                self.assertIn("not as the skill wrote it", out)
-                self.assertIn(f, out)
-                self.assertEqual(fread(f), changed)
-                self.assertNotIn("Kept: nothing", out)
-            os.remove(f)
-            # Rule 28: a folder of the skill's that other accounts can write in, or that another account owns, is
-            # refused before anything is written there.
-            os.makedirs(p["data"], exist_ok=True)
-            mode = os.stat(p["data"]).st_mode
-            try:
-                os.chmod(p["data"], 0o777)
-                rc, out = quiet(mirror.main, ["setup", "--dry-run"])
-                self.assertEqual(rc, 2, out)
-                self.assertIn(f"Stopped: {p['data']} is not yours alone (other accounts can write in it)", out)
-            finally:
-                os.chmod(p["data"], mode & 0o777)
+        # M150 (G9.15): both roads on every leg, the system stood in for (a Mac's road ran only on the Mac legs, and
+        # a stand-in that raised there was how a launch agent file that is not well-formed went unseen on Linux)
+        saved = mirror.system
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        try:
+            for name in (("linux", "x86_64"), ("darwin", "arm64")):
+                mirror.system = lambda name=name: name
+                with Home() as h, self.subTest(system=name[0]):
+                    p = mirror.paths()
+                    f = p["plist"] if mirror.system()[0] == "darwin" else p["unit"]
+                    os.makedirs(os.path.dirname(f), exist_ok=True)
+                    other = os.path.join(h.tmp, "other home")
+                    for q in (mirror.paths(other), mirror.paths(None)):         # each service's copy is there, as it runs (M144)
+                        os.makedirs(os.path.dirname(q["script"]), exist_ok=True)
+                        shutil.copyfile(SCRIPT, q["script"])
+                    for text, want in ((service_text(other), f"WSM_HOME={shlex.quote(other)} python3 -I "
+                                        f"{shlex.quote(mirror.paths(other)['script'])}"),
+                                       (service_text(None), "unset WSM_HOME, then run python3 -I "
+                                        f"{shlex.quote(mirror.paths(None)['script'])}"),
+                                       ("[Service]\n", "could not be read")):
+                        with open(f, "w") as fh:
+                            fh.write(text)
+                        for cmd in (["setup", "--linger"], ["setup", "--dry-run"], ["uninstall"]):
+                            rc, out = quiet(mirror.main, cmd)
+                            if text == "[Service]\n" and mirror.system()[0] == "darwin":
+                                # M150/M152: not a property list, so the tool's own reader could not read it either:
+                                # the step is the move, never "read that file"; uninstall, with launchd's answer for
+                                # the job unread too, is a Not now that names the same step (a reviewer's world C)
+                                self.assertNotIn("read that file", out)
+                                self.assertIn(f"out of {os.path.dirname(f)}", out)
+                                if cmd[0] == "uninstall":
+                                    self.assertEqual(rc, 3, (cmd, out))
+                                    self.assertIn("Nothing was removed and nothing was taken off.", out)
+                                    self.assertEqual(fread(f), text)
+                                    continue
+                            if text == "[Service]\n" and mirror.system()[0] != "darwin":
+                                # M153 (G9.17): on Linux the unit opens and systemd shows no start line: it runs
+                                # nothing, so it is no other install; the file is not as the skill wrote it, so never written over:
+                                # setup stops with the move, uninstall names it, leaves it, and goes to its end
+                                self.assertNotIn("read that file", out)
+                                self.assertIn("not as the skill wrote it", out)
+                                self.assertEqual(fread(f), text)
+                                if cmd[0] == "uninstall":
+                                    self.assertEqual(rc, 0, (cmd, out))
+                                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you "
+                                                                         "look at it."), out)
+                                else:
+                                    self.assertEqual(rc, 2, (cmd, out))
+                                    self.assertIn("move it out of that folder", out)
+                                    self.assertIn("Nothing was changed.", out)
+                                continue
+                            self.assertEqual(rc, 2, (cmd, out))
+                            self.assertIn("Nothing was changed.", out)
+                            self.assertIn(want, out)
+                            self.assertEqual(fread(f), text)
+                            self.assertFalse(os.path.exists(p["data"]), "nothing made")
+                    # The control: the service of this home's own copy, as the skill wrote it, is no reason to stop.
+                    with open(f, "w") as fh:
+                        fh.write(service_text(os.environ["WSM_HOME"]))
+                    mirror.claim(f)                                       # what setup records when it writes it
+                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                    self.assertNotIn("uses another home", out)
+                    self.assertEqual(rc, 0, out)
+                    # Rule 23: the same file changed since (by the person, or by something else) is not written over by
+                    # setup, nor removed by uninstall: it is named and left. Setup stops there; uninstall goes to its end
+                    # (rule 8: a person who wants to leave is never refused because of the state of their own files).
+                    with open(f, "a") as fh:     # M150: a change that stays a well-formed property list on a Mac
+                        fh.write("<!-- the person's own line -->\n" if mirror.system()[0] == "darwin" else
+                                 "# the person's own line\n")
+                    changed = fread(f)
+                    for cmd in (["setup", "--dry-run"], ["uninstall"]):
+                        rc, out = quiet(mirror.main, cmd)
+                        if cmd[0] == "setup":
+                            self.assertNotEqual(rc, 0, (cmd, out))
+                        else:
+                            self.assertEqual(rc, 0, (cmd, out))
+                            self.assertIn("It is switched off; look at it, and keep or delete it as you choose.", out)
+                            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+                        self.assertIn("not as the skill wrote it", out)
+                        self.assertIn(f, out)
+                        self.assertEqual(fread(f), changed)
+                        self.assertNotIn("Kept: nothing", out)
+                    os.remove(f)
+                    # Rule 28: a folder of the skill's that other accounts can write in, or that another account owns, is
+                    # refused before anything is written there.
+                    os.makedirs(p["data"], exist_ok=True)
+                    mode = os.stat(p["data"]).st_mode
+                    try:
+                        os.chmod(p["data"], 0o777)
+                        rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                        self.assertEqual(rc, 2, out)
+                        self.assertIn(f"Stopped: {p['data']} is not yours alone (other accounts can write in it)", out)
+                    finally:
+                        os.chmod(p["data"], mode & 0o777)
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
         # Rule 28: whatever umask the tool is started with (000 in some containers and job runners), it makes
         # nothing other accounts can write, so its own next run never refuses a folder it made itself.
         def everything(h):
@@ -3772,9 +9508,16 @@ class G9(unittest.TestCase):
                         write(f, "s3cret\n")
                     finally:
                         os.fdopen = real_fdopen
-                    self.assertEqual(opened, [0o600])
+                    # the file's own write first; the record's note of it after, where the record gains an entry
+                    # (M161: put_whole too), also 0600
+                    self.assertIn(opened, ([0o600], [0o600, 0o600]))
                     self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
-                    self.assertFalse(os.path.exists(f + ".tmp"))
+                    # M161: this write's own temporary name; the earlier run's file is never written into, and no
+                    # temporary file of this write's is left
+                    self.assertEqual(fread(f + ".tmp"), "left by an earlier run\n")
+                    self.assertEqual([x for x in os.listdir(os.path.dirname(f)) if x.startswith("a-secret.")],
+                                     ["a-secret.tmp"])
+                    os.remove(f + ".tmp")
                     os.remove(f)
             finally:
                 os.umask(saved)
@@ -3984,6 +9727,649 @@ class G9(unittest.TestCase):
                 self.assertEqual([x for x in lines if x.startswith(theirs + " ") and "chmod" in x], [], uid)
             os.chmod(theirs, 0o755)
 
+    def test_G9_15_a_launch_agent_file_that_cannot_be_read_never_ends_a_command_in_a_traceback(self):
+        """M150 (G9.15), the family's rule 6: a launch agent file at the skill's path that is not a well-formed
+        property list (cut short, or changed by hand) ended setup and uninstall in a traceback (seen on the suite's
+        Mac legs and in a stand-in trial). The one reader answers each planted form "could not be read", with where
+        the read stopped and never a byte of the file; with launchd holding no job, setup stops with nothing changed
+        and the one step a person can take, which is taken here; uninstall names the file, leaves it byte for byte
+        and goes on, removing only what it can show to be this home's (each world planted); status gives one
+        problem line. The Mac's road runs on every leg, the system stood in for."""
+        mark = "zq-planted-bytes-7c1e"                         # a byte of the file must never be said
+        saved, rel = mirror.system, mirror.release_check
+        door = doors_the_hosts_way(saved, always=True)
+        mirror.system = lambda: ("darwin", "arm64")
+        mirror.read_door = lambda p, port: ("none", "no program listens on it")
+        mirror.release_check = lambda st, force=False: []
+        try:
+            with Home() as h:
+                p = mirror.paths()
+                whole = mirror.plist_text(p).replace(mirror.LAUNCHD_LABEL, mirror.LAUNCHD_LABEL + "." + mark, 1)
+                whole = whole.encode("utf-8")
+                binary = plistlib.dumps({"Label": mark, "ProgramArguments": ["python3", mark]},
+                                        fmt=plistlib.FMT_BINARY)
+                forms = [
+                    ("0 bytes", b""),
+                    ("cut short in its head", whole[:len(whole) // 5]),
+                    ("cut short in its arguments", whole[:whole.index(b"<array>") + 20]),
+                    ("cut short at its end", whole[:-4]),
+                    ("an unescaped ampersand", whole.replace(mark.encode(), mark.encode() + b" & more", 1)),
+                    ("not XML", f"[Service]\nExecStart=/bin/true {mark}\n".encode()),
+                    ("a binary list's header cut short", binary[:12]),
+                    ("a top that is an array", plistlib.dumps([mark])),
+                    ("ProgramArguments as a word", plistlib.dumps({"Label": mark, "ProgramArguments": "python3"})),
+                    ("an argument that is a number", plistlib.dumps({"Label": mark,
+                                                                     "ProgramArguments": ["python3", 3]})),
+                ]
+            # The commands, each planted form at the skill's own path, launchd holding no job of either label.
+            for name, data in forms:
+                with Home() as h, self.subTest(form=name):
+                    p = mirror.paths()
+                    la = os.path.dirname(p["plist"])
+                    os.makedirs(la)
+                    h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                    with open(p["plist"], "wb") as fh:
+                        fh.write(data)
+                    for cmd in (["setup", "--dry-run"], ["setup"]):
+                        rc, out = quiet(mirror.main, cmd)
+                        self.assertEqual(rc, 2, (cmd, out))
+                        self.assertIn(f"a launch agent file at the skill's path ({p['plist']}), and it could not be "
+                                      "read: ", out)
+                        self.assertIn("cannot tell whose it is", out)
+                        self.assertIn("Nothing was changed.", out)
+                        self.assertIn(f"The one next step: move that file out of {la}", out)
+                        self.assertNotIn(mark, out)
+                        self.assertEqual(fread_bytes(p["plist"]), data)
+                        self.assertEqual(sorted(os.listdir(la)), [os.path.basename(p["plist"])])
+                        self.assertFalse(os.path.exists(p["data"]), "nothing made")
+                    # the one step, taken as printed: the file moved out of that folder, setup no longer stops on it
+                    os.rename(p["plist"], os.path.join(h.tmp, "kept.plist"))
+                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                    self.assertNotIn("could not be read", out)
+                    self.assertEqual(rc, 0, out)
+                    os.rename(os.path.join(h.tmp, "kept.plist"), p["plist"])
+                    # uninstall: named, left byte for byte, and it goes on to its end (rule 8)
+                    n = len(h.calls)
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn(f"Not taken, and left byte for byte: {p['plist']}. It could not be read: ", out)
+                    self.assertIn(f"It is still in {la}, the folder launchd reads at a login", out)
+                    self.assertNotIn(mark, out)
+                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+                    self.assertEqual(fread_bytes(p["plist"]), data)
+                    self.assertFalse([c for c in h.calls[n:] if c[:2] == ["launchctl", "bootout"]], out)
+            # The worlds for the limit: the forge's file cannot be read, and the sync's file
+            # is (i) this home's own bytes, (ii) another home's, (iii) cannot be read either. Setup changes nothing in
+            # any; uninstall removes the sync's file only when it is this home's own, and takes off a loaded job only
+            # when launchd shows it running this home's copy.
+            for world in ("own", "another home's", "unreadable"):
+                with Home() as h, self.subTest(world=world):
+                    p = mirror.paths()
+                    la = os.path.dirname(p["plist"])
+                    os.makedirs(la)
+                    sp = os.path.join(la, mirror.SYNC_LABEL + ".plist")
+                    if world == "own":                             # written by the tool, so recorded as its own
+                        mirror.write_file(sp, mirror.sync_plist_text(p, 15))
+                    else:                                          # put there by something else
+                        with open(sp, "w") as fh:
+                            fh.write(mirror.sync_plist_text(mirror.paths(os.path.join(h.tmp, "other")), 15)
+                                     if world == "another home's" else "<plist><dict>")
+                    with open(p["plist"], "wb") as fh:
+                        fh.write(forms[4][1])
+                    planted = {x: fread_bytes(x) for x in (p["plist"], sp)}
+                    h.gone |= {mirror.LAUNCHD_LABEL}               # launchd holds no forge job; the sync's as below
+                    if world == "unreadable":
+                        h.gone |= {mirror.SYNC_LABEL}
+                    rc, out = quiet(mirror.main, ["setup"])
+                    self.assertEqual(rc, 2, out)
+                    self.assertEqual({x: fread_bytes(x) for x in planted}, planted)
+                    n = len(h.calls)
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 0, out)
+                    offs = [c for c in h.calls[n:] if c[:2] == ["launchctl", "bootout"]]
+                    self.assertEqual(fread_bytes(p["plist"]), planted[p["plist"]])
+                    if world == "own":                             # its loaded job runs this home's copy: taken off
+                        self.assertFalse(os.path.exists(sp), out)
+                        self.assertEqual(offs, [["launchctl", "bootout", f"gui/{os.getuid()}/{mirror.SYNC_LABEL}"]])
+                    else:
+                        self.assertEqual(fread_bytes(sp), planted[sp], out)
+                        self.assertEqual(offs, [], out)
+                        self.assertIn(sp, out)
+                        if world == "another home's":
+                            self.assertIn("which runs another copy than this home's", out)
+                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."), out)
+            # A reviewer's world C (11-26): under the limit, a job launchd could not answer for (no arguments
+            # block, a code neither 0 nor 113, a timeout) is "could not be read": never "loaded" and left while the
+            # rest goes. Uninstall is a Not now: nothing taken off, nothing removed (this home's installed copy
+            # stays), exit 3, and the step that ends it, which is taken here.
+            with Home() as h:
+                p = mirror.paths()
+                la = os.path.dirname(p["plist"])
+                os.makedirs(la)
+                sp = os.path.join(la, mirror.SYNC_LABEL + ".plist")
+                mirror.write_file(sp, mirror.sync_plist_text(p, 15))
+                os.makedirs(os.path.dirname(p["script"]), exist_ok=True)
+                mirror.write_file(p["script"], fread(SCRIPT))
+                with open(p["plist"], "wb") as fh:
+                    fh.write(forms[4][1])
+                h.gone |= {mirror.LAUNCHD_LABEL}
+                h.launchd_args = {mirror.SYNC_LABEL: None}
+                planted = {x: fread_bytes(x) for x in (p["plist"], sp, p["script"])}
+                n = len(h.calls)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertIn("\nNot now: whether launchd holds the sync's job", out)
+                self.assertIn("Nothing was removed and nothing was taken off.", out)
+                self.assertIn(f"The one next step: move {p['plist']} out of {la}", out)
+                self.assertNotIn("loaded in launchd", out)
+                self.assertNotIn(mark, out)
+                self.assertEqual({x: fread_bytes(x) for x in planted}, planted)
+                self.assertFalse([c for c in h.calls[n:] if c[:2] == ["launchctl", "bootout"]], out)
+                os.rename(p["plist"], os.path.join(h.tmp, "kept.plist"))      # the step, as printed
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("Not now", out)
+            # status: the same reader, one problem line, no traceback
+            with Home() as h:
+                p = mirror.paths()
+                os.makedirs(os.path.dirname(p["plist"]))
+                for d in (p["data"], p["conf"]):
+                    os.makedirs(d, mode=0o700, exist_ok=True)
+                mirror.save_state(p, {"port": 1})
+                with open(p["mirror_key"], "w") as fh:
+                    fh.write("5" * 40 + "\n")           # made up, in the form the forge gives (M156)
+                with open(p["plist"], "wb") as fh:
+                    fh.write(forms[4][1])
+                h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                mirror.DOOR_SEEN.clear()
+                rc, out = status()
+                said = [x for x in out.split("\n") if p["plist"] in x]
+                self.assertEqual(len(said), 1, out)
+                self.assertTrue(said[0].startswith(f"problem: the forge's launch agent file {p['plist']} could not be "
+                                                   "read: it is not a well-formed property list (the read stopped at "
+                                                   "line "), said[0])
+                self.assertIn("move that file out of", said[0])
+                self.assertNotIn(mark, out)
+                self.assertEqual(fread_bytes(p["plist"]), forms[4][1])
+            # The one reader, each form alone: "could not be read", where it stopped, never a byte of the file
+            with Home() as h:
+                p = mirror.paths()
+                f = os.path.join(h.tmp, "planted.plist")
+                for name, data in forms:
+                    with open(f, "wb") as fh:
+                        fh.write(data)
+                    answer, why = mirror.plist_job_args(f)
+                    self.assertEqual(answer, "could not be read", (name, why))
+                    self.assertNotIn(mark, why, name)
+                    if name == "an unescaped ampersand":
+                        self.assertTrue(why.startswith("it is not a well-formed property list (the read stopped at "
+                                                       "line "), why)
+                self.assertEqual(mirror.plist_job_args(os.path.join(h.tmp, "nothing.plist")), ("not there", None))
+                os.remove(f)
+                os.makedirs(f)                                     # a file that cannot be opened: a folder by its name
+                self.assertEqual(mirror.plist_job_args(f), ("could not be read", "it could not be opened "
+                                                            "(IsADirectoryError)"))
+                os.rmdir(f)
+                if os.geteuid() != 0:
+                    with open(f, "wb") as fh:
+                        fh.write(whole)
+                    os.chmod(f, 0)
+                    try:
+                        self.assertEqual(mirror.plist_job_args(f), ("could not be read", "it could not be opened "
+                                                                    "(PermissionError)"))
+                    finally:
+                        os.chmod(f, 0o600)
+                with open(f, "wb") as fh:                          # the control: the file as setup writes it, read
+                    fh.write(mirror.plist_text(p).encode("utf-8"))
+                self.assertEqual(mirror.plist_job_args(f), ("read", mirror.forge_argv(p)))
+        finally:
+            mirror.system, mirror.release_check = saved, rel
+            mirror.read_door, mirror.door_floor = door
+
+    def test_G9_15_a_service_file_that_cannot_be_opened_is_never_this_homes_and_never_a_traceback(self):
+        """M150 (G9.15), a reviewer's trial (11-26: 16 tracebacks of 16 in a made home): a service file of mode 000
+        ended setup --dry-run and uninstall in a PermissionError, on both roads, the forge's file and the sync's, this
+        home's own bytes or not, uninstall's after the jobs were told off and before any of its last lines. "Is this
+        service file as this home wrote it" has three answers at every reader; the third is never this home's (never
+        written over, never removed) and never "not there": setup and its dry run stop with nothing changed, the
+        file, the error's class and a step, which is taken here; uninstall names it, leaves it byte for byte and goes
+        to its end, saying what it switched off; status gives one problem line. Both roads, the system stood in for;
+        the service manager holding this home's jobs (loaded before the file became unreadable) or holding none."""
+        saved, rel = mirror.system, mirror.release_check
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        real_sha = mirror.sha256_of
+        mirror.release_check = lambda st, force=False: []
+        try:
+            for name in (("linux", "x86_64"), ("darwin", "arm64")):
+                mirror.system = lambda name=name: name
+                mac = name[0] == "darwin"
+                for which in range(3 if not mac else 2):
+                    for held in ("held", "none"):
+                        for own in (True, False):
+                            with Home() as h, self.subTest(system=name[0], file=which, manager=held, own=own):
+                                p = mirror.paths()
+                                files = mirror.service_files(p)
+                                texts = ([mirror.plist_text(p), mirror.sync_plist_text(p, 15)] if mac else
+                                         [mirror.unit_text(p), mirror.sync_unit_text(p), mirror.sync_timer_text(15)])
+                                for x, text in zip(files, texts):           # as setup writes them, and records them
+                                    mirror.write_file(x, text)
+                                for d in (p["data"], p["conf"]):
+                                    os.makedirs(d, mode=0o700, exist_ok=True)
+                                mirror.save_state(p, {"port": 1})
+                                mirror.write_file(p["mirror_key"], "5" * 40 + "\n", 0o600)
+                                f = files[which]
+                                if not own:                                 # bytes this home did not write
+                                    os.remove(f)
+                                    with open(f, "w") as fh:
+                                        fh.write(texts[which] + ("<!-- another -->\n" if mac else "# another\n"))
+                                whole = fread_bytes(f)
+                                if mac:
+                                    if held == "held":                      # loaded at setup, before the chmod
+                                        h.launchd_args = {mirror.LAUNCHD_LABEL: (mirror.forge_argv(p), {}),
+                                                          mirror.SYNC_LABEL: (mirror.sync_argv(p), {})}
+                                    else:
+                                        h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
+                                elif held == "held":
+                                    # loaded at setup, before the chmod: systemd holds the unit as it read it, its own
+                                    # start line too, until a daemon-reload (RECORDED, systemd 255,
+                                    # log sha256 85971716290afec1); each unit shows its own start line
+                                    unit = (os.path.basename(f) if not f.endswith(".timer") else
+                                            mirror.SYNC_UNIT + ".service")
+                                    h.bus_loaded = {unit: whole.decode() if not f.endswith(".timer")
+                                                    else fread(files[1])}
+                                os.chmod(f, 0)
+                                if os.access(f, os.R_OK):                   # root reads mode 000: the read's fault stood in
+                                    def sha(path, real=real_sha, f=f):
+                                        if path == f:
+                                            raise PermissionError(13, "Permission denied")
+                                        return real(path)
+                                    mirror.sha256_of = sha
+                                try:
+                                    for cmd in (["setup", "--dry-run"], ["setup", "--linger"]):
+                                        rc, out = quiet(mirror.main, cmd)
+                                        self.assertEqual(rc, 2, (cmd, out))
+                                        self.assertIn(f, out)
+                                        self.assertIn("could not be read: it could not be opened (PermissionError)", out)
+                                        self.assertIn("Nothing was changed.", out)
+                                        self.assertIn(f"out of {os.path.dirname(f)}", out)
+                                        self.assertNotIn("read that file", out)
+                                        self.assertEqual(os.stat(f).st_mode & 0o777, 0)
+                                    # the step, as printed: the file moved out of that folder, setup no longer stops on it
+                                    os.rename(f, os.path.join(h.tmp, "kept"))
+                                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                                    self.assertNotIn("could not be read", out)
+                                    self.assertNotIn("Traceback", out)
+                                    os.rename(os.path.join(h.tmp, "kept"), f)
+                                    rc, out = status()
+                                    said = [x for x in out.split("\n") if f in x]
+                                    self.assertEqual(len(said), 1, out)
+                                    self.assertTrue(said[0].startswith("problem: "), said[0])
+                                    self.assertIn("could not be opened (PermissionError)", said[0])
+                                    self.assertIn(f"move that file out of {os.path.dirname(f)}", said[0])
+                                    n = len(h.calls)
+                                    rc, out = quiet(mirror.main, ["uninstall"])
+                                    self.assertEqual(rc, 0, out)
+                                    # M163 (G9.18): on Linux the forge's unit that could not be read takes the limit
+                                    # road from the file's own read, whatever systemd holds (the maintainer's ruling, 11-26)
+                                    self.assertIn(f"{f} (it could not be read: it could not be opened (PermissionError)"
+                                                  if (which or (held == "held" and mac)) else
+                                                  f"Not taken, and left byte for "
+                                                  f"byte: {f}. It could not be read: it could not be opened "
+                                                  "(PermissionError)", out)
+                                    self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look "
+                                                                         "at it."), out)
+                                    self.assertTrue(os.path.lexists(f), out)
+                                    self.assertEqual(os.stat(f).st_mode & 0o777, 0)
+                                    for x in files:                        # the others: this home's, so taken
+                                        if x != f:
+                                            self.assertFalse(os.path.lexists(x), (x, out))
+                                    offs = [c for c in h.calls[n:] if c[:2] in (["launchctl", "bootout"],
+                                                                                ["systemctl", "--user"])]
+                                    if held == "none" and (mac or which == 0):
+                                        # M163 (G9.18): with the forge's unit unread, Linux switches off only what
+                                        # systemd shows is this home's, as the Mac's road does
+                                        if which == 0:
+                                            self.assertNotIn("Switched off first, and read off before anything was "
+                                                             "removed: the forge's", out)
+                                    else:
+                                        self.assertIn("Switched off first, and read off before anything was "
+                                                      "removed: the forge's", out)
+                                        self.assertTrue(offs, out)
+                                finally:
+                                    mirror.sha256_of = real_sha
+                                    os.chmod(f, 0o600)
+                                self.assertEqual(fread_bytes(f), whole)
+        finally:
+            mirror.system, mirror.release_check = saved, rel
+            mirror.read_door, mirror.door_floor = saved_doors
+            mirror.sha256_of = real_sha
+
+    def test_G9_16_no_login_at_the_macs_screen_never_keeps_a_person_from_leaving(self):
+        """M152 (G9.16; seen 2026-11-26 in a stand-in trial in a made home, not on a Mac): with no login at the Mac's
+        screen, launchctl answers 125 for the account's domain and for each job (seen 2026-11-24 over ssh on macOS
+        13.7.8). G9.12's read of the forge's job took that for "could not be read", so uninstall stopped (exit 2) with
+        "read that file, and run uninstall with the copy it names": over this home's own file with one line a person
+        added (D), every time; over a file that is not well-formed (B), naming a file the tool itself could not read.
+        That answer is read as launchd_off reads it: nothing of this account is loaded, and the file's own words decide.
+        Each world with and without a login at the screen."""
+        saved = mirror.system
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        mirror.system = lambda: ("darwin", "arm64")
+        bad = None
+        try:
+            for screen in (True, False):
+                for world in ("D: this home's file, a line added", "B: not well-formed"):
+                    with Home() as h, self.subTest(screen=screen, world=world):
+                        h.mac_session = screen
+                        p = mirror.paths()
+                        la = os.path.dirname(p["plist"])
+                        sp = os.path.join(la, mirror.SYNC_LABEL + ".plist")
+                        mirror.write_file(p["plist"], mirror.plist_text(p))
+                        mirror.write_file(sp, mirror.sync_plist_text(p, 15))
+                        if world.startswith("D"):
+                            with open(p["plist"], "a") as fh:
+                                fh.write("<!-- the person's own line -->\n")
+                        else:
+                            text = mirror.plist_text(p)
+                            bad = text.replace("</string>", " & more</string>", 1)
+                            with open(p["plist"], "w") as fh:
+                                fh.write(bad)
+                        if screen:                                 # logged in: launchd holds no forge job now
+                            h.gone |= {mirror.LAUNCHD_LABEL}
+                        planted = fread_bytes(p["plist"])
+                        rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                        self.assertEqual(rc, 2, out)
+                        self.assertNotIn("read that file", out)
+                        self.assertIn(f"out of {la}" if world.startswith("B") else "move it out of that folder", out)
+                        for _ in range(2):                         # twice running: never the same stop again
+                            rc, out = quiet(mirror.main, ["uninstall"])
+                            self.assertEqual(rc, 0, out)
+                            self.assertNotIn("read that file", out)
+                            self.assertIn(p["plist"], out)
+                            self.assertEqual(fread_bytes(p["plist"]), planted)
+                            self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at "
+                                                                 "it."), out)
+                            if world.startswith("D"):
+                                self.assertIn("not as the skill wrote it", out)
+                            else:
+                                self.assertIn(f"Not taken, and left byte for byte: {p['plist']}. It could not be "
+                                              "read: it is not a well-formed property list", out)
+                        self.assertFalse(os.path.exists(sp), out)
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
+
+    def test_G9_17_a_unit_that_names_no_start_line_never_keeps_a_person_from_leaving(self):
+        """M153 (G9.17; seen 2026-11-26 in a stand-in trial in a made home, systemd stood in for): on Linux, the
+        forge's unit at the skill's path opens but names no start line: the line [Service] alone (L1), a unit the
+        person masked, a link to /dev/null as systemctl mask leaves it (L2), a file the person emptied (L3). Setup's
+        dry run and uninstall stopped (exit 2) with "read that file, and run uninstall with the copy it names": the
+        file names no copy, so the step led back to the stop. A unit systemd was read for that shows no start line
+        runs nothing, so it is no other install. SEEN on systemd 255 (a stock Ubuntu 24.04 guest,
+        2026-11-26), a masked unit: setup's dry run stops with the step to move it out, and uninstall goes to its end.
+        RECORDED there: disable --now answers "Unit <its file> is masked, ignoring.", code 0, stops it, and
+        leaves its link from setup, which uninstall now names with the rm line, taken as printed. L4 (this home's own
+        unit with one comment line) is the control."""
+        saved = mirror.system
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        mirror.system = lambda: ("linux", "x86_64")
+        try:
+            for world in ("L1 [Service]", "L2 masked", "L3 emptied", "L4 a comment line"):
+                with Home() as h, self.subTest(world=world):
+                    p = mirror.paths()
+                    files = mirror.service_files(p)
+                    for f, text in zip(files, [mirror.unit_text(p), mirror.sync_unit_text(p),
+                                               mirror.sync_timer_text(15)]):
+                        mirror.write_file(f, text)           # as setup writes them, and records them
+                    os.makedirs(os.path.dirname(p["script"]), exist_ok=True)
+                    mirror.write_file(p["script"], "# the installed copy\n")
+                    forge = files[0]
+                    text = mirror.unit_text(p)
+                    os.remove(forge)
+                    if world.startswith("L2"):
+                        os.symlink("/dev/null", forge)
+                    else:
+                        with open(forge, "w") as fh:
+                            fh.write({"L1": "[Service]\n", "L3": "", "L4": text + "# the person's own line\n"}[world[:2]])
+                    planted = os.readlink(forge) if world.startswith("L2") else fread_bytes(forge)
+                    link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
+                    tlink = os.path.join(os.path.dirname(forge), "timers.target.wants", os.path.basename(files[2]))
+                    if world.startswith("L2"):
+                        # seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26: the links setup's enable made stay while the
+                        # person masks the unit; disable --now answers "masked, ignoring" (code 0) and leaves the
+                        # forge's link, which uninstall did not name
+                        for ln, to in ((link, forge), (tlink, files[2])):
+                            os.makedirs(os.path.dirname(ln), exist_ok=True)
+                            os.symlink(to, ln)
+                        h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                    rc, out = quiet(mirror.main, ["setup", "--dry-run"])
+                    self.assertEqual(rc, 2, out)
+                    self.assertNotIn("read that file", out)
+                    self.assertIn("move it out of that folder", out)
+                    for i in range(2):                         # twice running: never the same stop again
+                        rc, out = quiet(mirror.main, ["uninstall"])
+                        self.assertEqual(rc, 0, out)
+                        if world.startswith("L2") and i == 0:
+                            said = [x for x in out.split("\n") if x.startswith(f"Not taken: {link}")]
+                            self.assertEqual(len(said), 1, out)
+                            self.assertIn(f"(it answered: Unit {forge} is masked, ignoring.)", said[0])
+                            self.assertTrue(said[0].endswith(f"rm {shlex.quote(link)}"), said[0])
+                            self.assertFalse(os.path.lexists(tlink), out)      # the timer's link: taken
+                            self.assertEqual(h.units_up, set(), out)
+                            # the line exactly as printed, run as a person pastes it into a shell
+                            ran = subprocess.run(said[0].rsplit("when you want: ", 1)[1], shell=True,
+                                                 capture_output=True, text=True)
+                            self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+                            self.assertFalse(os.path.lexists(link))
+                        else:
+                            self.assertNotIn("default.target.wants", out)
+                        self.assertNotIn("read that file", out)
+                        self.assertIn(forge, out)
+                        self.assertIn("not as the skill wrote it", out)
+                        self.assertEqual(os.readlink(forge) if world.startswith("L2") else fread_bytes(forge), planted)
+                        self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look at it."),
+                                        out)
+                    self.assertFalse(os.path.exists(files[1]), out)   # the sync's own unit, this home's: taken
+                    self.assertFalse(os.path.exists(p["script"]), out)
+        finally:
+            mirror.system = saved
+            mirror.read_door, mirror.door_floor = saved_doors
+
+    def test_G9_18_under_the_limit_uninstall_switches_off_only_what_systemd_shows_is_this_homes(self):
+        """M163 (G9.18; seen 2026-11-26 in a stand-in trial in a made home, systemd stood in for): on Linux, while the
+        forge's unit at the skill's path could not be opened, uninstall told off every unit, the sync's timer of
+        another home with them, without showing any to be this home's. Now, as the Mac's road does: a unit is told
+        off only when systemd's own start line for it names this home's copy. Q: the sync's service names another
+        home's copy, its timer running: named and left running, its two files byte for byte. P (the control): it
+        names this home's copy: told off. U: systemd could not answer: "Not now", exit 3, nothing told off, and the
+        step taken as printed (the forge's unit moved out of that folder) lets uninstall go on. R, RECORDED on systemd
+        255 (a stock Ubuntu 24.04 guest, 2026-11-26): systemd holds a unit loaded before its file became mode 000,
+        its start line too, and refuses to disable it ("Unit file ... does not exist.", code 1), stopping nothing in
+        that call; uninstall then told the same units off again each alone, stopped the refused one, read every one
+        stopped and went on, naming the link systemctl did not take off. What systemd holds for a unit of mode 000 it
+        has not loaded is NOT SEEN BY US (the stand-in answers no start line)."""
+        saved, rel = mirror.system, mirror.release_check
+        saved_doors = doors_the_hosts_way(saved, always=True)
+        mirror.system, mirror.release_check = (lambda: ("linux", "x86_64")), (lambda st, force=False: [])
+        other = "/srv/another-home"
+        try:
+            for world in ("Q another home's sync", "P this home's sync", "U systemd does not answer",
+                          "R systemd holds the forge as loaded", "M the forge unreadable, the timer masked",
+                          "O systemd holds the forge as loaded, another home's sync",
+                          "Q2 another home's sync, the forge not loaded and still running"):
+                # O and Q2 as on the guest: setup switched lingering on, and loginctl reads it on (M186:
+                # lingering read off, and not switched off here, is not said)
+                with Home(linger="yes" if world.startswith(("O", "Q2")) else "no") as h, self.subTest(world=world):
+                    p = mirror.paths()
+                    forge, sync_unit, timer = mirror.service_files(p)
+                    text = mirror.sync_unit_text(p)
+                    if world.startswith(("Q", "O")):
+                        self.assertIn(os.environ["WSM_HOME"], text)
+                        text = text.replace(os.environ["WSM_HOME"], other)
+                    os.makedirs(os.path.dirname(forge), exist_ok=True)
+                    if world.startswith("R"):    # as on the guest (2026-11-26): the sync's two files are setup's own
+                        mirror.write_file(sync_unit, text)
+                        mirror.write_file(timer, mirror.sync_timer_text(15))
+                    else:
+                        with open(sync_unit, "w") as fh:
+                            fh.write(text)
+                        with open(timer, "w") as fh:
+                            fh.write(mirror.sync_timer_text(15))
+                    mirror.write_file(forge, mirror.unit_text(p))
+                    os.makedirs(os.path.dirname(p["script"]), exist_ok=True)
+                    mirror.write_file(p["script"], "# the installed copy\n")
+                    before = {f: fread_bytes(f) for f in (sync_unit, timer)}
+                    os.chmod(forge, 0)
+                    real_sum = mirror.sha256_of
+                    if os.geteuid() == 0:            # root reads mode 000: there (only) the read's fault is stood in
+                        mirror.sha256_of = lambda f, _r=real_sum: (_ for _ in ()).throw(PermissionError(13, "denied")) \
+                            if f == forge else _r(f)
+                    h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                    if world.startswith(("Q ", "P")):
+                        # the forge's unit of mode 000 that systemd has not loaded and that runs nothing, as a stock
+                        # Ubuntu 24.04 guest read it (2026-11-26): not found, inactive
+                        h.units_up.discard(mirror.SERVICE)
+                    if world.startswith(("O", "Q2")):
+                        mirror.save_state(p, {"linger_by_setup": True})
+                    if world.startswith("U"):
+                        h.bus_answer = (1, "")
+                    link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
+                    if world.startswith(("R", "O")):
+                        # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): the
+                        # unit loaded before its file became mode 000 is held with its start line; disable refuses
+                        # the whole call ("Unit file ... does not exist.", code 1) and stops nothing; stop works
+                        h.bus_loaded[os.path.basename(forge)] = mirror.unit_text(p)
+                        os.makedirs(os.path.dirname(link), exist_ok=True)
+                        os.symlink(forge, link)
+                    tlink = os.path.join(os.path.dirname(forge), "timers.target.wants", os.path.basename(timer))
+                    if world.startswith("M"):
+                        # found in a read of the code: the joint call refused (the forge's file at mode 000), then the
+                        # timer's own call ends 0, masked (as recorded on systemd 255), and leaves its link
+                        h.bus_loaded[os.path.basename(forge)] = mirror.unit_text(p)
+                        os.remove(timer)
+                        os.symlink("/dev/null", timer)
+                        os.makedirs(os.path.dirname(tlink), exist_ok=True)
+                        os.symlink(timer, tlink)
+                    try:
+                        n = len(h.calls)
+                        rc, out = quiet(mirror.main, ["uninstall"])
+                        offs = [c for c in h.calls[n:] if c[:2] == ["systemctl", "--user"] and
+                                any(v in c for v in ("disable", "stop", "kill"))]
+                        lingers = [c for c in h.calls[n:] if c[:2] == ["loginctl", "disable-linger"]]
+                        if world.startswith("Q2"):
+                            # SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): the forge's unit
+                            # not loaded (its file at mode 000, a daemon-reload after) and still active with one forge
+                            # process; uninstall said "so it runs nothing", took the program, the key and the script,
+                            # and switched lingering off. Now: "Not now", nothing told off or removed, and the step
+                            # as printed ends with the forge stopped.
+                            self.assertEqual(rc, 3, out)
+                            self.assertIn("Not now: systemd still has the forge's service "
+                                          f"({mirror.SERVICE}.service) active; systemd shows no start line for it, "
+                                          f"and {forge} could not be read either", out)
+                            self.assertNotIn("runs nothing", out)
+                            self.assertEqual((offs, lingers), ([], []), out)
+                            self.assertTrue(os.path.exists(p["script"]), out)
+                            self.assertIn(f"The one next step: move {forge} out of {os.path.dirname(forge)}", out)
+                            os.chmod(forge, 0o600)
+                            kept = os.path.join(h.tmp, "kept-by-the-person")
+                            os.makedirs(kept)
+                            os.rename(forge, os.path.join(kept, os.path.basename(forge)))   # the step, as printed
+                            again = out.rsplit("then run uninstall again: ", 1)[1].strip()
+                            self.assertEqual(again, mirror.own_command(p, "uninstall"))
+                            rc, out = quiet(mirror.main, ["uninstall"])
+                            self.assertEqual(rc, 0, out)
+                            self.assertNotIn(mirror.SERVICE, h.units_up, out)
+                            self.assertNotIn("Not now", out)
+                            continue
+                        if world.startswith("U"):
+                            self.assertEqual(rc, 3, out)
+                            self.assertIn("Not now", out)
+                            self.assertEqual(offs, [], out)
+                            self.assertIn(f"move {forge} out of {os.path.dirname(forge)}", out)
+                            self.assertTrue(os.path.exists(p["script"]), out)
+                            os.chmod(forge, 0o600)
+                            kept = os.path.join(h.tmp, "kept-by-the-person")
+                            os.makedirs(kept)
+                            os.rename(forge, os.path.join(kept, os.path.basename(forge)))   # the step, as printed
+                            h.bus_answer = None
+                            rc, out = quiet(mirror.main, ["uninstall"])
+                            self.assertEqual(rc, 0, out)
+                            continue
+                        self.assertEqual(rc, 0, out)
+                        timer_off = any(mirror.SYNC_UNIT + ".timer" in c for c in offs)
+                        if world.startswith("M") and os.geteuid() != 0:
+                            said = [x for x in out.split("\n") if x.startswith(f"Not taken: {tlink}")]
+                            self.assertEqual(len(said), 1, out)
+                            self.assertIn(f"(it answered: Unit {timer} is masked, ignoring.)", said[0])
+                        if world.startswith("R") and os.geteuid() != 0:
+                            self.assertNotIn("Not now", out)
+                            self.assertIn(["systemctl", "--user", "stop", mirror.SERVICE], offs)
+                            self.assertEqual(h.units_up & {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}, set(), out)
+                            self.assertIn("Switched off first, and read off before anything was removed: the forge's "
+                                          "service", out)
+                            said = [x for x in out.split("\n") if x.startswith(f"Not taken: {link}")]
+                            self.assertEqual(len(said), 1, out)
+                            self.assertIn("(it answered: Failed to disable unit: Unit file "
+                                          f"{os.path.basename(forge)} does not exist.)", said[0])
+                            self.assertTrue(said[0].endswith(f"rm {shlex.quote(link)}"), said[0])
+                            self.assertTrue(os.path.islink(link))
+                            # the line as printed, run as a person pastes it into a shell: the link goes, and a
+                            # second uninstall says nothing of it
+                            ran = subprocess.run(said[0].rsplit("when you want: ", 1)[1], shell=True,
+                                                 capture_output=True, text=True)
+                            self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+                            self.assertFalse(os.path.lexists(link))
+                            rc2, out2 = quiet(mirror.main, ["uninstall"])
+                            self.assertNotIn("default.target.wants", out2)
+                            # seen on a stock Ubuntu 24.04 guest, systemd 255, 2026-11-26: that second uninstall named the sync's two files
+                            # as left as they are, though the first had taken them; a file is named only where it is
+                            self.assertEqual(rc2, 0, out2)
+                            for f in (sync_unit, timer):
+                                self.assertFalse(os.path.lexists(f), out2)
+                                self.assertNotIn(f, out2)
+                            self.assertNotIn("the sync's service (", out2)
+                            # a path holding a backtick or a dollar-parenthesis gets no line to run
+                            for odd in ("a" + chr(96) + "b", "a$" + chr(40) + "b)"):
+                                bad = os.path.join(h.tmp, odd, "default.target.wants", os.path.basename(forge))
+                                words = mirror.link_left_line(bad, mirror.SERVICE, "said")
+                                self.assertNotIn("rm ", words)
+                                self.assertNotIn(chr(96), words)
+                                self.assertNotIn("$" + chr(40), words)
+                                self.assertIn("so no line is given", words)
+                        if world.startswith("O") and os.geteuid() != 0:
+                            # SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): systemd held the
+                            # forge loaded with this home's start line while its file was of mode 000, and uninstall
+                            # switched off the sync's service, which named another home's copy, and its timer, and
+                            # said "The mirror is off this computer". Now the forge alone is told off, the sync's two
+                            # units are left running and named, and lingering stays on for them.
+                            self.assertIn(["systemctl", "--user", "stop", mirror.SERVICE], offs)
+                            self.assertNotIn(mirror.SERVICE, h.units_up, out)
+                            self.assertIn("Lingering was switched on by setup, and is left on, because the sync's "
+                                          f"service ({mirror.SYNC_UNIT}.service) is left running, and would stop at "
+                                          "your logout without it. To switch it off yourself later: loginctl "
+                                          "disable-linger ", out)
+                            self.assertEqual((lingers, h.linger), ([], "yes"), out)
+                        if world.startswith("Q "):
+                            self.assertIn(f"the forge's service ({mirror.SERVICE}.service), for which systemd shows no "
+                                          "start line, so it runs nothing", out)
+                        if world.startswith(("Q", "O")):
+                            self.assertFalse(timer_off, (offs, out))
+                            self.assertIn(mirror.SYNC_UNIT + ".timer", h.units_up)
+                            self.assertIn("runs another copy than this home's", out)
+                            self.assertEqual({f: fread_bytes(f) for f in before}, before)
+                            self.assertNotIn("The mirror is off this computer", out)
+                        else:
+                            self.assertTrue(timer_off, (offs, out))
+                            self.assertNotIn(mirror.SYNC_UNIT + ".timer", h.units_up)
+                        self.assertFalse(os.path.exists(p["script"]), out)
+                    finally:
+                        mirror.sha256_of = real_sum
+                        if os.path.exists(forge):
+                            os.chmod(forge, 0o600)
+        finally:
+            mirror.system, mirror.release_check = saved, rel
+            mirror.read_door, mirror.door_floor = saved_doors
+
     def test_G9_1_a_forge_upgrade_backs_up_first_and_rolls_back_on_failure(self):
         if not real_gitea():
             if os.environ.get("WSM_REQUIRE_GITEA"):
@@ -4011,7 +10397,23 @@ class G9(unittest.TestCase):
             mirror.drop_lock(w.p)
             self.assertEqual(rc, 3, out)
             self.assertEqual(forge_version(w), "28.3.0")
+            kinds, real_read = [], mirror.read_door
+
+            def record(p, port):                 # G8.7, the owner's condition ii: each step's read of the door
+                try:
+                    k = real_read(p, port)
+                except mirror.DoorUnread as e:
+                    kinds.append("unread: " + str(e))
+                    raise
+                kinds.append(k[0])
+                return k
+            mirror.read_door = record
+            stack.callback(setattr, mirror, "read_door", real_read)
             rc, out = quiet(mirror.main, ["upgrade-forge"])
+            mirror.read_door = real_read
+            self.assertEqual(set(kinds) - {"mine", "none"}, set(), kinds)       # never "other" for our own forge
+            self.assertEqual((kinds[0], kinds[-1]), ("mine", "mine"), kinds)     # 28.3.0 before, 28.4.0 after
+            self.assertIn("none", kinds)                                          # stopped between
             self.assertIn("upgrade-forge: Gitea 28.3.0 to 28.4.0. First, a backup.", out)
             self.assertIn("The forge runs Gitea 28.4.0 now.", out)
             self.assertEqual(rc, 0, out)
@@ -4184,17 +10586,69 @@ class G9(unittest.TestCase):
             self.assertEqual([x for x in left if not x.startswith(p["data"] + os.sep)
                               and os.path.basename(x) != mirror.SUITE_MARKER], [],
                              "a file of the skill's is left that the census does not name as kept")
-            # A plugin: Claude Code's folder and entry are Claude Code's, with its own command where it was seen.
+            # A plugin: Claude Code's folder and entry are Claude Code's, with its own command where it was seen. They
+            # are named by Claude Code's own list (G9.14, the family's rule 29 (e)), never by a version folder.
             st = mirror.load_json(p["state"], {})
-            plug = os.path.join(w.home.tmp, "cc", "plugins", "cache", mirror.PLUGIN, mirror.PLUGIN, "0.1.0")
-            os.makedirs(os.path.join(plug, "scripts"))
-            st["setup_from"] = plug
+            reg = os.path.join(w.home.tmp, "cc", "plugins", "installed_plugins.json")
+            os.makedirs(os.path.dirname(reg))
+            st.pop("setup_from", None)
+            st["plugin_registry"], st["plugin_catalog"] = reg, "thewindstorm"
             mirror.save_state(p, st)
+            ours = {"scope": "user", "version": "0.1.0",
+                    "installPath": os.path.join(os.path.dirname(reg), "cache", "thewindstorm", mirror.PLUGIN, "0.1.0")}
+            whose = ("They are Claude Code's. Claude Code's own plugin uninstall takes this plugin off Claude Code's "
+                     "list at once; its folder in Claude Code's cache stays, and Claude Code's documentation says it "
+                     "removes that folder 14 days later. Nothing runs from them now."
+                     + (f" Its command for this plugin:\n      claude plugin uninstall {mirror.PLUGIN}@thewindstorm"
+                        if mirror.system()[0] != "darwin" else ""))
+            with open(reg, "w") as f:
+                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [ours]}}, f)
             out = quiet(mirror.main, ["uninstall"])[1]
-            self.assertIn(f"  {plug}: Claude Code's folder for this skill as a plugin, and its entry in Claude Code. They "
-                          "are Claude Code's; it removes both with its own plugin uninstall", out)
+            self.assertIn("\n  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose + "\n",
+                          out)
             if mirror.system()[0] != "darwin":
-                self.assertIn(f"claude plugin uninstall {mirror.PLUGIN}@{mirror.PLUGIN}. Nothing runs from them now.", out)
+                # The family's rule 31 (iv): the catalog's name is Claude Code's list's, not the tool's, so the one
+                # command that carries it is quoted for the shell, alone on its line.
+                with open(reg, "w") as f:
+                    json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@my catalog": [ours]}}, f)
+                out = quiet(mirror.main, ["uninstall"])[1]
+                self.assertIn(f"Its command for this plugin:\n      claude plugin uninstall '{mirror.PLUGIN}@my catalog'\n",
+                              out)
+            with open(reg, "w") as f:
+                f.write("{not a list")
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertIn("\n  Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
+                          f"still has them (its list of plugins, {reg}, could not be read). " + whose + "\n", out)
+            with open(reg, "w") as f:
+                json.dump({"version": 2, "plugins": {}}, f)
+            out = quiet(mirror.main, ["uninstall"])[1]
+            self.assertNotIn("Claude Code's folder for this skill as a plugin", out, "Claude Code's list names it nowhere")
+            # M104: a record an earlier build wrote keeps the plugin's version folder as setup_from (with or without
+            # the list's path beside it). It is read without error, the list and the catalog are read from that path,
+            # and the path itself is never said, there or gone.
+            ver = os.path.join(os.path.dirname(reg), "cache", "thewindstorm", mirror.PLUGIN, "0.0.9")
+            with open(reg, "w") as f:
+                json.dump({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [ours]}}, f)
+            for there in (True, False):
+                if there:
+                    os.makedirs(os.path.join(ver, "scripts"))
+                else:
+                    shutil.rmtree(ver)
+                for keep_list in (True, False):
+                    old_st = {k: v for k, v in st.items() if k not in ("plugin_registry", "plugin_catalog")}
+                    old_st["setup_from"] = ver
+                    if keep_list:
+                        old_st["plugin_registry"] = reg
+                    mirror.save_state(p, old_st)
+                    rc, out = quiet(mirror.main, ["uninstall"])
+                    self.assertEqual(rc, 0, out)
+                    self.assertNotIn(ver, out, f"a version folder said (there={there}, list kept={keep_list})")
+                    self.assertIn("\n  Claude Code's folder for this skill as a plugin, and its entry in Claude Code. " + whose
+                                  + "\n", out, f"there={there}, list kept={keep_list}")
+                    self.assertNotIn("the folder the skill was downloaded into (a copy", out)
+            st.pop("plugin_registry")
+            st.pop("plugin_catalog")
+            mirror.save_state(p, st)
             # A script run on its own (from a downloads folder, say) is named as that one file, never the folder
             # around it: a census must never call a person's home "the folder the skill was downloaded into".
             lone = os.path.join(w.home.tmp, "home", "Downloads", "mirror.py")
@@ -4205,13 +10659,17 @@ class G9(unittest.TestCase):
             os.makedirs(os.path.join(w.home.tmp, "home", "scripts"))
             self.assertEqual(mirror.downloaded_from(os.path.join(w.home.tmp, "home", "scripts", "mirror.py"))[0], "file")
             st = mirror.load_json(p["state"], {})
-            st.pop("setup_from")
+            st.pop("setup_from", None)
             st["setup_from_file"] = lone
             mirror.save_state(p, st)
             out = quiet(mirror.main, ["uninstall"])[1]
             self.assertIn(f"  {lone}: the copy of the script setup was run from. It is yours; delete it when you want.", out)
             self.assertNotIn("the folder the skill was downloaded into", out)
             # The record deleted with the copies: what was downloaded is still named, with no place to guess at.
+            # The forge is stopped first: the stand-in service manager does not stop it on uninstall's disable --now
+            # (systemd does), and a folder removed under a running forge races its writes (seen once in CI).
+            stop_forge(w.home)
+            self.assertEqual([pr.poll() is None for pr in w.home.procs if pr.poll() is None], [])
             shutil.rmtree(p["data"])
             out = quiet(mirror.main, ["uninstall"])[1]
             self.assertIn("The folder the skill was downloaded into, if it is still there (a copy of its repository, or "
@@ -4228,12 +10686,92 @@ class G9(unittest.TestCase):
                       "kept, unless the person asks for it in their own words in this conversation; even then, it is "
                       "their own command (`uninstall --delete-copies`, in a terminal window of their own).", never)
 
+    def test_G9_14_nothing_setup_writes_names_a_plugin_cache_version_folder(self):
+        """The family's rule 29 (a) and (e): Claude Code keeps an installed plugin in <its folder>/plugins/cache/
+        <catalog>/<plugin>/<version>/, makes a new folder at each update and removes the old one later. Setup run
+        from such a folder copies the script to the skill's own place and runs it from there: no unit, timer, job
+        file, setting or state value it writes names a path inside the version folder. The plugin is known by
+        Claude Code's own list (<its folder>/plugins/installed_plugins.json) and its name alone."""
+        cc = tempfile.mkdtemp(prefix="wsm-cc-")
+        TEMPS.append(cc)
+        ver = os.path.join(cc, "plugins", "cache", "thewindstorm", mirror.PLUGIN, "0.1.0")
+        here = os.path.join(ver, "scripts", "mirror.py")
+        os.makedirs(os.path.dirname(here))
+        shutil.copyfile(SCRIPT, here)
+        os.makedirs(os.path.join(ver, "skills", "mirror"))
+        shutil.copyfile(os.path.join(ROOT, "skills", "mirror", "SKILL.md"), os.path.join(ver, "skills", "mirror", "SKILL.md"))
+        reg = os.path.join(cc, "plugins", "installed_plugins.json")
+        self.assertEqual(mirror.plugin_registry_for(here), reg)
+        self.assertEqual(mirror.downloaded_from(here), ("folder", ver), "the stand-in is not shaped as the plugin's folder")
+
+        def values(x, at="state"):
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    yield from values(v, f"{at}.{k}")
+            elif isinstance(x, list):
+                for i, v in enumerate(x):
+                    yield from values(v, f"{at}[{i}]")
+            else:
+                yield at, str(x)
+        with Home(linger="yes") as h:
+            h.place_gitea()
+            p = mirror.paths()
+            saved = mirror.__file__
+            mirror.__file__ = here
+            try:
+                rc, out = h.setup()
+            finally:
+                mirror.__file__ = saved
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.isfile(p["script"]) and not p["script"].startswith(ver + os.sep), p["script"])
+            st = mirror.load_json(p["state"], {})
+            self.assertEqual((st.get("plugin_registry"), st.get("plugin_catalog")), (reg, "thewindstorm"),
+                             "the plugin is known by Claude Code's own list and its names")
+            self.assertEqual([(k, v) for k, v in values(st) if ver in v], [],
+                             "a state value names the plugin's version folder")
+            read = []
+            for d, _, fs in os.walk(h.tmp):
+                for f in fs:
+                    path = os.path.join(d, f)
+                    if path == p["bin"] or os.path.islink(path):
+                        continue
+                    with open(path, "rb") as fh:
+                        if ver.encode() in fh.read():
+                            read.append(path)
+            self.assertEqual(read, [], "a file setup wrote names the plugin's version folder")
+            for f in [x for x in mirror.service_files(p) if not x.endswith(".timer")]:     # a timer names no program
+                with open(f, encoding="utf-8") as fh:
+                    self.assertIn(p["script"], fh.read(), f"{f} does not run the skill's own copy")
+
+    def test_G9_14_a_list_that_is_not_on_this_computer_is_could_not_be_read_never_removed(self):
+        """M104 (the family's rules 6 and 29 (e)): a record whose list of plugins names a file that is not on this
+        computer (a record restored from another computer, say) answers "could not be read", never "names it
+        nowhere": status and sync never call the plugin removed from it, and uninstall's line names the list's path
+        as the thing that could not be read."""
+        gone = os.path.join(tempfile.gettempdir(), "wsm-no-such-" + os.urandom(4).hex(), "plugins", "installed_plugins.json")
+        self.assertFalse(os.path.exists(os.path.dirname(os.path.dirname(gone))))
+        st = {"plugin_registry": gone, "plugin_catalog": "thewindstorm"}
+        self.assertEqual(mirror.plugin_read(st), (None, None))
+        self.assertIsNone(mirror.plugin_listed(st))
+        self.assertFalse(mirror.plugin_removed(st), "a list that is not there was taken for one that names it nowhere")
+        with Home():
+            p = mirror.paths()
+            lines = mirror.still_here(p, st)
+            self.assertIn("Claude Code's folder for this skill as a plugin, and its entry in Claude Code, if Claude Code "
+                          f"still has them (its list of plugins, {gone}, could not be read). They are Claude Code's. "
+                          "Claude Code's own plugin uninstall takes this plugin off Claude Code's list at once; its "
+                          "folder in Claude Code's cache stays, and Claude Code's documentation says it removes that "
+                          "folder 14 days later. Nothing runs from them now."
+                          + (f" Its command for this plugin:\n      claude plugin uninstall {mirror.PLUGIN}@thewindstorm"
+                             if mirror.system()[0] != "darwin" else ""), lines)
+
     def test_G9_6_after_claude_codes_own_uninstall_the_mirror_says_so_and_nothing_runs_from_a_set_aside_folder(self):
-        """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never
-        run ours. Claude Code empties the plugin's row in its list of installed plugins and marks the plugin's folder
-        `.orphaned_at`. The mirror is the thing the person set up, so it goes on, and status and each sync say the
-        plugin was removed, with the one command that takes the mirror off; a list that could not be read is never
-        'removed'. Nothing runs from a set-aside folder."""
+        """M55 (the family's rule 8, 2026-11-23): a person may leave by Claude Code's own `plugin uninstall` and never run
+        ours. Claude Code takes the plugin's key out of its list of installed plugins and marks the plugin's folders
+        `.orphaned_at` (seen 2026-11-24, Claude Code 2.1.331: no key with an empty list is left). The mirror is the
+        thing the person set up, so it goes on, and status and each sync say the plugin was removed, with the one
+        command that takes the mirror off; a list that could not be read is never 'removed'.
+        Nothing runs from a set-aside folder."""
         cc = tempfile.mkdtemp(prefix="wsm-cc-")
         TEMPS.append(cc)
         ver = os.path.join(cc, "plugins", "cache", "thewindstorm", mirror.PLUGIN, "0.0.0")
@@ -4251,9 +10789,16 @@ class G9(unittest.TestCase):
         registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": [row]}})
         st = {"plugin_registry": reg}
         self.assertFalse(mirror.plugin_removed(st), "read, and it names the plugin")
-        for gone in ({mirror.PLUGIN + "@thewindstorm": []}, {"other@x": [row]}, {}):
+        for gone in ({"other@x": [row]}, {}):
             registry({"version": 2, "plugins": gone})
             self.assertTrue(mirror.plugin_removed(st), gone)
+        # The family's rule 29 (e), as seen 2026-11-24: a key whose list is empty, or a row with no installPath, was
+        # never seen; it is "could not be read", never "removed" and never "installed".
+        key = mirror.PLUGIN + "@thewindstorm"
+        for odd in ({key: []}, {key: [{"scope": "user", "version": "0.0.0"}]}, {key: [row, {"scope": "user"}]},
+                    {key: [{"scope": "user", "installPath": ""}]}, {key: row}, {key: ["x"]}):
+            registry({"version": 2, "plugins": odd})
+            self.assertEqual(mirror.plugin_read(st), (None, None), f"never seen, so could not be read: {odd}")
         for unread in ("", "{not json", json.dumps({"version": 2}), json.dumps({"version": 2, "plugins": []})):
             registry(unread)
             self.assertFalse(mirror.plugin_removed(st), f"could not be read, never removed: {unread!r}")
@@ -4301,6 +10846,9 @@ class G9(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertNotIn("plugin:", out)
             registry({"version": 2, "plugins": {mirror.PLUGIN + "@thewindstorm": []}})
+            rc, out = status()
+            self.assertNotIn("plugin:", out, "a key with an empty list is could not be read, never removed")
+            registry({"version": 2, "plugins": {}})
             rc, out = status()
             self.assertEqual(rc, 0, out)
             self.assertIn(said, out.splitlines())
@@ -4353,9 +10901,419 @@ class G9(unittest.TestCase):
                 rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
             finally:
                 sys.stdin = saved
+            # M179: a miss says what the command printed and what was left (seen once under load, 2026-11-26)
             self.assertEqual(rc, 0, out)
-            self.assertFalse(os.path.exists(p["data"]))
+            self.assertFalse(os.path.exists(p["data"]), out + "\nleft: " + ", ".join(left_in(p["data"])))
 
+    def test_G9_21_a_delete_that_stops_part_way_says_what_stayed_and_why_and_never_ends_0(self):
+        """M179 (seen 2026-11-26 in a whole run under load: G9.3's third uninstall --delete-copies ended 0 with the
+        folder of copies still there; read the same day: the stand-in's `disable --now` left the real Gitea running,
+        and every failure of the removal was passed over in silence). After the person typed the number, exit 0 and
+        a word of deleting only once the folder is gone. Otherwise the last line names the folder where the removal
+        stopped and why (the error's class), how many of the copies on the disk went before it stopped, that the
+        rest and the record stay, and the one next step, with the same number to type again; exit 1. The copies go
+        first and the state and the record last, so a stop part-way never changes the number asked. A: a folder in
+        the tree at mode 500, the two copies in it. C: a write lands in a folder of the forge's between its emptying
+        and its removal (as seen). D: a write lands once the forge's folder has gone by (its log folder made again).
+        The other account's folder is the guest's world (it needs an administrator to make it)."""
+        CLOSING = ("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or "
+                   "delete after you look at it.")
+        def mode_500(p):
+            d = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
+            os.chmod(d, 0o500)
+            return d, lambda: os.path.exists(d) and os.chmod(d, 0o700)
+
+        def writer(p):
+            # as seen in the failed run: a write lands in a folder of the forge's between its emptying and its
+            # removal (here at that moment exactly, every time, through the system's own rmdir)
+            d = os.path.join(p["forge"], "data", "queues", "writer")
+            os.makedirs(d, exist_ok=True)
+            real, landed = os.rmdir, []
+
+            def rmdir(path, *a, **k):
+                if not landed and (path == d or (k.get("dir_fd") is not None and path == os.path.basename(d))):
+                    landed.append(1)
+                    with open(os.path.join(d, "late.log"), "w") as f:
+                        f.write("x")
+                return real(path, *a, **k)
+            os.rmdir = rmdir
+
+            def undo():
+                os.rmdir = real
+                self.assertTrue(landed, "the write landed")
+            return d, undo
+
+        def after_the_forge(p):
+            # a write lands in the data folder itself once the forge's folder has gone by (one that lands in a
+            # folder the skill made goes with it: that is no stop)
+            real, landed, top = os.rmdir, [], os.path.abspath(p["forge"])
+
+            def rmdir(path, *a, **k):
+                out = real(path, *a, **k)
+                if not landed and k.get("dir_fd") is None and os.path.abspath(path) == top:
+                    landed.append(1)
+                    with open(os.path.join(p["data"], "late.log"), "w") as f:
+                        f.write("x")
+                return out
+            os.rmdir = rmdir
+
+            def undo():
+                os.rmdir = real
+                self.assertTrue(landed, "the write landed")
+            return p["data"], undo
+
+        for world, spoil in (("A", mode_500), ("C", writer), ("D", after_the_forge)):
+            with self.subTest(world=world), World(self) as w:
+                for n in ("alpha", "beta"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+                p = w.p
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(any(pr.poll() is None for pr in w.home.procs), "uninstall leaves no forge running")
+                where, undo = spoil(p)
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                    undo()
+                self.assertEqual(rc, 1, out)
+                self.assertTrue(os.path.exists(p["data"]))
+                last = out.rstrip("\n").split("\n")[-1]
+                self.assertTrue(last.startswith(f"Not deleted: the folder of copies is still at {p['data']}. Its "
+                                                f"removal stopped at "), out)
+                gone = re.search(r"(\d) of the 2 copies on the disk (?:was|were) deleted before it stopped; the rest of the "
+                                 r"folder is still there, with the record of what the skill did here", last)
+                self.assertTrue(gone, out)
+                self.assertEqual(int(gone.group(1)), 2 - mirror.copies_on_disk(p), out)
+                again = mirror.own_command(p, "uninstall", "--delete-copies")
+                # the number only where it is asked again: in D the forge's folder is gone, so none is
+                self.assertTrue(last.endswith(f"then run the same command again{'' if world == 'D' else ' and type 2'}: "
+                                              f"{again}"), out)
+                if world == "A":
+                    self.assertIn(f"Its removal stopped at {where}: it is yours, and its mode does not let you "
+                                  "(PermissionError). ", last)
+                    self.assertIn(f"The one next step: give it back its mode: chmod u+rwx {shlex.quote(where)}, then "
+                                  "run the same command again", last)
+                elif world == "C":
+                    self.assertIn(f"Its removal stopped at {where}: something put files into it while it was being "
+                                  "removed (OSError: ", last)
+                    self.assertIn("The one next step: end the program that is still writing there, then run the same "
+                                  "command again", last)
+                else:
+                    late = os.path.join(p["data"], "late.log")
+                    self.assertIn(f"Its removal stopped at {where}: something put files into it while it was being "
+                                  f"removed: {late} is there now, and was not before the removal. ", last)
+                    self.assertIn("The one next step: end the program that is still writing there, then run the same "
+                                  "command again", last)
+                self.assertNotIn("Kept: the folder of copies", out)
+                self.assertNotIn(f"{p['data']}: the folder of copies", out)        # never said as gone
+                self.assertTrue(os.path.exists(p["state"]) and os.path.exists(os.path.join(p["data"], mirror.MADE_RECORD)),
+                                "the state and the record stay, so the number asked stays 2")
+                # the step taken, the same command again: the same number is asked, and the folder goes
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 0, out)
+                if world == "D":                 # what the skill made goes; the file that came is named and stays
+                    self.assertNotIn("type the number", out)
+                    self.assertIn(f"  {late}", out)
+                    self.assertEqual(left_in(p["data"]), ["late.log"], out)
+                    # the folder that stays, then, last, the closing sentence G9.12 holds
+                    self.assertEqual(out.rstrip("\n").split("\n")[-2:],
+                                     [f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
+                                      "because it holds what is not the skill's; in it now: late.log (not the "
+                                      "skill's).", CLOSING], out)
+                    continue
+                self.assertIn("To delete the folder of copies (2 copies,", out)
+                self.assertFalse(os.path.exists(p["data"]), out + "\nleft: " + ", ".join(left_in(p["data"])))
+
+        # Only what is not the skill's is left in the folder of copies: exit 0, and the copies are said as deleted, the
+        # folder as staying, with each entry in it named (the folder is said as deleted only once it is gone). K1: a
+        # file of the person's in the folder of copies. K2: a folder of the person's inside the forge's folder, so the
+        # forge's folder stays, and the record with it.
+        def a_file(p):
+            with open(os.path.join(p["data"], "notes.txt"), "w") as f:
+                f.write("mine")
+
+        def a_folder_in_the_forge(p):
+            os.makedirs(os.path.join(p["forge"], "mine"))
+            with open(os.path.join(p["forge"], "mine", "a.txt"), "w") as f:
+                f.write("mine")
+
+        def a_name_with_a_backtick(p):
+            with open(os.path.join(p["data"], "a`b.txt"), "w") as f:
+                f.write("mine")
+
+        stays = {"K1": "notes.txt (not the skill's)",
+                 "K3": f"a?b.txt (not the skill's); {mirror.SHOWN_CHANGED}",
+                 "K2": "forge (the skill's, kept because it holds forge/mine), windstorm-mirror-made.json (the record "
+                       "of what the skill did here, kept while something it names is there)"}
+        for world, plant in (("K1", a_file), ("K2", a_folder_in_the_forge), ("K3", a_name_with_a_backtick)):
+            with self.subTest(world=world), World(self) as w:
+                for n in ("alpha", "beta"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+                p = w.p
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 0, out)
+                plant(p)
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(mirror.copies_on_disk(p), 0, out)
+                last = out.rstrip("\n").split("\n")[-2:]
+                self.assertEqual(last, [f"The copies are deleted: the 2 on the disk are gone. The folder of copies "
+                                        f"stays at {p['data']}, because it holds what is not the skill's; in it now: "
+                                        f"{stays[world]}.", CLOSING], out)
+                self.assertNotIn(f"{p['data']}: the folder of copies", out)        # never said as gone
+                theirs = out.split("Not the skill's, so left where they are")[1].split("\n\n")[0].split("Folders of")[0]
+                self.assertNotIn(os.path.join(p["data"], mirror.MADE_RECORD), theirs, out)
+                self.assertNotIn(f"  {p['forge']}\n", theirs, out)
+                if world == "K3":                # the census shows the name as the new line does, and says so once
+                    self.assertIn(f"  {os.path.join(p['data'], 'a?b.txt')}\n", theirs, out)
+                    self.assertNotIn("`", out)
+                    self.assertEqual(out.count(f"In those names, {mirror.SHOWN_CHANGED}."), 1, out)
+                # the same command again: nothing more of the skill's goes, nothing is said that is not there
+                saved, sys.stdin = sys.stdin, AtTerminal("2\n")
+                try:
+                    rc, out = quiet(mirror.main, ["uninstall", "--delete-copies"])
+                finally:
+                    sys.stdin = saved
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn("with every copy in it", out)
+                self.assertNotIn("type the number", out)
+                if world in ("K1", "K3"):
+                    self.assertEqual(left_in(p["data"]), ["notes.txt" if world == "K1" else "a`b.txt"], out)
+                    self.assertIn(f"No copy is in {p['data']}, so none was deleted: ", out)
+                else:
+                    self.assertEqual(left_in(p["data"]), ["forge", "forge/mine", "forge/mine/a.txt", mirror.MADE_RECORD], out)
+                    self.assertEqual(out.rstrip("\n").split("\n")[-2:],
+                                     [f"No copy was on the disk to delete. The folder of copies stays at {p['data']}, "
+                                      f"because it holds what is not the skill's; in it now: {stays[world]}.",
+                                      CLOSING], out)
+
+
+    def test_G9_22_what_another_account_owns_in_the_skills_folders_is_never_the_skills(self):
+        """M180 (seen 2026-11-26 on a stock Ubuntu 24.04 guest: a file another account owns in the forge's data folder
+        went with the delete, exit 0, and the line said the skill made it). The skill and its forge run as this
+        account, so nothing another account owns is theirs: the owner read, made once by a command about to remove a
+        tree and, for the delete, before the number is asked, finds it; it stays where it is with the folders above it,
+        is named with whose it is before the number and at the end, "made by the skill" is never said of it, and the
+        leave goes on, exit 0. An owner that could not be read is said as that and stays. With nothing foreign the
+        folder goes as before; a file of the person's own at the forge's top stays as before; a command that removes
+        nothing, and the census, read no tree to its depth. Who owns an entry is the suite's stand-in (an account
+        cannot make another's file); the guest's worlds are B1 and B2."""
+        CLOSING = ("The mirror is off this computer. What stayed, and why, is named above; it is yours, to keep or "
+                   "delete after you look at it.")
+        import errno
+        other = 3999999                          # an account number no account on this computer has
+
+        def delete(typed):
+            saved, sys.stdin = sys.stdin, AtTerminal(typed)
+            try:
+                return quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+
+        def made(w):
+            for n in ("alpha", "beta"):
+                w.gh.add_repo("someone", n)
+                w.gh.commit(f"someone/{n}", {"a": b"1"})
+            w.key_set()
+            self.assertEqual(w.first_sync()[0], 0)
+
+        def stand_in(owned, unread=()):
+            """The owner read's answers, stood in: `owned` another account's, `unread` not readable; deep reads
+            (below a folder of the forge's top) are counted."""
+            real, deep = getattr(mirror, "entry_owner", None), []    # (none before the cure: its red run reads on)
+
+            def owner(e):
+                e = os.path.abspath(e)
+                deep.append(e)
+                if e in unread:
+                    raise PermissionError(errno.EACCES, "Permission denied", e)
+                return other if e in owned else os.lstat(e).st_uid
+            mirror.entry_owner = owner
+            return real, deep
+
+        def put_back(real):
+            if real is None:
+                del mirror.entry_owner
+            else:
+                mirror.entry_owner = real
+
+        def write(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as h:
+                h.write("x")
+        # (1) the delete: a file and a folder of another account's, deep in the forge's tree
+        with World(self) as w:
+            made(w)
+            p = w.p
+            self.assertEqual(quiet(mirror.main, ["uninstall"])[0], 0)
+            f = os.path.join(p["forge"], "data", "theirs.txt")
+            d = os.path.join(p["forge"], "data", "lfs", "theirs")
+            write(f)
+            write(os.path.join(d, "g"))
+            real, deep = stand_in({os.path.abspath(f), os.path.abspath(d)})
+            try:
+                rc, out = delete("2\n")
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(mirror.copies_on_disk(p), 0, out)
+                self.assertEqual(left_in(p["forge"]), ["data", "data/lfs", "data/lfs/theirs", "data/lfs/theirs/g",
+                                                       "data/theirs.txt"], out)
+                said = f"{d} (another account owns it, account {other}); {f} (another account owns it, account {other})"
+                first = out.split("type the number of copies it holds")[0]
+                self.assertIn(f"Not the skill's, so it stays where it is, with the folders above it: {said}.", first)
+                for x in (f, d):
+                    self.assertIn(f"  {x}: another account owns it, account {other}\n", out)
+                self.assertNotIn(os.path.join(d, "g"), out, "inside another account's folder nothing is read")
+                self.assertNotIn("each thing the skill made in it by name", out)
+                self.assertNotIn("sudo chown", out)
+                last = out.rstrip("\n").split("\n")[-2:]
+                self.assertTrue(last[0].startswith("The copies are deleted: the 2 on the disk are gone. The folder of "
+                                                   f"copies stays at {p['data']}, because it holds what is not the "
+                                                   "skill's; in it now: forge (the skill's, kept because it holds "),
+                                out)
+                self.assertEqual(last[1], CLOSING, out)
+                rc, out = delete("0\n")          # run again: nothing more goes, and it ends 0
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(left_in(p["forge"]), ["data", "data/lfs", "data/lfs/theirs", "data/lfs/theirs/g",
+                                                       "data/theirs.txt"], out)
+                self.assertNotIn("sudo chown", out)
+                # (6) a command that removes nothing reads no tree to its depth, nor does the census
+                for cmd in (["status"], ["uninstall"]):
+                    del deep[:]
+                    quiet(mirror.main, cmd)
+                    self.assertEqual([x for x in deep if mirror.inside(x, p["forge"]) or mirror.inside(x, p["cache"])],
+                                     [], cmd)
+            finally:
+                put_back(real)
+        # (2) plain uninstall's own tree removals: a file of another account's in a cache of one copy stays, named
+        with World(self) as w:
+            made(w)
+            p = w.p
+            cache = sorted(os.path.join(p["cache"], x) for x in os.listdir(p["cache"]))[0]
+            g = os.path.join(cache, "objects", "theirs.pack")
+            write(g)
+            real, deep = stand_in({os.path.abspath(g)})
+            try:
+                rc, out = quiet(mirror.main, ["uninstall"])
+            finally:
+                put_back(real)
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(os.path.isfile(g), out)
+            self.assertEqual(left_in(cache), ["objects", "objects/theirs.pack"], out)
+            self.assertIn(f"  {g}: another account owns it, account {other}\n", out)
+            self.assertEqual(out.rstrip("\n").split("\n")[-1], CLOSING, out)
+        # (3) the control, nothing foreign: the folder goes, today's line word for word; (4) the person's own file at
+        # the forge's top stays as before, with no owner words; (5) an owner that could not be read stays, said so
+        for world in ("control", "top", "unread"):
+            with self.subTest(world=world), World(self) as w:
+                made(w)
+                p = w.p
+                self.assertEqual(quiet(mirror.main, ["uninstall"])[0], 0)
+                top = os.path.join(p["forge"], "readme.txt")
+                u = os.path.join(p["forge"], "data", "unread.txt")
+                if world == "top":
+                    write(top)
+                if world == "unread":
+                    write(u)
+                real, deep = stand_in(set(), {os.path.abspath(u)} if world == "unread" else ())
+                try:
+                    rc, out = delete("2\n")
+                finally:
+                    put_back(real)
+                self.assertEqual(rc, 0, out)
+                if world == "control":
+                    self.assertFalse(os.path.exists(p["data"]), out)
+                    self.assertIn(f"  {p['data']}: the folder of copies (2 copies) and the record of what the skill "
+                                  "did here, each thing the skill made in it by name\n", out)
+                    self.assertNotIn("Not the skill's", out)
+                elif world == "top":
+                    self.assertTrue(os.path.isfile(top), out)
+                    self.assertIn(f"  {top}\n", out)
+                    self.assertNotIn("another account owns it", out)
+                    self.assertNotIn("Not the skill's, so it stays where it is, with the folders above it", out)
+                else:
+                    self.assertTrue(os.path.isfile(u), out)
+                    self.assertIn(f"Not the skill's, so it stays where it is, with the folders above it: {u} (whose it "
+                                  "is could not be read (PermissionError)).", out)
+                    self.assertIn(f"  {u}: whose it is could not be read (PermissionError)\n", out)
+                    self.assertTrue(out.rstrip("\n").split("\n")[-2].startswith("The copies are deleted"), out)
+
+    def test_G9_23_the_folders_setup_made_are_said_to_go_later_only_while_their_record_stays(self):
+        """M181 (seen 2026-11-26 on a stock Ubuntu 24.04 guest: a delete that left the folder of copies, because
+        another account's folder was in it, said the folders setup made to hold it "go with it once they are empty",
+        and took the state file, their only record, in the same run; run again, it said no record of them is left).
+        Chosen by the state file's presence after the run, never by the command's name: while it stays, that
+        sentence stays word for word; once it has gone, the line says they stay, that the skill keeps no record of
+        them after this run so no later run of it removes them, and that an empty one does no harm, with no command.
+        The folder setup made to hold the folder of copies is the suite's stand-in in the record (in the suite's home
+        the suite makes that folder itself; on the guest setup made ~/.local and ~/.local/share)."""
+        def delete(typed):
+            saved, sys.stdin = sys.stdin, AtTerminal(typed)
+            try:
+                return quiet(mirror.main, ["uninstall", "--delete-copies"])
+            finally:
+                sys.stdin = saved
+
+        def plain(p):
+            return quiet(mirror.main, ["uninstall"])
+
+        def left(p):                               # only a file of the person's own stays: the leave, exit 0
+            with open(os.path.join(p["data"], "mine.txt"), "w") as f:
+                f.write("x")
+            self.assertEqual(quiet(mirror.main, ["uninstall"])[0], 0)
+            return delete("2\n")
+
+        def wrong(p):                              # another number typed: nothing deleted
+            return delete("7\n")
+
+        def stopped(p):                            # the system refuses part-way: the stop, exit 1
+            d = os.path.join(p["forge"], "data", "gitea-repositories", "mirror")
+            os.chmod(d, 0o500)
+            try:
+                return delete("2\n")
+            finally:
+                os.path.exists(d) and os.chmod(d, 0o700)
+        for world, run, state_after in (("plain", plain, True), ("left", left, False), ("wrong", wrong, True),
+                                        ("stopped", stopped, True)):
+            with self.subTest(world=world), World(self) as w:
+                for n in ("alpha", "beta"):
+                    w.gh.add_repo("someone", n)
+                    w.gh.commit(f"someone/{n}", {"a": b"1"})
+                w.key_set()
+                self.assertEqual(w.first_sync()[0], 0)
+                p = w.p
+                holder = os.path.abspath(os.path.dirname(p["data"]))
+                st = mirror.load_json(p["state"], {})
+                st["made_folders"] = sorted(set(st.get("made_folders") or []) | {holder})
+                mirror.save_state(p, st)
+                rc, out = run(p)
+                self.assertEqual(os.path.exists(p["state"]), state_after, out)
+                said = f"  {holder}: folders setup made to hold the folder of copies. "
+                kept = said + "They stay while it stays, and go with it once they are empty.\n"
+                gone = (said + "They stay: the skill keeps no record of them after this run, so no later run of it "
+                        "removes them; an empty one does no harm.\n")
+                if os.path.exists(p["state"]):
+                    self.assertIn(kept, out)
+                    self.assertNotIn(gone, out)
+                else:
+                    self.assertIn(gone, out)
+                    self.assertNotIn(kept, out)
+                self.assertTrue(os.path.isdir(holder), out)
 
     def test_G9_4_leaving_waits_for_a_sync_ends_with_a_census_and_is_safe_twice(self):
         """Rule 8 (the family's): a person who wants to leave is never refused. A running sync is a wait that says
@@ -4393,10 +11351,15 @@ class G9(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertIn(f"Waiting: a sync is running (process {os.getpid()}); uninstall goes on as soon as it ends", out)
             lines = out.strip().splitlines()
+            # M144: the skill's own copy is gone now, so the way names the copy that runs, and the way with none left
+            running = shlex.quote(os.path.abspath(mirror.__file__))
             kept = lines.index(f"Kept: the folder of copies, {p['data']} (2 copies), with the record of what the skill "
-                               "did here. It is yours; delete it only when you are sure, with: uninstall --delete-copies. "
-                               "Setup run again later finds this folder and goes on from it: the mirror account gets a "
-                               "new key, and your Gitea account and its password are left as they are.")
+                               f"did here. It is yours; delete it only when you are sure, with: python3 -I {running} "
+                               "uninstall --delete-copies, in a terminal window of your own (it asks you to type the "
+                               "number of copies), or, once no copy of this skill is left on this computer, as you "
+                               "delete any folder of yours. Setup run again later finds this folder and goes on from it: "
+                               "the mirror account gets a new key, and your Gitea account and its password are left as "
+                               "they are.")
             self.assertEqual(lines[kept + 1], "Still on this computer, and not uninstall's to take:")
             self.assertTrue(all(x.startswith("  ") for x in lines[kept + 2:]), lines[kept:])
             self.assertIn("Gone now:", lines)
@@ -4933,6 +11896,9 @@ class G6Words(unittest.TestCase):
             return " ".join(x.value for x in ast.walk(n) if isinstance(x, ast.Constant) and isinstance(x.value, str))
 
         funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        # G8.7: a DoorShut's words, and setup's floor, are door_line's: checked where they are built, below
+        door_names = {h.name for h in ast.walk(tree) if isinstance(h, ast.ExceptHandler) and h.name
+                      and getattr(h.type, "id", None) == "DoorShut"} | {"floor", "shut"}
         lacking, built, seen = [], set(), 0
         for node in ast.walk(tree):
             for field in ("body", "orelse", "finalbody"):
@@ -4954,12 +11920,15 @@ class G6Words(unittest.TestCase):
                         elif (isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr == "replace"
                               and isinstance(x.func.value, ast.Name) and x.func.value.id == "why"):
                             mine.add("check_key")             # say(why.replace(key, ...)): the key check's words
-                    if isinstance(arg, ast.Name) and not arg.id.isupper():
+                    if any(isinstance(x, ast.Name) and x.id in door_names for x in ast.walk(arg)):
+                        mine.add("door_line")
+                    elif isinstance(arg, ast.Name) and not arg.id.isupper():
                         mine.add(f"<{arg.id}>")
                     if words(arg).strip() == "STOPPED:":
                         mine.add("HardStop")                  # says a HardStop's words: every raise is checked
                     built |= mine
-                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>"}:
+                    if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>",
+                               "door_line", "<bus>", "systemd_not_now"}:
                         continue                              # checked below, where the words are built
                     if not self.NEXT.search(words(arg)):
                         lacking.append((a.lineno, words(arg)[:90]))
@@ -4974,19 +11943,31 @@ class G6Words(unittest.TestCase):
         self.assertTrue(self.NEXT.search(mirror.LINGER_CHOICE))
         self.assertTrue(self.NEXT.search(mirror.git_missing_sentence()))
         self.assertTrue(self.NEXT.search(words(funcs["git_out_of_service_reach"])))
-        for fn in ("other_install_stop", "home_is_not_ours"):          # G9.12: each stop it returns, one by one
+        for kind, never in (("other", False), ("unread", True), ("unread", False)):    # G8.7, each of its three
+            line = mirror.door_line(kind, 21000, "why", never)
+            self.assertTrue(re.search(r"\. (Run setup|Run status again|The mirror needs that read to run; the README)",
+                                      line), line)
+        for fn in ("other_install_stop", "home_is_not_ours", "bus_floor",  # G9.12, G1.24: each stop it returns
+                   "kept_step", "folders_floor", "root_door",              # the three answers (M151, M154-M159),
+                                                                           # M167, M177
+                   "systemd_not_now"):                                     # M107: a Linux "Not now" after systemd calls
             for r in ast.walk(funcs[fn]):
                 if isinstance(r, ast.Return) and r.value is not None and words(r.value):
                     self.assertTrue(self.NEXT.search(words(r.value)), (fn, words(r.value)[:90]))
+        self.assertIn("kept_step", {x.func.id for x in ast.walk(funcs["kept_stop_words"])     # its step: kept_step's
+                                    if isinstance(x, ast.Call) and isinstance(x.func, ast.Name)})
         for r in ast.walk(funcs["check_key"]):
             if isinstance(r, ast.Return) and isinstance(r.value, ast.Tuple) and \
                     isinstance(r.value.elts[0], ast.Constant) and r.value.elts[0].value is None:
                 self.assertTrue(self.NEXT.search(words(r.value)), words(r.value))
-        data = {"SKILL_REPO", "GITEA_VERSION", "last_line",          # facts inside a line, not its words
+        data = {"SKILL_REPO", "GITEA_VERSION", "last_line", "lines_of", "shown_lines",  # facts in a line (git's words)
                 "lock_holder", "UNINSTALL_WAIT", "VERSION",                     # (which process; how long uninstall waits)
-                "own_command"}                                                   # (the command to run, as it runs)
+                "own_command",                                                   # (the command to run, as it runs)
+                "SHOWN_CHANGED",                                                 # (what a ? stands for, M132)
+                "paths", "MIRROR_USER"}                                          # (a folder; the forge account's name)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
-                                         "<other>"},
+                                         "<other>", "door_line", "<bus>", "kept_step", "kept_stop_words",
+                                         "systemd_not_now"},
                          set(),
                          "a stop line is built from something this test does not check")
 
@@ -5018,7 +11999,7 @@ class Invariants(unittest.TestCase):
             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "run" and n.args and isinstance(n.args[0], ast.List):
                 first = n.args[0].elts[0] if n.args[0].elts else None
                 progs.add(first.value if isinstance(first, ast.Constant) else ast.unparse(first))
-        self.assertEqual(progs - {"git", "systemctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
+        self.assertEqual(progs - {"git", "systemctl", "busctl", "loginctl", "launchctl", "ip", "ifconfig", "sys.executable",
                                   "running_bin(p)", "binary", "defaults", "fdesetup", "pkcheck"}, set(), progs)
 
 
@@ -5078,13 +12059,23 @@ def git_commit_of(root):
     return commit_of
 
 
+def rows_not_here(texts, ids):
+    """Each row number (M and digits, standing alone) that a text names and `ids` does not hold: [(number, where)]."""
+    out = []
+    for name in sorted(texts):
+        for m in re.finditer(r"(?<![A-Za-z0-9_])M(\d+)(?![A-Za-z0-9_])", texts[name]):
+            if "M" + m.group(1) not in ids:
+                out.append(("M" + m.group(1), f"{name}:{texts[name].count(chr(10), 0, m.start()) + 1}"))
+    return out
+
+
 def to_build_wrong(plan, rows, ver):
     """Each proof the plan marks *(to build)* that may not stand at version `ver` (the maintainer's ruling,
     2026-11-23): before the first release any may; after it, only one whose codon has a row due in a later version
     than `ver`, a row not marked built (no test named). Returns [(test, why)]."""
     wrong = []
     for line in plan.splitlines():
-        m = re.match(r"\| (G\d+\.\d+) \|", line)
+        m = re.match(r"\| (G\d+\.\d+|T\d+) \|", line)            # a T codon (the suite's own) as a G codon
         for t in re.findall(r"`(test_[A-Za-z0-9_]+)` \*\(to build\)\*", line):
             if ver == "0.0.0":
                 continue
@@ -5321,6 +12312,68 @@ class Strand(unittest.TestCase):
         self.assertEqual(named - real - to_build, set(), "the plan names tests that do not exist")
         self.assertEqual(codon_tests - named, set(), "tests with no codon in the plan")
 
+    def test_T8_every_row_number_a_text_names_is_a_row(self):
+        """The family's rule 34 (2026-11-25, M130): every row number this tree's README, plan, rows, scripts or tests
+        name is a row in this same tree's PROMISES.json (seen: M124 and M127 named here, and their rows only on the
+        rows branch). Seen red first on a planted number, here, every run."""
+        ids = {r["id"] for r in jload(os.path.join(ROOT, "PROMISES.json"))["rows"]}
+        planted = "M" + str(10 ** 6)                          # built here, so this file names no such row
+        self.assertEqual(rows_not_here({"planted.md": f"as row {planted} says; rows M93-M98"}, {"M93", "M98"}),
+                         [(planted, "planted.md:1")], "the reader misses a planted number")
+        texts = {}
+        for top, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for f in files:
+                path = os.path.join(top, f)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        texts[os.path.relpath(path, ROOT)] = fh.read()
+                except (UnicodeDecodeError, OSError):
+                    continue                                  # not a text (an image, a binary)
+        self.assertIn("README.md", texts)
+        self.assertIn(os.path.join("scripts", "mirror.py"), texts)
+        self.assertEqual(rows_not_here(texts, ids), [], "a text names a row this tree's PROMISES.json does not hold")
+
+    def test_T9_the_rule_3_gate_is_a_job_of_its_own_and_hides_nothing_else(self):
+        """M131 (a reviewer's read of CI, 2026-11-25): with the rule 3 gate red by design in every leg, a second red
+        in a leg (G9.8, once) stood behind it. The legs run the whole suite but that one test, and a job of its own
+        runs it; the flag sets apart that test only, and takes nothing else."""
+        me = sys.modules[__name__]
+        ids = lambda suite: {t.id().rsplit(".", 1)[-1] for t in iter_tests(suite)}
+        whole = ids(unittest.defaultTestLoader.loadTestsFromModule(me))
+        apart = ids(without(unittest.defaultTestLoader.loadTestsFromModule(me), RULE3_GATE))
+        self.assertIn(RULE3_GATE, whole)
+        self.assertEqual(whole - apart, {RULE3_GATE}, "the flag sets apart another test, or none")
+        self.assertIn(RULE3_GATE, plan_proofs() | row_tests())
+        # The flag takes nothing else: no name, no --gate-only beside it.
+        for extra in (["G1"], ["--gate-only", "test_T3_a_commits_checks_run_once"]):
+            r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), APART_FLAG, *extra],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120,
+                               env={k: v for k, v in os.environ.items() if k != "WSM_TEST_REPORT"})
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr[-800:])
+        # The join leaves it out only when every report says it was set apart.
+        with tempfile.TemporaryDirectory(prefix="wsm-join-") as d:
+            proofs = sorted((plan_proofs() | row_tests()) - {RULE3_GATE})
+            def report(n, apart_):
+                path = os.path.join(d, f"r{n}.json")
+                with open(path, "w") as f:
+                    json.dump({"passed": proofs, "refused": [], "apart": apart_}, f)
+                return path
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(join_reports([report(1, [RULE3_GATE]), report(2, [RULE3_GATE])], 2), 0)
+                self.assertEqual(join_reports([report(3, [RULE3_GATE]), report(4, [])], 2), 1)
+            self.assertIn(f"GATE: {RULE3_GATE} passed on none", out.getvalue())
+        # The workflow: every leg sets it apart, one job of its own runs it, the join waits on the legs.
+        wf = fread(os.path.join(ROOT, ".github", "workflows", "tests.yml"))
+        jobs = re.split(r"^  (?=[a-z0-9-]+:\n)", wf.split("\njobs:\n", 1)[1], flags=re.M)
+        job = {j.split(":", 1)[0]: j for j in jobs if j.strip()}
+        for leg in ("test", "test-mac"):
+            self.assertIn(f"run: python -I tests/test_mirror.py -v {APART_FLAG}\n", job[leg])
+        self.assertIn(f"run: python -I tests/test_mirror.py -v --gate-only {RULE3_GATE}\n", job["rule-3-gate"])
+        self.assertNotIn("needs:", job["rule-3-gate"])
+        self.assertEqual(wf.count(APART_FLAG), 2)
+
     def test_T3_a_commits_checks_run_once(self):
         """M43 (the family's rule 17, 2026-11-23): one stack of pull requests queued 17 runs, each commit twice,
         because the workflow ran on every push and every pull request. It runs on pull requests, and on pushes
@@ -5555,9 +12608,17 @@ def row_tests():
     return {r["test"] for r in rows if r.get("test")}
 
 
+# T9 (M131): the family's rule 3 gate runs in a job of its own, so the legs' colour says the suite and that job's
+# colour says the proofs on real machines. Only this one test can be set apart, and only with this flag.
+RULE3_GATE = "test_PROMISES_a_row_with_a_stand_in_is_proven_before_its_tag"
+APART_FLAG = "--without-rule3-gate"
+
+
 def join_reports(paths, expect):
     reports = [jload(p) for p in paths]
     proofs = plan_proofs() | row_tests()
+    if reports and all(r.get("apart") == [RULE3_GATE] for r in reports):
+        proofs -= {RULE3_GATE}                        # judged in its own job, never by the legs
     passed = set().union(*(set(r["passed"]) for r in reports)) if reports else set()
     refused = [x for r in reports for x in r["refused"]]
     if len(reports) != expect:
@@ -5569,6 +12630,25 @@ def join_reports(paths, expect):
     return 1 if refused else 0
 
 
+def iter_tests(suite):
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            yield from iter_tests(t)
+        else:
+            yield t
+
+
+def without(suite, name):
+    """The suite with every test of that one name taken out (none when name is None)."""
+    out = unittest.TestSuite()
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            out.addTest(without(t, name))
+        elif name is None or t.id().rsplit(".", 1)[-1] != name:
+            out.addTest(t)
+    return out
+
+
 def main(argv):
     verbosity = 2 if "-v" in argv else 1
     args = [a for a in argv if a != "-v"]
@@ -5577,6 +12657,11 @@ def main(argv):
         files = [a for i, a in enumerate(args[1:], 1) if a != "--expect" and args[i - 1] != "--expect"]
         return join_reports(files, expect)
     me = sys.modules[__name__]
+    apart = APART_FLAG in args
+    if apart and args != [APART_FLAG]:
+        print(f"{APART_FLAG} runs the whole suite but one test, and takes nothing else.", file=sys.stderr)
+        return 2
+    args = [] if apart else args
     gate_only = args[1] if args[:1] == ["--gate-only"] and len(args) > 1 else None
     tests = collected_tests()
     if gate_only:
@@ -5584,13 +12669,14 @@ def main(argv):
     elif args:
         suite = unittest.defaultTestLoader.loadTestsFromNames(args, me)
     else:
-        suite = unittest.defaultTestLoader.loadTestsFromModule(me)
+        suite = without(unittest.defaultTestLoader.loadTestsFromModule(me), RULE3_GATE if apart else None)
     result = unittest.TextTestRunner(verbosity=verbosity, resultclass=Recorder, stream=sys.stderr).run(suite)
     if args and not gate_only:
         print("A part of the suite was run, so the gate was not applied.", file=sys.stderr)
         return 0 if result.wasSuccessful() else 1
     problems = shape_problems(os.path.abspath(__file__))
-    refused, not_here = gate(result.outcome, {gate_only} if gate_only else plan_proofs() | row_tests())
+    refused, not_here = gate(result.outcome, {gate_only} if gate_only else
+                             (plan_proofs() | row_tests()) - ({RULE3_GATE} if apart else set()))
     refused = problems + refused
     for x in refused:
         print("GATE:", x)
@@ -5601,7 +12687,8 @@ def main(argv):
         with open(report, "w", encoding="utf-8") as f:
             json.dump({"system": "/".join(mirror.system()), "python": sys.version.split()[0],
                        "passed": sorted(n for n, o in result.outcome.items() if o == "passed"),
-                       "not_run_here": not_here, "refused": refused}, f, indent=1)
+                       "not_run_here": not_here, "refused": refused, "apart": [RULE3_GATE] if apart else []},
+                      f, indent=1)
     return 0 if result.wasSuccessful() and not refused else 1
 
 

@@ -22,6 +22,18 @@ marked **Person** and is described under "The person's steps": say what is writt
 that is the person's is never done another way: if a program is missing, or the computer refuses something, say
 what the tool printed and wait; do not install, change or work around anything yourself.
 
+**A stop that comes back.** When a command stops and says to run it again, run it again once, after the wait it
+names if it names one. If that second run stops with the same words (a count of seconds aside), it is not a wait: do
+not run it a third time, and do not work round it by hand by removing, stopping or changing anything yourself. Show
+the person the line, and ask them to report it at
+https://github.com/TheWindstorm/windstorm-mirror-for-github/issues; they may leave out their account's name where a
+path holds it. The line goes whole, in your own reply for the person to copy, or from a file given to gh with
+--body-file; never inside a shell's double quotes, where a shell would run a command the line names. When the line
+names something that must change first (for example, a login of the person's own to this computer), that is the
+step: do it if you can, or show the person the line; it is not a fault to report. One such stop has a way out
+written in the README: on Linux, uninstall saying "Not now" at every run after one of the mirror's service files was
+removed by hand.
+
 **Lines for the person.** Lines that start `tell the person 1 of N:` to `tell the person N of N:` are for the
 person. Give them the whole block, every line from 1 of N to N of N, word for word and in that order, before any
 words of your own. Never shorten, merge, reword or leave one out; your own words come after the block.
@@ -48,7 +60,8 @@ words of your own. Never shorten, merge, reword or leave one out; your own words
    terminal (`go`). Running `--announce` again copies nothing; it says it all again.
 6. `M sync`, only after the person said that `go` kept their go. The first copy can take a while; it says how far
    it is. Without their go it copies nothing and says so.
-7. `M status`. Show the person its `copies:` line and every `problem:` line.
+7. `M status`. Show the person its `copies:` line and every `problem:` line. A `problem:` line about a folder
+   that belongs to another account is that account's: say so, and run nothing for it.
 8. `M restore --check`. Show the person its total. It proves every copy from the forge alone.
 
 To copy only some repositories, before step 5: `M config include <owner/name> ...` or
@@ -120,6 +133,11 @@ Continue, never press it. Stop, and tell the person it is theirs to read and dec
 - Never delete, and never offer to delete, the folder of copies or the record that uninstall kept, unless the
   person asks for it in their own words in this conversation; even then, it is their own command
   (`uninstall --delete-copies`, in a terminal window of their own).
+- Never type `setup --use-this-folder` unless the person asks for it in their own words in this conversation,
+  after setup's stop said what it does: going on with a folder whose record of what the skill made is lost is
+  their word, never yours.
+- Never type `setup --new-password` unless the person asks for it in their own words in this conversation: a new
+  password for their Gitea account ends any password they set for it themselves, so it is their word, never yours.
 - Never change the forge's address from 127.0.0.1, and never start a tunnel to it.
 - Never push to GitHub, and never answer a GitHub prompt on the person's behalf.
 - Reach GitHub only through `M`, never by yourself, not even to look: no `git clone` or `git ls-remote` of

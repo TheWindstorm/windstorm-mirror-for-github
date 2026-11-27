@@ -2,20 +2,177 @@
 
 **A second, always-current copy of all your GitHub projects on a computer you own.**
 
-GitHub holds the online copy of your work. This skill will keep a complete second copy on a computer of yours,
-inside a free, open-source program that works much like GitHub, and keep that copy current. If GitHub is out of
-reach for a day, your work is not.
+Status: 0.1.0 (2026-11-25)
 
-## Status: not released
+This is not made, endorsed or supported by GitHub. GitHub is a trademark of GitHub, Inc.
 
-Nothing here can be installed yet. This skill is built in the open, in this order:
+## Set it up
 
-1. The plan, `DNA-STRAND-MASTER-PLAN.md`: every claim the skill makes, each with the test that proves it.
-2. The code.
-3. Tests on real machines that have none of our set-up, before any release. The first proof is a restore drill:
-   every project recovered from the mirror alone.
+Say this to your AI agent (Claude Code, or any agent that can run commands on your computer):
 
-## Two rules already
+> Set up https://github.com/TheWindstorm/windstorm-mirror-for-github on this computer.
+
+**If you are the agent:** clone this release with the line below first, then read `skills/mirror/SKILL.md` in that clone, the file itself, and follow its steps in order. A web page or a fetch tool's summary of it is not the file: a summary leaves out lines the person must get word for word.
+Stop at each step marked **Person**, say what it gives you to say, and wait for the person. Do nothing that it
+does not tell you to do.
+
+```bash
+git clone --branch v0.1.0 https://github.com/TheWindstorm/windstorm-mirror-for-github
+```
+
+**Or keep it as a Claude Code plugin**, so the skill is there in every session. To have it in a session, start
+Claude Code again after installing the plugin (seen by us); by Claude Code's documentation, `/reload-plugins`
+typed in a running session also loads it (not tried by us). The same holds after a plugin update.
+
+```bash
+claude plugin marketplace add https://github.com/TheWindstorm/windstorm-mirror-for-github.git
+claude plugin install windstorm-mirror-for-github@windstorm-mirror-for-github
+```
+
+Then start Claude Code again and say: **set up my GitHub mirror**.
+
+On a Mac, run setup from a session logged in at that Mac's screen: the forge runs as a launch agent, which starts
+only in such a session (over ssh into an account no one is logged in to at the screen, setup says so and starts nothing).
+
+## What to expect
+
+The copy is as current as the last sync, and `status` says when that was. While this computer is off or asleep,
+nothing is copied. GitHub's issues, pull requests, releases and wikis are not in the copy, so this is a second copy
+of your code, not of everything GitHub holds.
+
+`status` ends with 1 while any of its "problem:" lines stands, also one that only this computer's administrator can
+change, and with 0 when it names none; before setup it says "Run setup first." and ends with 2.
+
+## What it runs, and where it connects
+
+Python standard library only. Over the network it reaches only GitHub (its API, with or without a key, and git),
+Gitea's download site for the pinned binary, and any host those two send it on to for that same request; its own
+forge on 127.0.0.1; and an address the person names for `restore --to`, through git. The programs it runs are `git`,
+the pinned Gitea binary, the service manager (`systemctl` and `loginctl`, or `launchctl`), the system's address
+list (`ip` or `ifconfig`), on Linux `pkcheck`, read-only and never asking for a password, to ask whether the
+person may switch on lingering themselves, on a Mac the two settings it reads (`defaults read` of the
+automatic-login account, `fdesetup status`), both read-only, on a Mac `netstat`, `ps` and `sysctl`, read-only, to
+read who holds the forge's port, and Python itself to check a self-update.
+
+Before anything carrying the forge's key or a copy goes to the forge's port, the mirror asks this computer who holds
+that port, and sends only to its own forge; when nothing listens there, it sends nothing either. On Linux it reads the
+kernel's own tables (`/proc/net/tcp` and `/proc/net/tcp6`) and its own processes; on a Mac, `netstat -anv` and `ps`.
+Each is read by its column names, and only names this release has seen are trusted. Where that read cannot be made
+(another system, or a layout this release has not seen), `setup` stops as its first act and makes nothing, and the
+mirror does not run there; a read that did not answer once is said as that, and `setup` is run again. When another
+program holds the port, `sync` and `status` say so and send it nothing; `setup` then moves the forge to a free port
+and says the new address. The forge's port is picked below the range the system hands out by itself.
+
+`status` asks GitHub, at most once a day and with no key, for this skill's newest release, to say whether a newer
+one is out. That one request carries your computer's address and the skill's name and version, nothing else of
+yours, and it installs nothing.
+
+Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
+forge on this computer; it still carries the mirror's calls to GitHub.
+
+After `restore --to`, check the new home yourself: the restore pushes from the mirror's own copy, so a
+pre-push hook of yours does not check that push.
+
+## What setup does
+
+`setup --dry-run` shows all of this first, and changes nothing.
+
+- It downloads Gitea 28.4.0, a free, open-source program much like GitHub, from dl.gitea.com, and checks it
+  against a pinned SHA-256. Gitea runs from `~/.local/share/windstorm-mirror/` and listens on this computer only
+  (127.0.0.1), with sign-up closed. Setup needs no administrator rights. Setup and its dry run check the program
+  against the pinned SHA-256 each time they run; the service's start does not check it again.
+- It makes two Gitea accounts: yours, and `mirror`, which owns the copies. Each password and each key is kept in a
+  file that only you can read. If you leave and come back, setup leaves your account and its password as they are,
+  and says when it holds no password for it; `setup --new-password`, which is yours to type, then gives your account
+  a new one, kept in that file (a password you set for it yourself stops working).
+- It runs Gitea as your own service, and syncs every 15 minutes. On Linux that is a systemd user unit, with the
+  sync timer beside it, in `~/.config/systemd/user/`; switching them on, systemd links them in that folder's
+  `default.target.wants/` and `timers.target.wants/`. On macOS, two launch agents in `~/Library/LaunchAgents/`.
+- Where a folder these go in is not on your computer yet (a fresh Linux account has no `~/.config` or
+  `~/.local/share`), setup names it in the dry run, makes it and keeps a note of it; uninstall takes it away again
+  once it is empty.
+- **Settings you can set.** `WSM_HOME` moves every folder of the skill's under it (`data/` and `config/`). On
+  Linux, `XDG_DATA_HOME` and `XDG_CONFIG_HOME` move the data and the settings folders as they do for other
+  programs. A command whose folders one of them moved says so first; setup and uninstall stop, having changed
+  nothing, when this computer's service already runs the skill from another home, and say which. Setup also stops
+  at your home folder, or at a folder that already holds anything the skill did not make. The skill reads no other
+  setting of yours.
+- **Only what it made.** The skill keeps a record of every file and folder it writes in its folders. Uninstall
+  takes only what that record holds, a folder only once it is empty. Anything else it finds in its folders when it
+  runs stays where it is: uninstall names it as yours, with each folder that stayed because of it, and still goes
+  to its end for everything that is the skill's. If that record is lost (it could not be read, or is not there)
+  while the folder holds your mirror, setup and uninstall say so and take nothing; setup names the way back,
+  `setup --use-this-folder`, which is yours to type. It takes as the skill's what stands under the skill's own names
+  in its own folders: the forge's program only with the pinned sum, and a key file only under a name the skill
+  gives and in the form it writes; its state, settings and other files of its own by their place alone, each a
+  plain file; its folders and the forge's tree by their place and names. It names each file it took and each it
+  did not, and what it took goes with uninstall.
+- **The folders above it.** A file is only as closed as the folders above it. Setup reads every folder from your
+  home down to what the skill runs (its service files, its own copy, the forge's program) and to what decides what
+  runs (the forge's settings, the skill's settings and state, the Python its service names). A folder of the skill's
+  own that others may write in, setup closes. One of yours, it never changes; when another account on this computer
+  can really reach it and write in it, setup, its dry run, the go's lines and `status` name it, with the one
+  command that closes it (`chmod go-w` and the folder), until it is closed. A folder in your own group with nobody
+  else in it is not named, nor anything inside a home only you can enter. A folder on the way that is not yours is
+  named with whose it is and no command: you cannot change it, only the computer's administrator can. Two names
+  with one user number are one account; an account whose groups cannot be read is said as that, and the others are
+  still worked out. What is read is the folders' mode bits and who is in their groups; access
+  lists (ACLs) are not read.
+- **After a restart.** On Linux, setup can switch on *lingering* for your account. That means the mirror keeps
+  running when you are logged out and after a restart, because your account's background services are allowed to
+  start without you. The dry run asks your computer whether you may switch lingering on yourself, and says what it
+  found. Setup asks you: `setup --linger` is yes, and `setup --no-linger` is no, in which case the mirror syncs only while you are logged in. On a
+  Mac, the mirror comes back by itself after a restart only if the Mac logs you in by itself (automatic login set
+  to you, and FileVault off). Otherwise it waits until you log in, and setup says so.
+
+## What only you do
+
+- **Install git and Python 3.9 or newer, if your computer lacks them.** On a Mac, the python3 that comes with
+  Apple's developer tools is new enough (3.9.6 on macOS 13). Setup checks for git first, and says how to install it. git lfs is optional: without it, projects with large files are copied without those files, and
+  setup and `status` say so. On Ubuntu or Debian: `sudo apt update && sudo apt install git`, and for large
+  files `sudo apt update && sudo apt install git-lfs`. On Fedora: `sudo dnf install git`, and for large files
+  `sudo dnf install git-lfs`. On a Mac: git comes with Apple's developer tools, and `xcode-select --install` is Apple's command for
+  them; git lfs comes from its own site, https://git-lfs.com, and setup and sync find it by
+  themselves once it is installed.
+- **Make one read-only key for each owner whose projects are to be copied**: your own account, and each
+  organisation you name. Each one is a fine-grained key with read-only access to Contents and Metadata. An
+  organisation may have to approve a key before it works. The agent shows you the page and the settings. It never
+  logs in to GitHub for you.
+- **Give each key to the skill yourself, after setup, in a terminal window of your own**, with `key set`, not through your
+  agent: whatever runs inside an agent's session, even a command you start yourself, is shown to the agent. The
+  key is then kept in a file only your account can read. An agent that runs as you could read that file; the
+  skill tells it never to, and never to put a key in its output.
+- **Watch each key's end date yourself**, on GitHub's key page. 0.1.0 says a key is ending only in `status`, two
+  weeks before, and only when it could read the end date; before your go it says, for each key, whether it could. A
+  key that stops working is said as that, and its copies as not refreshed since their last good refresh.
+- **Give the go for the first copy, yourself, in a terminal window of your own**: run `go` there (the agent
+  gives you the line). It shows you which projects they are (by name, the first 20, with the whole list in a
+  file), how big they are, where they go, what is not copied, what happens after a restart, when each key ends,
+  and how private the copy is; the copy starts only after you press Enter there. A yes to your agent is not the
+  go. Your go covers that list only: if it changes before the copy starts, nothing is copied and you run `go`
+  again.
+- **Say yes or no to lingering** (see "After a restart"). Setup does not choose for you.
+- **Delete the copies, if you ever want to**, yourself, in a terminal window of your own:
+  `uninstall --delete-copies` asks you to type how many copies there are, and refuses an answer from anywhere
+  else.
+- **Type the administrator's command**, if you are the administrator of this computer and it does not let you
+  switch lingering on yourself: setup shows the one command. Setup itself never asks for a password.
+
+## What is copied
+
+Every branch and every tag of every repository that you own, or that the organisations you name own. To copy only
+some of them, name them with `config include`. Large files are copied too, when git lfs is installed. When GitHub
+rewrites or deletes a branch, the old commit is kept in the copy as `kept/<date>/<name>`, for 90 days.
+When GitHub moves or deletes a tag, the copy's tags follow GitHub's at the next sync, and the commit the old tag
+pointed at is kept as `kept/<date>/tags/<name>`. For an annotated tag only that commit is kept, not the tag's own
+message; a tag that pointed at a file or a folder, not a commit, cannot be kept, and the sync says so.
+On Linux, a branch or tag whose name is not UTF-8 text is not copied, because the forge cannot hold one. Every other
+branch and tag of that project is copied, and each sync and `status` name the copy with the names it lacks, as with
+large files; `restore --to` names them too, and exits 1. On a Mac, such a project is not copied yet (see "Known, and not right yet" below). A project is called
+copied only when every branch and tag in GitHub's own list is in the copy at the commit GitHub lists, or is named as
+left out; where one is not, each sync and `status` name the project as a problem and its copy is not moved.
+
+## Two rules
 
 The mirror is for you. It listens on this computer only, and the skill never opens it to the network or runs a
 tunnel. Making it reachable from other computers is your own choice, and `mirror.py expose` says what that
@@ -23,27 +180,167 @@ would mean without changing anything.
 
 The copy is as private as this computer. Anyone who can read this account's files can read every project in it. Disk encryption, and who uses this computer, are yours.
 
-## Settings and rights
+## Seen to work
 
-The skill needs no administrator rights: none of its commands runs with sudo or as another account. It reads three
-settings of yours and no other: `WSM_HOME` moves every folder of the skill's under it, and on Linux
-`XDG_DATA_HOME` and `XDG_CONFIG_HOME` move its data and settings folders as they do for other programs. A command
-whose folders one of them moved says so first.
+With 0.1.0's own tool, Linux is seen. On a Mac, setup, status and uninstall are seen with it, in a test account
+with no key; a sync and a restore on a Mac are not seen yet.
 
-Your git hooks do not run in the mirror's own copies, and your proxy is never asked to reach the mirror's own
-forge on this computer; it still carries the mirror's calls to GitHub.
+- **Ubuntu 24.04.5 LTS on x86-64.** Seen on a stock virtual machine with nothing of ours on it, and in accounts
+  with no administrator rights:
+  - setup;
+  - the forge and the sync coming back across restarts;
+  - a computer with no git;
+  - a full sync from GitHub;
+  - a cut road, a stopped forge and a slowed road, with nothing changed;
+  - a rename on GitHub and back, and a deleted branch kept under `kept/`;
+  - one small git lfs object, copied whole once git lfs was installed (larger ones not seen);
+  - a restore onto a second computer.
+  Python 3.12, git 2.43, Gitea 28.4.0.
+- **The test suite, with the real Gitea 28.4.0**, on GitHub's runners: Ubuntu 24.04 on x86-64 with Python 3.9, 3.10 and
+  3.13, and macOS 26 on Apple Silicon with Python 3.9 and 3.13. These runs use a stand-in for GitHub. A person's setup has not been
+  seen on either.
+- **macOS 13.7 on Intel: the Mac's own main account, on a Mac that carries Apple's developer tools.** Seen: two
+  stand-in launch agents, shaped like the skill's forge and timer, coming back after a restart, with automatic
+  login on and FileVault off. The skill itself was not run there.
+- **macOS 27.2.1 on Apple Silicon: a test account that is not an administrator, on a Mac that carries Apple's
+  developer tools** (its python3 3.9.6), logged in at the Mac's screen, with no GitHub key. Seen with 0.1.0's own
+  tool (2026-11-24), and before it with an earlier version (2026-11-23): the skill's dry run, setup (the pinned
+  Gitea for that Mac, run as the account's own launch agent on this computer's own address), status and uninstall;
+  the account's top-level folder and its `~/Library/LaunchAgents` were the same before and after. The dry run and
+  setup said the copy stands still after a restart until the person logs in, because that Mac does not log anyone
+  in by itself. On that Mac the developer tools' Python lives in folders that belong to another account, so
+  setup named them and `status` gave them as problems: status was seen answering 1 there, for that reason, and
+  only that Mac's administrator can change those folders.
+  No copy from GitHub has yet been made on a Mac by a person's own account: on GitHub's macOS runners the tests
+  make first copies and run restore --check with the real pinned Gitea, against a stand-in for GitHub.
+- **The plugin commands above**, with no GitHub key and no GitHub login: Claude Code 2.1.280 in a Linux account,
+  and 2.1.330, installed from its site, not signed in, on a stock Ubuntu 24.04. The plugin is installed and
+  listed, with the skill in place. The short form (`TheWindstorm/windstorm-mirror-for-github`) worked the same
+  way on 2.1.280. Versions older than 2.1.280: not seen.
+- **Not seen yet:**
+  - on Linux, a systemd older than 255. The skill was seen to run on systemd 255 (Ubuntu 24.04). Before it makes
+    anything, setup reads your account's own systemd over its user bus, in the form it later reads each service
+    back in; where busctl does not know that form (seen on systemd 237 and 239), setup stops there, having made
+    nothing, and says which systemd it found;
+  - on a Mac, setup and status read back how launchd holds the skill's two jobs, in the form `launchctl print`
+    shows them. That print form was seen for the skill's own jobs on macOS 27.2.1 (the test account above), and
+    for one made-up job, not the skill, on GitHub's own Macs on macOS 15.7.9 and 26.6.1 (Intel) and 15.8.2 and
+    26.7.2 (Apple Silicon); the skill itself was not set up on those four. On another macOS the read-back may
+    answer that it "could not be read"; setup then takes the job off again and does not finish, and the line it
+    prints says the next step;
+  - a sync and a restore with 0.1.0's own tool on a Mac: not seen by us; they need a key, and wait for a
+    fine-grained read-only one. Seen with it on a Mac: setup, status and uninstall in a test account with no key
+    (above), and the test suite on GitHub's macOS runners, against a stand-in for GitHub;
+  - a fine-grained read-only key on a real account: not seen by us, and so not yet proven with a person's own
+    read-only key; that proof is due in 0.1.1. On the rounds against the real GitHub, a broader key of ours stood
+    in for it; the tool asks GitHub the same questions with either;
+  - GitHub's own answer about when such a key ends: not seen by us; its proof with a person's own read-only key is
+    due in 0.1.1. The tests use a stand-in for that answer; when the end date cannot be read, the tool says so and
+    promises no warning;
+  - a first copy from GitHub on a Mac in a person's own account, and the copy coming back after a Mac's restart
+    with the skill itself: not seen by us. Seen instead: first copies and restore --check with the real pinned
+    Gitea on GitHub's macOS runners, against a stand-in for GitHub; and setup, status and uninstall in a Mac test
+    account with no key;
+  - `status` answering 0 on a Mac, and a Mac whose own person put Apple's developer tools there (those folders
+    are then theirs, and the skill does not name them);
+  - a Mac that logs the person in by itself, and a Mac without Apple's developer tools;
+  - a Mac whose disk keeps upper and lower case apart, and GitHub itself holding two branch or tag names that
+    differ only in case or in how an accented letter is written;
+  - Debian, Fedora and other Ubuntu versions;
+  - Windows (not supported in 0.1);
+  - `self-update` moving to a newer version: none exists before 0.1.0. Its read of the latest release is seen at
+    the release. The road that always works: Claude Code's own plugin update, then `setup`;
+- **Known, and not right yet (due 0.1.1):**
+  - on a Mac where another account, an administrator, installed the developer tools, `status` ends with 1 from the
+    first minute, naming the folders of the Python it runs with as problems; nothing needs doing about them, and
+    0.1.1 says them as plain lines (row M149);
+  - a write of the skill's cut short (a kill, a power cut) can leave beside one of its files a temporary file named
+    like `state.json.k3x9a2.tmp` (the file's own name, a dot, random letters, `.tmp`); nothing takes it away yet.
+    `setup` stops on it among the things the skill did not make, and `uninstall` leaves it as not the skill's. One
+    beside a key file may hold that key: delete it as you delete any file of yours (row M168);
+  - on a Mac, a project is not copied or refreshed while GitHub holds in it a branch or tag whose name is not UTF-8
+    text, two branches or two tags whose names differ only in upper and lower case (Feature and feature), or two
+    that differ only in how an accented letter is written. A Mac's disk keeps each such pair as one file, or cannot
+    keep the name at all. Each sync and `status` name that project as a problem, with the names that differ or with
+    git's own words; its copy stays as it was; the other projects are copied. Seen with a stand-in for GitHub on
+    macOS 27.2.1 (before this release's guard, the case pair gave a copy called whole that held Feature at
+    feature's commit and no feature); not seen with GitHub itself;
+  - a project whose branches on GitHub include one named `kept/...` is copied once. At the latest from the first
+    sync after something changes on GitHub, every sync of that project reads it from GitHub again, then stops with
+    exit 1 and leaves its copy as it was; its line says so in plain words, and that the way to have it refreshed
+    again is to give that branch another name on GitHub. `restore --check` calls such names missing though the copy
+    holds them.
+    `restore --to` brings the project back without them, names them, gives one git line for each that brings it
+    over from the copy's own folder in your forge (run each as it is printed), and exits 1. A name holding a
+    backtick, a dollar-parenthesis or a character no one can see gets no such line, only a line that lists them,
+    so that no line this tool prints runs anything when passed on through a shell. Seen with a stand-in
+    for GitHub;
+  - `restore --check` counts a clone from the forge that failed as a difference in the copy, where it should say
+    the copy could not be read;
+  - when `git lfs` does not answer, a sync makes the copy without its large files and marks it, as if git lfs were
+    not installed; the next sync that hears git lfs mends it;
+  - after a restore, until `key set` is run again for each owner, `status` counts the copies as current for up to
+    half an hour and says nothing about the missing key; `sync` says "no key is kept for it" and answers 1;
+  - a backup made before the first copy exists fails with Gitea's own words; nothing is lost, as there is
+    nothing to keep yet;
+  - in an account with no user service manager (one that was never logged in, entered with `sudo -u`), setup
+    writes its files and then stops, saying the forge's service did not start; `uninstall` then takes off what
+    setup made, except the folder of copies, which it keeps and names, as it always does;
+  - for a key that ends in less than two weeks, the line before the go still says the mirror warns two weeks
+    before it ends, and `status` names the key as a problem from its first day; make the key for longer than
+    two weeks;
+  - the forge and the sync run the python3 that ran setup, by the path that program gives for itself: on a Mac
+    that carries Apple's developer tools, one inside them; with pyenv, mise or conda, one inside a folder of that
+    version or environment. If that program is moved or removed, the forge and the sync stop: `status` says the forge
+    does not answer, with its one step, setup again, which writes the python3 it is run with. Seen on Linux with
+    a python3 taken away; not seen on a Mac.
+  - on Linux, uninstall can sit without a word while systemd stops the forge's service. With the service as setup
+    writes it, systemd's own default ends that stop after 90 seconds (read in systemd's settings, not seen by us); a
+    stop setting of your own for that service can make it longer (seen once: 17 minutes without a word, with a
+    setting that never ends the stop). Once the stop ends, uninstall goes on by itself (seen once); ending uninstall
+    during that wait is not seen by us;
+  - a line that says to run the command again can come back with the same words at the second run, and the tool does
+    not yet say what to do then. It is then not a wait: do not run it a third time, and do not work round it by
+    hand; report the line at https://github.com/TheWindstorm/windstorm-mirror-for-github/issues (you may leave out
+    your account's name where a path holds it). When the line names something that must change first, such as a
+    login of your own to this computer, that is the step, not a fault to report. For uninstall on Linux after a
+    service file was removed by hand, the way out is in the next line;
+  - On Linux, if one of the mirror's service files in ~/.config/systemd/user was removed by hand, uninstall says
+    "Not now" at every run, and running it again does not help (the fix is due in 0.1.1). The way out, seen on a
+    stock Ubuntu 24.04: run `systemctl --user stop windstorm-mirror-forge.service windstorm-mirror-sync.timer`, then
+    uninstall again; it then removes the rest. Two links systemd made stay behind,
+    ~/.config/systemd/user/default.target.wants/windstorm-mirror-forge.service and
+    ~/.config/systemd/user/timers.target.wants/windstorm-mirror-sync.timer, pointing at files that are gone. After a
+    restart and a login, systemd listed no failed unit and nothing of the mirror ran; the two links can be deleted
+    like any file.
 
-`status` asks GitHub, at most once a day and with no key, for this skill's newest release, to say whether a newer
-one is out. That one request carries your computer's address and the skill's name and version, nothing else of
-yours, and it installs nothing.
+## Taking it off
 
-After `restore --to`, check the new home yourself: the restore pushes from the mirror's own copy, so a
-pre-push hook of yours does not check that push.
+```bash
+python3 -I ~/.local/share/windstorm-mirror/mirror.py uninstall
+```
+
+On a Mac (the path holds a space, so it is quoted):
+
+```bash
+python3 -I ~/"Library/Application Support/windstorm-mirror/mirror.py" uninstall
+```
+
+This removes the service, the timer and their links, Gitea, the settings and every key, and each folder setup
+made that is empty now. It switches lingering off only if setup
+switched it on. It keeps the folder of copies and the record of what the skill did here, which are yours, and the
+last thing it prints says what is gone and what is kept. If a sync is running, it waits for it to end. Run twice,
+it is safe. `uninstall --delete-copies`, run in a terminal window of your own, deletes that folder too, but only
+after you type how many copies it holds.
+
+Claude Code's own `claude plugin uninstall` takes the plugin away, but the forge and the sync timer keep running:
+they run the copy of the script that setup made in the folder above, not the plugin's files. The command above
+takes them off, and needs nothing else installed. From then on, `status` and each sync say the plugin was removed,
+with that command. Nothing of the skill's acts on your Claude Code sessions, and nothing runs from the plugin's old
+folder: a command run from there stops and names the copy setup made.
 
 ## Family
 
 Part of the Windstorm skills: [Pit Stop](https://github.com/TheWindstorm/windstorm-pit-stop),
 [Pit Board](https://github.com/TheWindstorm/windstorm-pit-board),
 [Tardigrade](https://github.com/TheWindstorm/windstorm-tardigrade).
-
-This project is not affiliated with, endorsed by or sponsored by GitHub. GitHub is a trademark of GitHub, Inc.
