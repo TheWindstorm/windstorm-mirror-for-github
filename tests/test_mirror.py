@@ -104,6 +104,15 @@ class _PassableAbove:
 from fake_github import FakeGitHub  # noqa: E402
 
 
+def refuse_words(unit):
+    """systemctl's words for a stop a unit's RefuseManualStop=yes refuses, on standard error. RECORDED on systemd
+    255 (a stock Ubuntu 24.04 guest, 2026-11-26), the forge's unit's two lines word for word."""
+    name = unit if unit.endswith((".service", ".timer")) else unit + ".service"
+    return (f"Failed to stop {name}: Operation refused, unit {name} may be requested by dependency only (it is "
+            f"configured to refuse manual start/stop).\nSee user logs and 'systemctl --user status {name}' for "
+            "details.\n")
+
+
 def fread_bytes(path):
     with open(path, "rb") as f:
         return f.read()
@@ -295,6 +304,10 @@ class Home:
         # bus: No medium found" and changes nothing; stop_reads: how many reads a stopped unit still reads deactivating.
         self.units_up, self.user_bus, self.stop_reads, self.stopping = set(), True, 0, {}
         self.show_answer = None      # (code, stdout) every `show <unit> -p ActiveState` answers instead, when set
+        # refuse_stop: units a person's own RefuseManualStop=yes keeps systemd from stopping by hand. RECORDED on
+        # systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): `disable --now` takes the links, stops
+        # the others, says refuse_words(unit) on standard error, and ENDS WITH CODE 0; `stop` alone says the same, 4.
+        self.refuse_stop = set()
         # G1.24: the user manager's bus (busctl), answering from the unit files on disk as sd_standin_unit reads them.
         # bus_answer: (code, stdout) every busctl call answers instead, when set; bus_starts: the start lines every
         # ExecStart read gives instead, when set (a manager that parsed something other than what was meant).
@@ -521,6 +534,43 @@ class Home:
                         if os.path.lexists(f) and not os.path.islink(f) and not os.access(f, os.R_OK):
                             return subprocess.CompletedProcess(
                                 cmd, 1, "", f"Failed to {verb[0]} unit: Unit file {name} does not exist.\n")
+                refused = [u for u in verb[1:] if u in self.refuse_stop] if (
+                    verb[:1] == ["stop"] or (verb[:1] == ["disable"] and "--now" in cmd)) else []
+                if verb[:1] == ["is-enabled"]:
+                    # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): on stdout,
+                    # "enabled" (code 0) while its link from setup is there, "disabled" (code 1) once it is taken,
+                    # and "static" (code 0) for the sync's one-shot service, which has no install section
+                    # (log sha256 85971716290afec1): "not-found" (code 4) for a unit whose
+                    # file is at mode 000, while systemd still holds it loaded and once it does not, its link standing
+                    u = verb[1]
+                    name = u if u.endswith((".service", ".timer")) else u + ".service"
+                    base = os.path.dirname(mirror.paths()["unit"])
+                    f = os.path.join(base, name)
+                    if os.path.lexists(f) and not os.path.islink(f) and not os.access(f, os.R_OK):
+                        return subprocess.CompletedProcess(cmd, 4, "not-found\n", "")
+                    if name == mirror.SYNC_UNIT + ".service":
+                        return subprocess.CompletedProcess(cmd, 0, "static\n", "")
+                    link = os.path.join(base, "timers.target.wants" if name.endswith(".timer") else
+                                        "default.target.wants", name)
+                    there = os.path.lexists(link)
+                    return subprocess.CompletedProcess(cmd, 0 if there else 1,
+                                                       "enabled\n" if there else "disabled\n", "")
+                if verb[:1] == ["stop"] and refused:
+                    return subprocess.CompletedProcess(cmd, 4, "", "".join(refuse_words(u) for u in refused))
+                if verb[:1] == ["stop"]:
+                    # RECORDED on systemd 255 (log sha256 85971716290afec1): `stop` of a unit
+                    # not loaded (its file gone from the unit folder) and not running ends 5, "Failed to stop <unit>:
+                    # Unit <unit> not loaded." (what it answers for one not loaded and still running is NOT SEEN BY US)
+                    base = os.path.dirname(mirror.paths()["unit"])
+                    gone = []
+                    for u in verb[1:]:
+                        name = u if u.endswith((".service", ".timer")) else u + ".service"
+                        if (not os.path.lexists(os.path.join(base, name)) and name not in self.bus_loaded
+                                and u not in self.units_up and name not in self.units_up):
+                            gone.append(name)
+                    if gone and len(gone) == len(verb[1:]):
+                        return subprocess.CompletedProcess(cmd, 5, "", "".join(
+                            f"Failed to stop {n}: Unit {n} not loaded.\n" for n in gone))
                 if verb[:1] == ["disable"]:
                     # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): a unit masked (its
                     # file a link to /dev/null) is "masked, ignoring", code 0, stopped with --now, and its link from
@@ -537,14 +587,17 @@ class Home:
                         elif os.path.lexists(link):
                             os.remove(link)
                             said.append(f'Removed "{link}".')
-                    if said:
+                    if said or refused:
                         for u in verb[1:] if "--now" in cmd else []:     # as the plain disable --now below
+                            if u in refused:
+                                continue
                             if u in self.units_up and self.stop_reads:
                                 self.stopping[u] = self.stop_reads
                             self.units_up.discard(u)
-                        if "--now" in cmd and mirror.SERVICE in verb[1:]:
+                        if "--now" in cmd and mirror.SERVICE in verb[1:] and mirror.SERVICE not in refused:
                             self.forge_ends()
-                        return subprocess.CompletedProcess(cmd, 0, "", "\n".join(said) + "\n")
+                        return subprocess.CompletedProcess(cmd, 0, "", "".join(x + "\n" for x in said)
+                                                           + "".join(refuse_words(u) for u in refused))
                 if verb[:1] == ["daemon-reload"]:
                     # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): after uninstall's
                     # daemon-reload, a unit whose file is of mode 000 is no longer held (load=not-found)
@@ -572,6 +625,8 @@ class Home:
                 self.answered.append((cmd, mac.returncode))
                 return mac
             if cmd[:2] == ["loginctl", "show-user"]:
+                if self.linger == "unread":       # a read that fails: code and words MADE UP for the test
+                    return subprocess.CompletedProcess(cmd, 1, "", "Failed to get user: made up for this test\n")
                 return subprocess.CompletedProcess(cmd, 0, f"Linger={self.linger}\n", "")
             if self.forge_follows:
                 label = f"gui/{os.getuid()}/{mirror.LAUNCHD_LABEL}"
@@ -1292,8 +1347,16 @@ class G1(unittest.TestCase):
                 self.assertEqual(rc, 3, out)
                 self.assertEqual([x for x in kept if not os.path.exists(x)], [], "something was removed")
                 self.assertIn("systemd still had the forge's service deactivating 1 s after it was told to stop it", out)
-                self.assertIn("the sync's service is stopped, and its file stays too", out)
-                self.assertIn(f". Nothing was removed. Run uninstall again in a minute: {step}", out)
+                back = mirror.own_command(p, "setup")
+                # static is systemd's own answer for the sync's service, which has no install section: said as that
+                # answer, never as a read that failed
+                self.assertIn("the sync's service: stopped, for restarts systemd answers: static", out)
+                self.assertNotIn("could not be read (systemd:", out)
+                # each command stands last on a line of its own
+                self.assertIn(". No file of the mirror was removed.\nTo go on leaving: run uninstall again in a "
+                              f"minute: {step}\nTo have the mirror running as before instead, run setup again, which "
+                              f"keeps every copy: {back}\n", out)
+                self.assertNotIn("Nothing was removed", out)
                 self.assertNotIn("Gone now", out)
                 # (2b) answers that name no state are never "stopped" (a parser that took a missing state for
                 # "inactive" turned a bus error and an empty answer into "gone", in another skill): exit 0 with
@@ -1308,9 +1371,87 @@ class G1(unittest.TestCase):
                     self.assertEqual([x for x in kept if not os.path.exists(x)], [], f"{answer}: something was removed")
                     self.assertIn(f"whether systemd stopped the forge's service could not be read (systemctl --user "
                                   f"answered code {answer[0]}", out)
-                    self.assertIn(f". Nothing was removed. Run uninstall again in a minute: {step}", out)
+                    self.assertIn("the forge's service: whether it runs could not be read (systemctl --user answered "
+                                  f"code {answer[0]}", out)
+                    self.assertIn(f". No file of the mirror was removed.\nTo go on leaving: run uninstall again in a "
+                                  f"minute: {step}\n", out)
+                    self.assertNotIn("Nothing was removed", out)
                     self.assertNotIn("no user bus", out)
                 h.show_answer = None
+                # (4) SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): a person's own
+                # RefuseManualStop=yes on the forge's unit. The tool's disable took the forge's and the timer's links
+                # and stopped the timer, the forge ran on, and the words said "Nothing was removed" and "again in a
+                # minute". Now: each unit as systemd reads it after the calls, systemctl's own refusal, no file
+                # removed, the step on (never "in a minute"), and the step back, which brings both links and the
+                # timer back (as setup did from that state there).
+                h.stopping.clear()
+                h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                h.refuse_stop = {mirror.SERVICE}
+                links = [os.path.join(base, "default.target.wants", mirror.SERVICE + ".service"),
+                         os.path.join(base, "timers.target.wants", mirror.SYNC_UNIT + ".timer")]
+                for x, to in zip(links, (p["unit"], os.path.join(base, mirror.SYNC_UNIT + ".timer"))):
+                    os.makedirs(os.path.dirname(x), exist_ok=True)
+                    if not os.path.lexists(x):
+                        os.symlink(to, x)
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "a file was removed")
+                self.assertEqual([x for x in links if os.path.lexists(x)], [], "the stand-in's disable took the links")
+                lines = out.splitlines()
+                at = [i for i, l in enumerate(lines) if l.startswith("Not now: ")]
+                self.assertEqual(len(at), 1, out)
+                name = mirror.SERVICE + ".service"
+                self.assertEqual(lines[at[0]:at[0] + 4], [
+                    "Not now: systemd did not stop the forge's service. As systemd reads them now: the forge's "
+                    "service: running (active), not switched on for restarts; the sync's service: stopped, for "
+                    "restarts systemd answers: static; the sync's timer: stopped, "
+                    "not switched on for restarts. No file of the mirror was removed. systemctl's own words for the "
+                    "forge's service: "
+                    f"Failed to stop {name}: Operation refused, unit {name} may be requested by dependency only (it is "
+                    "configured to refuse manual start/stop).",
+                    "To go on leaving: systemd answers so while that stands, so uninstall run again ends the same "
+                    f"way. What systemd holds for the forge's service shows with: systemctl --user cat {name}",
+                    f"Once it can be stopped, run uninstall again: {step}",
+                    "To have the mirror running as before instead, run setup again, which keeps every copy: "
+                    f"{back}"], out)
+                # a command stands last on its line: from the command to the line's end is that command alone
+                for l, cmd in zip(lines[at[0] + 1:at[0] + 4], (f"systemctl --user cat {name}", step, back)):
+                    self.assertTrue(l.endswith(": " + cmd), l)
+                self.assertNotIn("in a minute", out)
+                # the step on, as printed, with the person's setting still in place: the same answer, nothing removed
+                rc2, out2 = quiet(mirror.main, shlex.split(step)[3:])
+                self.assertEqual(rc2, 3, out2)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "a file was removed")
+                # (4b) the refused unit is the one named: a refusal on the sync's timer names the timer (the timer's
+                # refusal is not recorded; the stand-in says the forge's recorded words with the timer's name)
+                h.refuse_stop = {mirror.SYNC_UNIT + ".timer"}
+                h.stopping.clear()
+                h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                rc, out = quiet(mirror.main, ["uninstall"])
+                self.assertEqual(rc, 3, out)
+                self.assertEqual([x for x in kept if not os.path.exists(x)], [], "a file was removed")
+                timer = mirror.SYNC_UNIT + ".timer"
+                self.assertIn("Not now: systemd did not stop the sync's timer.", out)
+                self.assertIn("\nTo go on leaving: systemd answers so while that stands, so uninstall run again ends "
+                              "the same way. What systemd holds for the sync's timer shows with: systemctl --user cat "
+                              f"{timer}\n", out)
+                self.assertNotIn(f"systemctl --user cat {name}", out)
+                h.refuse_stop = set()
+                # (5) A guest's finding (the maintainer's ruling, 11-26): is-enabled is read as three answers; only "enabled" and
+                # "disabled" are yes and no, and any other word is the third answer, said as systemd's own word.
+                # RECORDED on systemd 255 (log sha256 85971716290afec1): "not-found", code
+                # 4, for a running unit whose file is at mode 000, its link standing.
+                os.symlink(p["unit"], links[0])
+                self.assertEqual(mirror.unit_enabled(name), ("on", "enabled"))
+                if os.geteuid() != 0:                      # root reads a file of mode 000
+                    os.chmod(p["unit"], 0)
+                    try:
+                        self.assertEqual(mirror.unit_enabled(name), (None, "systemd: not-found"))
+                    finally:
+                        os.chmod(p["unit"], 0o644)
+                os.remove(links[0])
+                self.assertEqual(mirror.unit_enabled(name), ("off", "disabled"))
+                self.assertEqual(mirror.unit_enabled(mirror.SYNC_UNIT + ".service"), (None, "systemd: static"))
                 # (3) systemd stops them; the step, exactly as printed
                 h.stopping.clear()
                 h.stop_reads = 0
@@ -1774,6 +1915,50 @@ class G1(unittest.TestCase):
                 self.assertIn("Lingering was already on before setup, so it is left on.", out)
                 self.assertEqual(h.linger, "yes")
                 self.assertFalse([c for c in h.calls if "disable-linger" in c])
+            # (f) A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest: setup said
+            # "Lingering is now on ... uninstall switches it off again", and an uninstall with the state file at mode
+            # 000 ended 0 with no line on lingering). Whenever uninstall ends with lingering on, or not read, and did
+            # not switch it off, it says so: the state as read, why it was left, the person's own command. It
+            # switches off only where its record says setup switched it on; read off, nothing is said.
+            later = f"To switch it off yourself, if you want: loginctl disable-linger {me}"
+            unread_rec = ("the record of what setup did here could not be read, so uninstall cannot tell whether setup "
+                          "switched it on")
+            for record, linger, want in (
+                    ("unreadable", "yes", f"Lingering is on for your account, and is left on: {unread_rec}. {later}"),
+                    ("no key", "yes", "Lingering is on for your account, and is left on: the record of what setup did "
+                                      f"here does not say that setup switched it on. {later}"),
+                    ("none", "yes", "Lingering is on for your account, and is left on: no record of what setup did "
+                                    "here is on this computer, so uninstall cannot tell whether setup switched it on. "
+                                    + later),
+                    ("unreadable", "unread", "Whether lingering is on for your account could not be read (loginctl "
+                                             "answered code 1: Failed to get user: made up for this test), and "
+                                             f"uninstall did not switch it off: {unread_rec}. {later}"),
+                    ("unreadable", "no", None)):
+                with Home(linger=linger) as h, self.subTest(record=record, linger=linger):
+                    p = mirror.paths()
+                    os.makedirs(os.path.dirname(p["state"]), exist_ok=True)
+                    os.makedirs(p["conf"], mode=0o700, exist_ok=True)
+                    if record == "unreadable":
+                        # the record says setup switched it on, and cannot be read: cut short (so root, who reads mode
+                        # 000, cannot read it either) and at mode 000, as on the guest
+                        with open(p["state"], "w") as fh:
+                            fh.write('{"linger_by_setup": tru')
+                        os.chmod(p["state"], 0)
+                    elif record == "no key":
+                        mirror.save_state(p, {"port": 1})
+                    try:
+                        rc, out = quiet(mirror.main, ["uninstall"])
+                    finally:
+                        if os.path.exists(p["state"]):
+                            os.chmod(p["state"], 0o600)
+                    self.assertEqual(rc, 0, out)
+                    self.assertFalse([c for c in h.calls if "disable-linger" in c], out)
+                    self.assertEqual(h.linger, linger)
+                    if want:
+                        self.assertIn(want, out)
+                        self.assertEqual(out.count("ingering"), 1 + want.count("ingering") - 1, out)
+                    else:
+                        self.assertNotIn("ingering", out)
             # Refused: the administrator's one command, never a dialog.
             with Home(linger="no", enable_linger_ok=False) as h:
                 back, note = mirror.linger_step({})
@@ -2487,7 +2672,9 @@ class G1(unittest.TestCase):
                 self.assertNotIn("uninstall", line.split(";")[0])
                 step = mirror.read_back_step("forge", "differs")
                 self.assertTrue(step.startswith("A setting of your own that changes it comes off first, then run setup "
-                                                "again; if this line comes back after that, run uninstall"), step)
+                                                "again; if this line comes back after that, run uninstall, which takes "
+                                                "away the skill's own files and names any it leaves, and open an "
+                                                "issue with this line"), step)
                 self.assertTrue(step.endswith("systemctl --user cat " + mirror.SERVICE + ".service"), step)
             status_src, setup_src = inspect.getsource(mirror.cmd_status), inspect.getsource(mirror.cmd_setup)
             self.assertIn("theirs_line(p, reads)", status_src)
@@ -6238,6 +6425,34 @@ class G6(unittest.TestCase):
             os.environ["WSM_HOME"] = os.path.join(h.tmp, "a-new-folder")
             full_setup(h)
             self.assertEqual(fread(mine), "mine\n")
+        # A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest, log
+        # sha256 85971716290afec1): with no WSM_HOME, a folder the skill did not make in the settings folder (keys,
+        # made by hand) was said to be in the folder of copies, and the step said to move it out of "it". The stop
+        # names the folder that holds the entry; with entries in both, both folders, and each entry by its path.
+        with Home(linger="yes") as h:
+            os.environ.pop("WSM_HOME")                            # put back by Home on its way out
+            p = mirror.paths()
+            full_setup(h)
+            theirs = os.path.join(p["conf"], "keys")
+            os.makedirs(theirs, mode=0o700)
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            self.assertIn(f"Stopped: {p['conf']} already holds things the skill did not make: {theirs}. ", out)
+            self.assertNotIn(f"Stopped: {p['data']} ", out)
+            self.assertIn("The one next step: move those out of it (into a folder of your own, to keep them), and run "
+                          "setup again.", out)
+            mine = os.path.join(p["data"], "my-notes.txt")
+            with open(mine, "w") as f:
+                f.write("mine\n")
+            rc, out = h.setup()
+            self.assertEqual(rc, 2, out)
+            self.assertIn(f"Stopped: {p['data']} and {p['conf']} already hold things the skill did not make: ", out)
+            self.assertIn(mine, out)
+            self.assertIn(theirs, out)
+            self.assertIn("The one next step: move those out of the folder each is in (into a folder of your own, to "
+                          "keep them), and run setup again.", out)
+            self.assertEqual(fread(mine), "mine\n")
+            self.assertTrue(os.path.isdir(theirs))
 
     def test_G6_29_a_folder_of_the_skills_that_cannot_be_entered_is_never_said_as_an_absence(self):
         """M167 (G6.29; found 2026-11-26 in a reading of the code, then seen at command level in made homes): the
@@ -9745,8 +9960,13 @@ class G9(unittest.TestCase):
                                     else:
                                         h.gone |= {mirror.LAUNCHD_LABEL, mirror.SYNC_LABEL}
                                 elif held == "held":
-                                    h.bus_starts = [["/usr/bin/python3", mirror.forge_argv(p), False, 0, 0, 0, 0, 0,
-                                                     0, 0]]
+                                    # loaded at setup, before the chmod: systemd holds the unit as it read it, its own
+                                    # start line too, until a daemon-reload (RECORDED, systemd 255,
+                                    # log sha256 85971716290afec1); each unit shows its own start line
+                                    unit = (os.path.basename(f) if not f.endswith(".timer") else
+                                            mirror.SYNC_UNIT + ".service")
+                                    h.bus_loaded = {unit: whole.decode() if not f.endswith(".timer")
+                                                    else fread(files[1])}
                                 os.chmod(f, 0)
                                 if os.access(f, os.R_OK):                   # root reads mode 000: the read's fault stood in
                                     def sha(path, real=real_sha, f=f):
@@ -9779,8 +9999,11 @@ class G9(unittest.TestCase):
                                     n = len(h.calls)
                                     rc, out = quiet(mirror.main, ["uninstall"])
                                     self.assertEqual(rc, 0, out)
+                                    # M163 (G9.18): on Linux the forge's unit that could not be read takes the limit
+                                    # road from the file's own read, whatever systemd holds (the maintainer's ruling, 11-26)
                                     self.assertIn(f"{f} (it could not be read: it could not be opened (PermissionError)"
-                                                  if (which or held == "held") else f"Not taken, and left byte for "
+                                                  if (which or (held == "held" and mac)) else
+                                                  f"Not taken, and left byte for "
                                                   f"byte: {f}. It could not be read: it could not be opened "
                                                   "(PermissionError)", out)
                                     self.assertTrue(out.strip().endswith("it is yours, to keep or delete after you look "
@@ -9961,12 +10184,16 @@ class G9(unittest.TestCase):
         other = "/srv/another-home"
         try:
             for world in ("Q another home's sync", "P this home's sync", "U systemd does not answer",
-                          "R systemd holds the forge as loaded", "M the forge unreadable, the timer masked"):
-                with Home() as h, self.subTest(world=world):
+                          "R systemd holds the forge as loaded", "M the forge unreadable, the timer masked",
+                          "O systemd holds the forge as loaded, another home's sync",
+                          "Q2 another home's sync, the forge not loaded and still running"):
+                # O and Q2 as on the guest: setup switched lingering on, and loginctl reads it on (M186:
+                # lingering read off, and not switched off here, is not said)
+                with Home(linger="yes" if world.startswith(("O", "Q2")) else "no") as h, self.subTest(world=world):
                     p = mirror.paths()
                     forge, sync_unit, timer = mirror.service_files(p)
                     text = mirror.sync_unit_text(p)
-                    if world.startswith("Q"):
+                    if world.startswith(("Q", "O")):
                         self.assertIn(os.environ["WSM_HOME"], text)
                         text = text.replace(os.environ["WSM_HOME"], other)
                     os.makedirs(os.path.dirname(forge), exist_ok=True)
@@ -9988,10 +10215,16 @@ class G9(unittest.TestCase):
                         mirror.sha256_of = lambda f, _r=real_sum: (_ for _ in ()).throw(PermissionError(13, "denied")) \
                             if f == forge else _r(f)
                     h.units_up |= {mirror.SERVICE, mirror.SYNC_UNIT + ".timer"}
+                    if world.startswith(("Q ", "P")):
+                        # the forge's unit of mode 000 that systemd has not loaded and that runs nothing, as a stock
+                        # Ubuntu 24.04 guest read it (2026-11-26): not found, inactive
+                        h.units_up.discard(mirror.SERVICE)
+                    if world.startswith(("O", "Q2")):
+                        mirror.save_state(p, {"linger_by_setup": True})
                     if world.startswith("U"):
                         h.bus_answer = (1, "")
                     link = os.path.join(os.path.dirname(forge), "default.target.wants", os.path.basename(forge))
-                    if world.startswith("R"):
+                    if world.startswith(("R", "O")):
                         # RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): the
                         # unit loaded before its file became mode 000 is held with its start line; disable refuses
                         # the whole call ("Unit file ... does not exist.", code 1) and stops nothing; stop works
@@ -10012,6 +10245,32 @@ class G9(unittest.TestCase):
                         rc, out = quiet(mirror.main, ["uninstall"])
                         offs = [c for c in h.calls[n:] if c[:2] == ["systemctl", "--user"] and
                                 any(v in c for v in ("disable", "stop", "kill"))]
+                        lingers = [c for c in h.calls[n:] if c[:2] == ["loginctl", "disable-linger"]]
+                        if world.startswith("Q2"):
+                            # SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): the forge's unit
+                            # not loaded (its file at mode 000, a daemon-reload after) and still active with one forge
+                            # process; uninstall said "so it runs nothing", took the program, the key and the script,
+                            # and switched lingering off. Now: "Not now", nothing told off or removed, and the step
+                            # as printed ends with the forge stopped.
+                            self.assertEqual(rc, 3, out)
+                            self.assertIn("Not now: systemd still has the forge's service "
+                                          f"({mirror.SERVICE}.service) active; systemd shows no start line for it, "
+                                          f"and {forge} could not be read either", out)
+                            self.assertNotIn("runs nothing", out)
+                            self.assertEqual((offs, lingers), ([], []), out)
+                            self.assertTrue(os.path.exists(p["script"]), out)
+                            self.assertIn(f"The one next step: move {forge} out of {os.path.dirname(forge)}", out)
+                            os.chmod(forge, 0o600)
+                            kept = os.path.join(h.tmp, "kept-by-the-person")
+                            os.makedirs(kept)
+                            os.rename(forge, os.path.join(kept, os.path.basename(forge)))   # the step, as printed
+                            again = out.rsplit("then run uninstall again: ", 1)[1].strip()
+                            self.assertEqual(again, mirror.own_command(p, "uninstall"))
+                            rc, out = quiet(mirror.main, ["uninstall"])
+                            self.assertEqual(rc, 0, out)
+                            self.assertNotIn(mirror.SERVICE, h.units_up, out)
+                            self.assertNotIn("Not now", out)
+                            continue
                         if world.startswith("U"):
                             self.assertEqual(rc, 3, out)
                             self.assertIn("Not now", out)
@@ -10067,7 +10326,23 @@ class G9(unittest.TestCase):
                                 self.assertNotIn(chr(96), words)
                                 self.assertNotIn("$" + chr(40), words)
                                 self.assertIn("so no line is given", words)
-                        if world.startswith("Q"):
+                        if world.startswith("O") and os.geteuid() != 0:
+                            # SEEN on a stock Ubuntu 24.04 guest (systemd 255, 2026-11-26): systemd held the
+                            # forge loaded with this home's start line while its file was of mode 000, and uninstall
+                            # switched off the sync's service, which named another home's copy, and its timer, and
+                            # said "The mirror is off this computer". Now the forge alone is told off, the sync's two
+                            # units are left running and named, and lingering stays on for them.
+                            self.assertIn(["systemctl", "--user", "stop", mirror.SERVICE], offs)
+                            self.assertNotIn(mirror.SERVICE, h.units_up, out)
+                            self.assertIn("Lingering was switched on by setup, and is left on, because the sync's "
+                                          f"service ({mirror.SYNC_UNIT}.service) is left running, and would stop at "
+                                          "your logout without it. To switch it off yourself later: loginctl "
+                                          "disable-linger ", out)
+                            self.assertEqual((lingers, h.linger), ([], "yes"), out)
+                        if world.startswith("Q "):
+                            self.assertIn(f"the forge's service ({mirror.SERVICE}.service), for which systemd shows no "
+                                          "start line, so it runs nothing", out)
+                        if world.startswith(("Q", "O")):
                             self.assertFalse(timer_off, (offs, out))
                             self.assertIn(mirror.SYNC_UNIT + ".timer", h.units_up)
                             self.assertIn("runs another copy than this home's", out)
@@ -11643,7 +11918,7 @@ class G6Words(unittest.TestCase):
                         mine.add("HardStop")                  # says a HardStop's words: every raise is checked
                     built |= mine
                     if mine & {"git_missing_sentence", "check_key", "LINGER_CHOICE", "<far>", "HardStop", "<other>",
-                               "door_line", "<bus>"}:
+                               "door_line", "<bus>", "systemd_not_now"}:
                         continue                              # checked below, where the words are built
                     if not self.NEXT.search(words(arg)):
                         lacking.append((a.lineno, words(arg)[:90]))
@@ -11663,7 +11938,9 @@ class G6Words(unittest.TestCase):
             self.assertTrue(re.search(r"\. (Run setup|Run status again|The mirror needs that read to run; the README)",
                                       line), line)
         for fn in ("other_install_stop", "home_is_not_ours", "bus_floor",  # G9.12, G1.24: each stop it returns
-                   "kept_step", "folders_floor", "root_door"):             # the three answers (M151, M154-M159), M167, M177
+                   "kept_step", "folders_floor", "root_door",              # the three answers (M151, M154-M159),
+                                                                           # M167, M177
+                   "systemd_not_now"):                                     # M107: a Linux "Not now" after systemd calls
             for r in ast.walk(funcs[fn]):
                 if isinstance(r, ast.Return) and r.value is not None and words(r.value):
                     self.assertTrue(self.NEXT.search(words(r.value)), (fn, words(r.value)[:90]))
@@ -11679,7 +11956,8 @@ class G6Words(unittest.TestCase):
                 "SHOWN_CHANGED",                                                 # (what a ? stands for, M132)
                 "paths", "MIRROR_USER"}                                          # (a folder; the forge account's name)
         self.assertEqual(built - data - {"LINGER_CHOICE", "git_missing_sentence", "check_key", "<far>", "HardStop",
-                                         "<other>", "door_line", "<bus>", "kept_step", "kept_stop_words"},
+                                         "<other>", "door_line", "<bus>", "kept_step", "kept_stop_words",
+                                         "systemd_not_now"},
                          set(),
                          "a stop line is built from something this test does not check")
 

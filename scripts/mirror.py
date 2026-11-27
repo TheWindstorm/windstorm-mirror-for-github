@@ -1040,15 +1040,21 @@ def home_is_not_ours(p, use=False, dry=False):
         # named as the person's; only an entry at a place setup itself writes stops it (never written over)
         others = [x for x in others if writes_there(p, x)]
     if others:
-        where = h or p["data"]
+        # A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest: an entry in
+        # the settings folder was said to be in the folder of copies): the stop names the folder that holds them
+        roots = [r for r in own_roots(p) if any(x == r or x.startswith(r.rstrip("/") + "/") for x in others)]
+        where = h or (" and ".join(roots) if roots else p["data"])
+        two = not h and len(roots) > 1
         # M158: a folder that holds a mirror is never left for a second home: what is in it is moved out of it
         second = h and not holds_mirror(p)
-        return (f"Stopped: {where} already holds things the skill did not make: " + ", ".join(others[:8])
+        return (f"Stopped: {where} already " + ("hold" if two else "holds") + " things the skill did not make: "
+                + ", ".join(others[:8])
                 + (f" and {len(others) - 8} more" if len(others) > 8 else "") + ". The skill writes only into "
                 "folders that are its own, so nothing of yours is written over or taken away. Nothing was changed. "
                 "The one next step: " + ("set WSM_HOME to a folder that does not exist yet, or is empty"
-                                         if second else "move those out of it (into a folder of your own, to keep "
-                                         "them)") + ", and run setup again.")
+                                         if second else "move those out of " + ("the folder each is in" if two else
+                                                                                "it")
+                                         + " (into a folder of your own, to keep them)") + ", and run setup again.")
     if taken_on and not dry:
         _take_on_pending[:] = [(p, lost, rec)]     # taken on at setup's first write, after its last stop (a stock Ubuntu 24.04 guest, 2026-11-26)
     return None
@@ -1882,8 +1888,10 @@ def theirs_line(p, reads=None):
     return " ".join(said)          # a command, where one is given, stands last (rule 31 (v.5) (3))
 
 
-COMES_BACK = ("if this line comes back after that, run uninstall, which takes its files away, and open an issue with "
-              "this line")
+# (seen 2026-11-26 on a stock Ubuntu 24.04 guest: uninstall took the skill's own files and left a service file
+# changed by hand, named; "which takes its files away" was not true there)
+COMES_BACK = ("if this line comes back after that, run uninstall, which takes away the skill's own files and names "
+              "any it leaves, and open an issue with this line")
 
 
 def read_back_step(which, answer, where="setup"):
@@ -2028,10 +2036,60 @@ def span_seconds(text):
 
 def linger_state():
     """'yes', 'no' or 'unknown' for this account's systemd lingering."""
+    return linger_read()[0]
+
+
+def linger_read():
+    """This account's systemd lingering, three answers: ('yes', ''), ('no', ''), or ('unknown', what loginctl
+    answered)."""
     out = run(["loginctl", "show-user", getpass.getuser(), "-p", "Linger"])
     if out.returncode != 0:
-        return "unknown"
-    return "yes" if out.stdout.strip().endswith("=yes") else "no"
+        said = [x.strip() for x in shown_lines(out.stderr or "")]
+        return "unknown", f"code {out.returncode}" + (f": {said[0]}" if said else "")
+    return ("yes" if out.stdout.strip().endswith("=yes") else "no"), ""
+
+
+def uninstall_linger(st, record, left_running):
+    """A guest's finding (the maintainer's ruling, 11-26; seen on a stock Ubuntu 24.04 guest: setup said
+    "Lingering is now on ... uninstall switches it off again", and an uninstall with the state file at mode 000 ended
+    0 with no line on lingering): the one sentence every Linux uninstall road says of lingering. Uninstall switches
+    it off only where its record says setup switched it on and nothing is left running (as before); whenever
+    lingering is on, or could not be read, and uninstall did not switch it off, it says so: the state as read, why
+    it was left, and the person's own command for later. Lingering read off, and not switched off here, is not
+    said."""
+    user = getpass.getuser()
+    later = f"To switch it off yourself, if you want: loginctl disable-linger {user}"
+    by_setup = st.get("linger_by_setup") if record == "read" else None
+    if by_setup and not left_running:
+        if run(["loginctl", "disable-linger", user]).returncode == 0:
+            return "Lingering was switched on by setup, and is switched off again."
+        return f"Lingering was switched on by setup, and could not be switched off: run loginctl disable-linger {user}"
+    state, said = linger_read()
+    if state == "no":
+        return ""
+    if by_setup:            # M163: what is left running as another copy's keeps running past a logout
+        why = ("setup switched it on, and " + " and ".join(left_running) + " "
+               + ("is" if len(left_running) == 1 else "are") + " left running, and would stop at your logout without "
+               "it")
+        if state == "yes":
+            return ("Lingering was switched on by setup, and is left on, because " + why[len("setup switched it on, "
+                    "and "):] + f". To switch it off yourself later: loginctl disable-linger {user}")
+    elif by_setup is False:
+        why = "it was already on before setup"
+        if state == "yes":
+            return f"Lingering was already on before setup, so it is left on. {later}"
+    elif record == "unreadable":
+        why = ("the record of what setup did here could not be read, so uninstall cannot tell whether setup "
+               "switched it on")
+    elif record == "read":
+        why = "the record of what setup did here does not say that setup switched it on"
+    else:
+        why = ("no record of what setup did here is on this computer, so uninstall cannot tell whether setup "
+               "switched it on")
+    if state == "yes":
+        return f"Lingering is on for your account, and is left on: {why}. {later}"
+    return (f"Whether lingering is on for your account could not be read (loginctl answered {said}), and uninstall did "
+            f"not switch it off: {why}. {later}")
 
 
 def comes_back_by_itself(dry=False):
@@ -2342,6 +2400,8 @@ SYSTEMD_WAIT = 30      # seconds systemd is given to stop a unit uninstall told 
 NO_USER_BUS = re.compile(r"Failed to connect to\b[^:\n]*\bbus\b")
 SYSTEMD_UNITS = ((None, "the forge's service"), (".service", "the sync's service"), (".timer", "the sync's timer"))
 SYSTEMD_LINK_LEFT = []  # (unit, systemctl's own line) for each unit whose link systemctl did not take off at uninstall
+# unit: systemctl's own line of why it did not stop the unit, from the last stop call uninstall made for it
+SYSTEMD_STOP_SAID = {}
 
 
 def wants_link(p, unit):
@@ -2349,6 +2409,36 @@ def wants_link(p, unit):
     timer = unit.endswith(".timer")
     return os.path.join(os.path.dirname(p["unit"]), "timers.target.wants" if timer else "default.target.wants",
                         unit if timer else unit + ".service")
+
+
+def unit_state(unit):
+    """One unit's ActiveState as systemd reads it now: (state, '') or (None, what systemctl answered)."""
+    out = run(["systemctl", "--user", "show", unit, "-p", "ActiveState"])
+    state = dict(x.split("=", 1) for x in lines_of(out.stdout) if "=" in x).get("ActiveState", "").strip()
+    if out.returncode != 0 or not state:
+        said = [x.strip() for x in shown_lines(out.stderr or out.stdout)]
+        return None, f"code {out.returncode}" + (f": {said[0]}" if said else "")
+    return state, ""
+
+
+def stop_said(unit, out):
+    """M107: systemctl's own line where it says it did not stop a unit it was told to, kept for the words.
+    RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26, a person's RefuseManualStop=yes on the forge's
+    unit): `disable --now` of the forge and the timer ENDED WITH CODE 0, took both links, stopped the timer, and said
+    on standard error "Failed to stop windstorm-mirror-forge.service: Operation refused, unit
+    windstorm-mirror-forge.service may be requested by dependency only (it is configured to refuse manual
+    start/stop)."; `stop` alone said the same and ended 4. No code tells the refusal from a stop done, so systemctl's
+    own words for that unit are kept (its "Failed to stop <unit>" line, as the masked line is read), or, for a call
+    that ended not 0, its first line that names the unit. The last call for a unit decides: one that says neither
+    takes the word away."""
+    name = unit if unit.endswith((".service", ".timer")) else unit + ".service"
+    said = [x.strip() for x in shown_lines((out.stderr or "") + "\n" + (out.stdout or ""))]
+    mine = [x for x in said if x.startswith(f"Failed to stop {name}")] or (
+        [x for x in said if name in x] if out.returncode != 0 else [])
+    if mine:
+        SYSTEMD_STOP_SAID[unit] = mine[0]
+    else:
+        SYSTEMD_STOP_SAID.pop(unit, None)
 
 
 def systemd_off(p, only=None):
@@ -2362,9 +2452,12 @@ def systemd_off(p, only=None):
     pick = [(x, w) for x, w in SYSTEMD_UNITS if only is None or x in only]
     told = [SERVICE if x is None else SYNC_UNIT + x for x, _ in pick if x != ".service"]
     del SYSTEMD_LINK_LEFT[:]
+    SYSTEMD_STOP_SAID.clear()
     if told:
         off = run(["systemctl", "--user", "disable", "--now", *told])
         answered = {u: off for u in told}
+        for u in told:
+            stop_said(u, off)
         if off.returncode != 0:
             # Seen 2026-11-26 on systemd 255 (a stock Ubuntu 24.04 guest, the forge's unit file at mode 000 while
             # systemd held it loaded): disable refuses the whole call ("Failed to disable unit: Unit file ... does
@@ -2373,8 +2466,9 @@ def systemd_off(p, only=None):
             for u in told:
                 one = run(["systemctl", "--user", "disable", "--now", u]) if len(told) > 1 else off
                 answered[u] = one
+                stop_said(u, one)
                 if one.returncode != 0:
-                    run(["systemctl", "--user", "stop", u])
+                    stop_said(u, run(["systemctl", "--user", "stop", u]))
         # A link setup's enable made that is still there is named, in systemctl's own line for that unit, whichever
         # call told it off. RECORDED on systemd 255 (a stock Ubuntu 24.04 guest, 2026-11-26): with the forge's unit
         # masked (a link to /dev/null in its place), disable --now ends with code 0, says "Unit <its file> is
@@ -2405,6 +2499,65 @@ def systemd_off(p, only=None):
                 break
             time.sleep(0.2)
     return seen
+
+
+def unit_enabled(unit):
+    """Whether systemd starts a unit by itself at a restart, read now (`systemctl --user is-enabled`), three
+    answers: 'on' for "enabled", 'off' for "disabled", and None for any other answer, with systemd's own word, said
+    as that word (it is systemd's answer, not a failed read), or, where systemd gave no word, its code and line
+    (the maintainer's ruling of 11-26: RECORDED on systemd 255, a stock Ubuntu 24.04 guest, log sha256
+    85971716290afec1, "not-found" with code 4 for a running unit whose file is at mode 000, loaded or not, while
+    its link stands; "static" for the sync's service, which has no install section)."""
+    out = run(["systemctl", "--user", "is-enabled", unit])
+    word = (lines_of(out.stdout) or [""])[0].strip()
+    if word == "enabled":
+        return "on", word
+    if word == "disabled":
+        return "off", word
+    if word:
+        return None, f"systemd: {word}"
+    said = [x.strip() for x in shown_lines(out.stderr or "")]
+    return None, f"systemctl --user answered code {out.returncode}" + (f": {said[0]}" if said else "")
+
+
+def systemd_not_now(p, units, again):
+    """M107 (G1.18), the maintainer's ruling of 11-26 on a guest's finding (a person's own RefuseManualStop=yes on the
+    forge's unit: the tool's own disable took the forge's and the timer's links, the timer was stopped, the forge
+    kept running, and the words said "Nothing was removed"): after uninstall told systemd anything and a unit is
+    not read stopped, what stands now is said unit by unit, read from systemd after the calls, never from what was
+    meant: running or stopped, and switched on for restarts or not, or systemd's own word where it is neither, or
+    that either could not be read; that no file of the mirror was removed; systemctl's own line where it said why a
+    stop was not done; the one step that brings the mirror back to running as before; and the step on, never "in a
+    minute" where systemd refused. Each command stands last on a line of its own."""
+    why, now, own, refused = [], [], [], None
+    for words, answer, waited, what in units:
+        unit = SERVICE if words == "the forge's service" else SYNC_UNIT + (".timer" if "timer" in words else
+                                                                           ".service")
+        if unit in SYSTEMD_STOP_SAID and answer != "stopped":
+            why.append(f"systemd did not stop {words}")
+            line = SYSTEMD_STOP_SAID[unit]
+            own.append(f"systemctl's own words for {words}: {line}" + ("" if line.endswith(".") else "."))
+            refused = refused or (words, unit)
+        elif answer == "running":
+            why.append(f"systemd still had {words} {what} {waited:.0f} s after it was told to stop it")
+        elif answer == "unread":
+            why.append(f"whether systemd stopped {words} could not be read (systemctl --user answered {what})")
+        state, said = unit_state(unit)
+        running = ("stopped" if state in ("inactive", "failed") else f"running ({state})" if state else
+                   f"whether it runs could not be read (systemctl --user answered {said})")
+        on, word = unit_enabled(unit)
+        boot = ("switched on for restarts" if on == "on" else "not switched on for restarts" if on == "off" else
+                f"for restarts systemd answers: {word[len('systemd: '):]}" if word.startswith("systemd: ") else
+                f"whether it is switched on for restarts could not be read ({word})")
+        now.append(f"{words}: {running}, {boot}")
+    on_word = ("To go on leaving: systemd answers so while that stands, so uninstall run again ends the same way. "
+               f"What systemd holds for {refused[0]} shows with: systemctl --user cat "
+               + (refused[1] if refused[1].endswith(".timer") else refused[1] + ".service")
+               + f"\nOnce it can be stopped, run uninstall again: {again}" if refused else
+               f"To go on leaving: run uninstall again in a minute: {again}")
+    return ("Not now: " + "; ".join(why) + ". As systemd reads them now: " + "; ".join(now) + ". No file of the "
+            "mirror was removed." + "".join(" " + x for x in own) + "\n" + on_word + "\nTo have the mirror running "
+            f"as before instead, run setup again, which keeps every copy: {own_command(p, 'setup')}")
 
 
 _setup_held = [False]           # M159: setup holds the sync's lock (main lets it go when setup ends)
@@ -6166,6 +6319,15 @@ def cmd_uninstall(args):
     # M150: a launch agent file at the skill's path that could not be read never keeps a person from leaving; while
     # it stands, uninstall takes off and removes only what it can show to be this home's own (below).
     limit = found if found and found[2] else None
+    # M163 (G9.18; seen 2026-11-26 on a stock Ubuntu 24.04 guest, systemd 255): the forge's unit file at mode 000
+    # while systemd held it loaded with this home's start line read as no other install, and uninstall switched off
+    # the sync's service, which named another home's copy, and its timer. On Linux the unreadable-file road is
+    # taken from the file's own read, never from what systemd shows for it (other_install reads systemd's start
+    # line first, and a start line of this home's made it no other install).
+    if found is None and system()[0] != "darwin" and os.path.lexists(p["unit"]):
+        fstate, fwhy = service_file_state(p, read_made(p)[0], p["unit"])
+        if fstate == "could not be read":
+            limit = ("", p["unit"], fwhy)
     other = None if limit else other_install_stop(p, "uninstall", found)
     if other:
         say(other)
@@ -6256,7 +6418,7 @@ def cmd_uninstall(args):
             # M163 (G9.18): while the forge's unit could not be read, a unit is told off only when systemd's own start
             # line for it names this home's copy (the timer with the sync's service); one that names another copy, or
             # none, is named and left as it is, its file with it; one systemd could not answer for is a "Not now".
-            only, kept_files, base = None, set(), os.path.dirname(p["unit"])
+            only, kept_files, base, left_running = None, set(), os.path.dirname(p["unit"]), []
             if limit:
                 both = (("forge", SERVICE + ".service", p["unit"], "the forge's service", (None,)),
                         ("sync", SYNC_UNIT + ".service", os.path.join(base, SYNC_UNIT + ".service"),
@@ -6270,6 +6432,28 @@ def cmd_uninstall(args):
                         f"home's. Nothing was removed and nothing was taken off. The one next step: move {limit[1]} "
                         f"out of {os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run "
                         f"uninstall again: {again}")
+                    return 3
+                # M163, the maintainer's ruling of 11-26 on a guest's finding (the forge's unit not loaded, active, one
+                # forge process, said "so it runs nothing"): a unit with no start line shown runs nothing only when
+                # systemd itself reads it inactive or failed. In any other state, or one that could not be read,
+                # uninstall cannot show whose it is: a "Not now" with its step, before anything is removed or told.
+                unseen = []
+                for which, unit, f, words, suffixes in both:
+                    if not held[which][0]:
+                        state, said = unit_state(SERVICE if which == "forge" else unit)    # as systemd_off reads it
+                        if state not in ("inactive", "failed"):
+                            unseen.append(f"systemd still has {words} ({unit}) {state}" if state else
+                                          f"whether systemd still runs {words} ({unit}) could not be read "
+                                          f"(systemctl --user answered {said})")
+                if unseen:
+                    again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
+                    say("Not now: " + "; ".join(unseen) + "; systemd shows no start line for "
+                        + ("it" if len(unseen) == 1 else "them") + f", and {limit[1]} could not be read either "
+                        f"({limit[2]}), so uninstall cannot show whose "
+                        + ("it is or what it runs" if len(unseen) == 1 else "they are or what they run") + ". "
+                        f"Nothing was removed and nothing was taken off. The one next step: move {limit[1]} out of "
+                        f"{os.path.dirname(limit[1])} (into a folder of your own, to keep it), then run uninstall "
+                        f"again: {again}")
                     return 3
                 only = []
                 for which, unit, f, words, suffixes in both:
@@ -6286,6 +6470,8 @@ def cmd_uninstall(args):
                         runs = ("which systemd runs another copy than this home's" if held[which][0] else
                                 "for which systemd shows no start line, so it runs nothing")
                         timer = f", with the sync's timer ({SYNC_UNIT}.timer)" if which == "sync" else ""
+                        if held[which][0]:
+                            left_running.append(f"{words} ({unit})")
                         kept.append(f"{words} ({unit}), {runs}{timer}" + (
                             f", and {'its file' if len(there) == 1 else 'their files'} " + " and ".join(there)
                             if there else ", with no file of it left"))
@@ -6294,19 +6480,21 @@ def cmd_uninstall(args):
             if any(answer != "stopped" for _, answer, _, _ in units):
                 said, no_bus = [], False
                 for words, answer, waited, what in units:
-                    if answer == "stopped":
-                        said.append(f"{words} is stopped, and its file stays too")
-                    elif answer == "running":
-                        said.append(f"systemd still had {words} {what} {waited:.0f} s after it was told to stop it")
-                    else:
-                        said.append(f"whether systemd stopped {words} could not be read (systemctl --user answered "
-                                    f"{what})")
+                    if answer == "unread":
                         no_bus = no_bus or bool(NO_USER_BUS.search(what))
                 again = own_command(p, "uninstall", *(["--delete-copies"] if args.delete_copies else []))
-                say("Not now: " + "; ".join(said) + ". Nothing was removed. " + (
-                    "This shell cannot reach your account's own systemd (it has no user bus), so run uninstall again "
-                    f"from a login of your own to this computer, such as ssh or a terminal at the screen: {again}"
-                    if no_bus else f"Run uninstall again in a minute: {again}"))
+                if no_bus:
+                    # G1.18: with no user bus nothing reached systemd, so nothing was changed: these words stay
+                    for words, answer, waited, what in units:
+                        said.append(f"{words} is stopped, and its file stays too" if answer == "stopped" else
+                                    f"systemd still had {words} {what} {waited:.0f} s after it was told to stop it"
+                                    if answer == "running" else f"whether systemd stopped {words} could not be read "
+                                    f"(systemctl --user answered {what})")
+                    say("Not now: " + "; ".join(said) + ". Nothing was removed. This shell cannot reach your "
+                        "account's own systemd (it has no user bus), so run uninstall again from a login of your own "
+                        f"to this computer, such as ssh or a terminal at the screen: {again}")
+                    return 3
+                say(systemd_not_now(p, units, again))
                 return 3
             told += [words for words, _, _, _ in units]
             for f in (p["unit"], os.path.join(base, SYNC_UNIT + ".service"), os.path.join(base, SYNC_UNIT + ".timer")):
@@ -6314,15 +6502,12 @@ def cmd_uninstall(args):
                     continue                    # M150: named on its own below, and left byte for byte; M163: named
                 take_service_file(p, f, removed, left_service)
             run(["systemctl", "--user", "daemon-reload"])
-            if st.get("linger_by_setup"):
-                if run(["loginctl", "disable-linger", getpass.getuser()]).returncode == 0:
-                    linger_said = "Lingering was switched on by setup, and is switched off again."
-                else:
-                    linger_said = ("Lingering was switched on by setup, and could not be switched off: run "
-                                   f"loginctl disable-linger {getpass.getuser()}")
-            elif st.get("linger_by_setup") is False:
-                linger_said = "Lingering was already on before setup, so it is left on."
-            st.pop("linger_by_setup", None)
+            # M163 and M186 (the maintainer's rulings of 11-26): one sentence of lingering for
+            # every road, from uninstall_linger; what is left running as another copy's keeps lingering on, and the
+            # record of it is kept for a later uninstall
+            linger_said = uninstall_linger(st, record, left_running)
+            if not left_running:
+                st.pop("linger_by_setup", None)
             if record == "read" and os.path.exists(p["state"]) and not lost:
                 save_state(p, st)
         # Rule 23: what the skill made, by its record, read now (a person's file may have arrived since setup).

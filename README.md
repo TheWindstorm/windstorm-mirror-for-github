@@ -231,10 +231,12 @@ with no key; a sync and a restore on a Mac are not seen yet.
   - a sync and a restore with 0.1.0's own tool on a Mac: not seen by us; they need a key, and wait for a
     fine-grained read-only one. Seen with it on a Mac: setup, status and uninstall in a test account with no key
     (above), and the test suite on GitHub's macOS runners, against a stand-in for GitHub;
-  - a fine-grained read-only key on a real account: not seen by us. On the rounds against the real GitHub, a
-    broader key of ours stood in for it; the tool asks GitHub the same questions with either;
-  - GitHub's own answer about when such a key ends: not seen by us. The tests use a stand-in for that answer; when
-    the end date cannot be read, the tool says so and promises no warning;
+  - a fine-grained read-only key on a real account: not seen by us, and so not yet proven with a person's own
+    read-only key; that proof is due in 0.1.1. On the rounds against the real GitHub, a broader key of ours stood
+    in for it; the tool asks GitHub the same questions with either;
+  - GitHub's own answer about when such a key ends: not seen by us; its proof with a person's own read-only key is
+    due in 0.1.1. The tests use a stand-in for that answer; when the end date cannot be read, the tool says so and
+    promises no warning;
   - a first copy from GitHub on a Mac in a person's own account, and the copy coming back after a Mac's restart
     with the skill itself: not seen by us. Seen instead: first copies and restore --check with the real pinned
     Gitea on GitHub's macOS runners, against a stand-in for GitHub; and setup, status and uninstall in a Mac test
